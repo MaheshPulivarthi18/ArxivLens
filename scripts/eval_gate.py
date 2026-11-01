@@ -67,6 +67,8 @@ def check_thresholds(results: Dict[str, Any], thresholds: Dict[str, Any]) -> Lis
     checks.append(_check("correct_refusal_rate", a.get("correct_refusal_rate"),
                          ">=", thresholds["correct_refusal_rate_min"]))
     checks.append(_check("ask_p95_ms", a.get("ask_p95_ms"), "<", thresholds["ask_p95_latency_ms_max"]))
+    # Failed/timed-out calls would otherwise only dilute the rates; any failure fails the gate.
+    checks.append(_check("ask_errors (answer + refusal sets)", a.get("ask_error_count"), "==", 0))
     return checks
 
 

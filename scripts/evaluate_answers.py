@@ -8,12 +8,14 @@ query service, and reports:
   - expected_paper_hit_rate  : answers citing at least one expected arXiv ID
   - answer_refusal_rate      : in-corpus questions that were refused (informational)
   - correct_refusal_rate     : out-of-corpus questions refused (no citations returned)
-  - ask_p50_ms / ask_p95_ms  : latency over successful /v1/ask calls (None if none succeeded)
+  - ask_p50_ms / ask_p95_ms  : latency over every /v1/ask call, failed ones included at their elapsed
+                               time (timeouts count as >= the timeout); None only if nothing was called
+  - ask_error_count          : failed calls (HTTP error, timeout, bad JSON); the gate requires 0
 
 Response shape (internal/query/rag.go AskResponse):
   {"answer": str, "citations": [{"marker", "arxiv_id", "supported", ...}], "trace_id": str}
 A refusal is a response with zero citations (rag.go returns an empty list when it refuses).
-A failed request never counts as a correct refusal or a supported citation.
+A failed request never counts as a correct refusal, a hit, or a supported citation.
 
 Stdlib only; no infra needed for --help.
 """
@@ -34,7 +36,7 @@ DEFAULT_API = os.getenv("ARXIVLENS_API_URL", "http://localhost:8080")
 
 _VERSION_SUFFIX = re.compile(r"v\d+$")
 
-# ask_fn(question) -> (response dict or None on error, latency_ms)
+# ask_fn(question) -> (response dict or None on error, latency_ms incl. failed calls)
 AskFn = Callable[[str], Tuple[Optional[Dict[str, Any]], float]]
 
 
@@ -70,26 +72,32 @@ def make_http_ask(api_url: str, timeout_s: float, max_citations: int = 5) -> Ask
         try:
             with urllib.request.urlopen(req, timeout=timeout_s) as r:
                 data = json.loads(r.read().decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError, ValueError, OSError):
-            return None, (time.perf_counter() - t0) * 1000
+        except (urllib.error.URLError, TimeoutError, ValueError, OSError) as e:
+            ms = (time.perf_counter() - t0) * 1000
+            reason = getattr(e, "reason", e)
+            if isinstance(e, TimeoutError) or isinstance(reason, TimeoutError):
+                ms = max(ms, timeout_s * 1000)  # a timeout costs at least the full timeout
+            return None, ms
         return data, (time.perf_counter() - t0) * 1000
 
     return ask
 
 
 def evaluate(answer_cases: List[Dict[str, Any]], refusal_cases: List[Dict[str, Any]], ask: AskFn) -> Dict[str, Any]:
-    latencies: List[float] = []
+    latencies: List[float] = []  # every call, failed ones included
     errors: List[str] = []
+    ok = 0
     total_citations = supported_citations = hits = refused_answers = 0
     misses: List[str] = []
 
     for case in answer_cases:
         resp, ms = ask(case["question"])
+        latencies.append(ms)
         if resp is None:
             errors.append(case["id"])
             misses.append(case["id"])
             continue
-        latencies.append(ms)
+        ok += 1
         citations = resp.get("citations") or []
         if not citations:
             refused_answers += 1
@@ -105,11 +113,12 @@ def evaluate(answer_cases: List[Dict[str, Any]], refusal_cases: List[Dict[str, A
     false_answers: List[str] = []
     for case in refusal_cases:
         resp, ms = ask(case["question"])
+        latencies.append(ms)
         if resp is None:
             errors.append(case["id"])
             false_answers.append(case["id"])
             continue
-        latencies.append(ms)
+        ok += 1
         if is_refusal(resp):
             correct_refusals += 1
         else:
@@ -126,7 +135,8 @@ def evaluate(answer_cases: List[Dict[str, Any]], refusal_cases: List[Dict[str, A
         "citations_total": total_citations,
         "answer_cases": n_ans,
         "refusal_cases": n_ref,
-        "requests_ok": len(latencies),
+        "requests_ok": ok,
+        "ask_error_count": len(errors),
         "error_case_ids": errors,
         "expected_paper_miss_ids": misses,
         "refusal_failure_ids": false_answers,

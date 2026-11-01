@@ -91,7 +91,8 @@ def _results(recall=0.85, supported=0.95, refusal=1.0, p95=1200.0, evaluated=34)
             "Hybrid RRF + Rerank": _mode(recall, 0.8, 0.8),
         }},
         "answers": {"supported_citation_rate": supported, "correct_refusal_rate": refusal,
-                    "ask_p95_ms": p95, "ask_p50_ms": 500.0, "expected_paper_hit_rate": 0.9},
+                    "ask_p95_ms": p95, "ask_p50_ms": 500.0, "expected_paper_hit_rate": 0.9,
+                    "ask_error_count": 0},
     }
 
 
@@ -137,16 +138,47 @@ def test_answer_metrics_with_stub_ask():
     assert m["correct_refusal_rate"] == 0.5
     assert m["error_case_ids"] == ["a2"]
     assert m["requests_ok"] == 3
+    assert m["ask_error_count"] == 1
     assert m["ask_p95_ms"] == 100.0
 
 
-def test_failed_requests_do_not_count_as_fast_or_refused():
-    m = evaluate_answers.evaluate([], [{"id": "x1", "question": "r1"}], lambda q: (None, 1.0))
+def test_failed_requests_count_in_latency_and_not_as_refusals():
+    m = evaluate_answers.evaluate([], [{"id": "x1", "question": "r1"}], lambda q: (None, 30000.0))
     assert m["correct_refusal_rate"] == 0.0
-    assert m["ask_p95_ms"] is None
+    assert m["ask_p95_ms"] == 30000.0  # timeouts are recorded at their elapsed time
+    assert m["ask_error_count"] == 1
     res = _results()
     res["answers"]["ask_p95_ms"] = None
     assert not all(c["passed"] for c in eval_gate.check_thresholds(res, eval_gate.load_thresholds()))
+
+
+def test_gate_fails_when_some_answer_requests_fail_even_if_refusals_perfect():
+    answers = [{"id": f"a{i}", "question": f"q{i}", "expected_arxiv_ids": ["1706.03762"]} for i in range(22)]
+    refusals = [{"id": f"x{i}", "question": f"r{i}"} for i in range(22)]
+    good = {"answer": "A [1].", "citations": [{"marker": 1, "arxiv_id": "1706.03762", "supported": True}]}
+
+    def ask(q):
+        if q.startswith("r"):
+            return {"answer": "No indexed papers are relevant to this question.", "citations": []}, 50.0
+        if int(q[1:]) < 2:  # 2 of 22 in-corpus calls fail fast; the rest are perfect
+            return None, 10.0
+        return good, 100.0
+
+    m = evaluate_answers.evaluate(answers, refusals, ask)
+    assert m["correct_refusal_rate"] == 1.0 and m["supported_citation_rate"] == 1.0
+    res = _results()
+    res["answers"] = m
+    checks = {c["metric"]: c for c in eval_gate.check_thresholds(res, eval_gate.load_thresholds())}
+    assert not checks["ask_errors (answer + refusal sets)"]["passed"]
+    assert not all(c["passed"] for c in checks.values())
+
+
+def test_http_ask_records_timeout_at_least_timeout(monkeypatch):
+    def boom(*a, **k):
+        raise evaluate_answers.urllib.error.URLError(TimeoutError("timed out"))
+    monkeypatch.setattr(evaluate_answers.urllib.request, "urlopen", boom)
+    resp, ms = evaluate_answers.make_http_ask("http://127.0.0.1:9", timeout_s=2.0)("q")
+    assert resp is None and ms >= 2000.0
 
 
 def test_percentile_nearest_rank():
