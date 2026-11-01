@@ -51,3 +51,39 @@ Yes. `evals/thresholds.json` matches Product PRD §8 exactly: Recall@5 ≥ 0.80,
 
 ## Hand-off
 PASS → pm-lead final review, with these conditions: (a) confirm or create the backend ticket for findings 1 and 2; (b) decide the Recall@5 definition (finding 5) before the first live baseline is recorded.
+
+## PM decision — pm-lead, 2026-11-01
+
+**Verdict: APPROVE** (QA round 1 PASS; reviewed head `dc1fe80`, evidence pack `9d34b50`).
+
+**Product fit.** PRD §8 had targets with nothing versioned behind them. After this PR, every Quality row and the `/v1/ask` p95 row has a dataset under `evals/` and a gated key in `evals/thresholds.json` that matches §8 exactly ([10](evidence/10-thresholds-vs-prd.png)). There is also one command, `make eval` → `scripts/eval_gate.py`, that exits 0 / 1 / 2. That is what the team needs before QA-8 (LLM synthesis) or any retrieval change can be judged on numbers. The gate fails closed: a missing metric, a partial run, any `/v1/ask` error, or retrieval coverage below 1.0 all fail it. This matches the PRD §7 principle of saying "I don't know" rather than overstating. Scope is right. The PR changes no retrieval logic, no `rag.go` and no thresholds. The 811-line size is about 140 lines of data plus one cohesive feature, so I accept it without a split (QA finding 4). I opened all 15 evidence images, and each one shows what the report claims. AC1, AC2 and AC4 are proven. AC3 is proven for everything that can run without infra (`--help`, exit 2 without a stack, 20 unit tests, 10 of 11 mutations caught). The live 0/1 run is explicitly allowed to wait for infra by the ticket's verification block. AC5 is not on this branch. That is acceptable because the ticket allowed the "request in Notes" path for backend-owned files, and **OPS-H4 (KAN-16) covers it word for word**: its AC1 is `git check-ignore evals/results/x.json`, and its AC2 adds `tests/test_evals_data.py` to `make test-py`.
+
+**QA nit 3 (misleading comment at `scripts/eval_gate.py:23`): not blocking.** It is a comment, not behaviour. The bi-encoder rerank is pre-existing on `main` ([14](evidence/14-rerank-mode-mismatch.png)). EVAL-2 already requires that mode to call `/internal/rerank` or be renamed and ungated, which removes the inaccuracy. Another rework round for one comment would cost more than it is worth.
+
+### QA findings → owner
+| # | Finding | Tag | Owner ticket / ADR | Status |
+|---|---|---|---|---|
+| 1 | `tests/test_evals_data.py` not run in CI / `make test-unit` | spec | **OPS-H4** (KAN-16), AC2 | Ready once #2 merges |
+| 2 | AC5: `evals/results/` not git-ignored | spec | **OPS-H4** (KAN-16), AC1 | Ready once #2 merges |
+| 3 | `eval_gate.py:23` comment says the gated mode is what `/v1/ask` uses | nit | **EVAL-2** (KAN-12): rerank mode moves to `/internal/rerank` or is renamed and ungated | Non-blocking |
+| 4 | 811 changed lines (> 400) | nit | none, accepted | Accepted |
+| 5 | Recall@5 is chunk-level (behaves like precision@5) | spec | **ADR-0006** (Proposed, recommends option 3: gate paper-level recall, report chunk precision@5) | Needs Mahesh's decision |
+| 6a | `/v1/search` p95 not gated | spec | **EVAL-2** (KAN-12) | Ready once #2 merges |
+| 6b | Ingest < 60 s not gated | spec | PRD §8 on PR #3 marks it "Not automated" with a manual command | No new ticket. Owner's call whether to automate |
+| 6c | PRD §8 "Measured with …" stale | spec | **PR #3 (PM-1)** rewrites §8 with datasets and commands | Done on PR #3 |
+| 6d | AGENTS.md §5 gotcha "eval queries are hardcoded" stale | spec | **pm-lead docs follow-up**: still present on PM-1 too. After #2 merges, I remove it and flip §8's "pending EVAL-1" line | New small pm-lead docs change, no code |
+| 7 | `rag.go` marks citations supported when the embedder fails | spec | **AI-2** (KAN-10) | Ready after AI-1 |
+| 8 | arXiv `2608.20331` / `2608.20320` content unverified | nit | Check during the first live baseline (`evals/BASELINE.md` commands) | Human run |
+| — | Missing tests: exact-threshold `>=` boundary (mutation survived), `main()` end to end, zero-citation set, malformed JSONL, HTTP 500/non-JSON | — | Fold into **EVAL-2** (it adds `tests/test_eval_gate.py`). pm-lead will add an AC when grooming | Spec update pending |
+
+### What Mahesh should focus on
+- **Recall@5 definition (ADR-0006).** Decide it *before* the first baseline goes into `evals/BASELINE.md`. Today the gated number is chunk-level, and the 0.80 target will probably fail on multi-paper topics for reasons unrelated to quality.
+- **The gate semantics are strict by design.** Retrieval coverage must be 1.0 (every corpus paper indexed), and any `/v1/ask` error fails the run. Confirm that this is the behaviour you want from `make eval`.
+- **First live run.** Use the commands in `evals/BASELINE.md`. Nothing has been run against a real stack, so dataset quality (queries vs. real retrieval) is unproven until you run it.
+- `scripts/evaluate_retrieval.py` and the new `scripts/evaluate_answers.py`/`eval_gate.py` are where to spot-check; the data files are mechanical.
+
+### Merge order
+1. Merge **#2 (EVAL-1)** first. OPS-H4, EVAL-2 and the QA-8 baseline all depend on it.
+2. Then **#3 (PM-1)**. Its PRD §8 text says "pending EVAL-1", and pm-lead flips that line and the AGENTS.md §5 gotcha right after.
+3. **OPS-H4** starts only after #2 is on `main`, because it edits the Makefile to run a test file that #2 adds. Until OPS-H4 merges, nothing in CI protects the eval data, so OPS-H4 is the next backend pick.
+4. Record the baseline after ADR-0006 is decided (or record both definitions if you defer the decision).
