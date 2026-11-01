@@ -213,6 +213,19 @@ python scripts/benchmark_hnsw.py           # pgvector HNSW ef_search sweep (p50/
 
 ---
 
+## Development with the agent team
+
+ArxivLens is developed by four AI agents (PM/lead, AI engineer, backend & distributed-systems engineer, frontend engineer)
+coordinated through files in this repo, with a human merging every PR.
+
+- [`AGENTS.md`](AGENTS.md): rules, ownership, commands, Definition of Done (read first by every agent session)
+- [`agents/`](agents/README.md): task board, task specs, progress log, lessons, metrics
+- [`docs/adr/`](docs/adr/): decisions waiting for (or made by) the human owner
+- `.claude/agents/` role definitions · `/sprint` runs one cycle · `/retro` turns friction into improvements
+- `make help` lists the harness targets used by agents and CI
+
+---
+
 ## Known limitations
 
 - `/v1/ask` builds its answer **from a template** over the top reranked chunks. It does not call an LLM yet, though the citation validation pipeline is in place for when one is added.

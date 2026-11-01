@@ -80,12 +80,12 @@ type PaperDiscoveredPayload struct {
 
 // PaperDownloadedPayload payload for papers.downloaded
 type PaperDownloadedPayload struct {
-	ArxivID        string `json:"arxiv_id"`
-	Version        int    `json:"version"`
-	PDFStorageKey  string `json:"pdf_storage_key"`
-	SHA256         string `json:"sha256"`
-	Bytes          int64  `json:"bytes"`
-	StorageBucket  string `json:"storage_bucket"`
+	ArxivID       string `json:"arxiv_id"`
+	Version       int    `json:"version"`
+	PDFStorageKey string `json:"pdf_storage_key"`
+	SHA256        string `json:"sha256"`
+	Bytes         int64  `json:"bytes"`
+	StorageBucket string `json:"storage_bucket"`
 }
 
 // PaperChunkedPayload payload for papers.chunked
