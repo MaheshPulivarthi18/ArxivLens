@@ -6,7 +6,9 @@
 | **Priority** | P0 / P1 / P2 |
 | **PRD ref** | e.g. QA-8, Technical PRD §11 |
 | **Depends on** | task IDs and/or ADR numbers (must be Done / Accepted) |
-| **Status** | Ready / In progress / In review / Blocked (reason) / Done |
+| **Jira** | `KAN-n` (find with JQL `labels = "task-<ID>"`) |
+| **Design required** | yes / no — yes if P0, new CLI/table/service, or a shared contract changes |
+| **Status** | Ready / Design / In progress / In QA / PM review / Ready to merge / Blocked (reason) / Done |
 
 ## Goal
 One or two sentences: the user-visible or system outcome, and why it matters.

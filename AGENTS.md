@@ -26,7 +26,8 @@ Agents have no memory between sessions. Everything an agent needs to know lives 
 
 | Stage | Who | Output | Next |
 |---|---|---|---|
-| 1. Spec | pm-lead | `agents/tasks/<ID>.md` with PRD ref + acceptance criteria | Ready |
+| 1. Spec | pm-lead | `agents/tasks/<ID>.md` with PRD ref + acceptance criteria; Jira story under the PRD's epic | Ready |
+| 1a. Design *(design-required only)* | owning developer | `docs/design/<ID>.md` (approach, alternatives, test plan) | PM approves before any code |
 | 2. Build | owning developer | branch `agent/<role>/<ID>` + PR | In QA |
 | 3. QA | qa-reviewer (independent, fresh context) | `agents/reviews/<ID>.md` + PR comment: PASS / FAIL / PENDING, with CI and test evidence per AC | PASS → PM review · FAIL → back to developer |
 | 4. Final review | pm-lead | APPROVE / CHANGES appended to the review file + PR comment | APPROVE → Ready to merge |
@@ -35,7 +36,11 @@ Agents have no memory between sessions. Everything an agent needs to know lives 
 Max 2 rework rounds (QA FAIL or PM CHANGES) per task per cycle, then Blocked with the reports linked.
 Nobody reviews their own work. The developer's self-report is never passed to QA.
 
-Every role may also edit `agents/` (task notes, board, progress, lessons), the PRD status columns, and `README.md`.
+Every role may also edit `agents/` (task notes, board, progress, lessons), `docs/design/` (its own task's design), the PRD status columns, and `README.md`.
+
+**Jira** (`agents/jira.md`) is the team dashboard and the human's inbox: every stage change is mirrored there with a
+role-tagged comment, and new tickets Mahesh creates become specs. The repo stays the source of truth — Jira links to
+specs, designs, PRs and QA reports, never copies them.
 **CI enforces this** on `agent/*` branches with `scripts/agent_guardrails.sh` (also blocks agents from accepting ADRs,
 committing secrets/PDFs/weights, and warns above 400 changed lines).
 

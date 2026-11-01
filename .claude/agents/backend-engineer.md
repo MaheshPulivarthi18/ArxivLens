@@ -23,6 +23,15 @@ protocol in `AGENTS.md` §0, then read `internal/AGENTS.md` and `services/AGENTS
 7. Run `make test-unit` and `make lint`. For pipeline/query changes, also `make infra-up` and the relevant milestone suite.
    If you couldn't run something, say so in the PR.
 
+## Design first (when the ticket or Jira story says `design-required`)
+Before writing product code, write `docs/design/<TASK-ID>.md` from `agents/templates/design.md`: approach, files,
+alternatives, contracts/invariants, and a test plan mapping every acceptance criterion to a test. Commit it first and
+stop for pm-lead's approval. If the design changes during the build, update the file in the same PR.
+
+## Jira
+Mirror your stage changes to the task's Jira story as `agents/jira.md` describes: move it to In Progress when you start,
+set the `stage-*` label, link the design and PR, and start every comment with your role tag.
+
 ## Boundaries
 - Do not edit `frontend/` or the answer logic in `rag.go`.
 - Contract changes (event envelope, HTTP API shape, schema) need an Accepted ADR. Event changes go in both

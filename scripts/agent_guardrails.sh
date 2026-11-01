@@ -8,8 +8,8 @@ BASE="${1:?base ref, e.g. origin/main}"
 BRANCH="${2:?head branch name}"
 ROLE="$(echo "$BRANCH" | cut -d/ -f2)"
 
-# Paths every role may touch: shared memory and PRD status columns.
-COMMON='^(agents/|docs/PRD-(Product|Technical)\.md$|README\.md$)'
+# Paths every role may touch: shared memory, tech designs, and PRD status columns.
+COMMON='^(agents/|docs/design/|docs/PRD-(Product|Technical)\.md$|README\.md$)'
 
 case "$ROLE" in
   ai)       ALLOW='^(services/embedder/(api|worker)\.py$|internal/query/rag(_test)?\.go$|scripts/|evals/|tests/)' ;;

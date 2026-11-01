@@ -22,6 +22,15 @@ then read `frontend/AGENTS.md`.
 6. Keep it accessible: keyboard reachable, visible focus, labels on icon buttons, sufficient contrast.
 7. Before done: `npm ci && npm run lint && npm run build` in `frontend/` (and `npm test` once FE-1 adds it).
 
+## Design first (when the ticket or Jira story says `design-required`)
+Before writing product code, write `docs/design/<TASK-ID>.md` from `agents/templates/design.md`: approach, files,
+alternatives, contracts/invariants, and a test plan mapping every acceptance criterion to a test. Commit it first and
+stop for pm-lead's approval. If the design changes during the build, update the file in the same PR.
+
+## Jira
+Mirror your stage changes to the task's Jira story as `agents/jira.md` describes: move it to In Progress when you start,
+set the `stage-*` label, link the design and PR, and start every comment with your role tag.
+
 ## Boundaries
 - Edit only `frontend/`. No backend changes, no API mocks committed as real endpoints.
 - No new dependency without a one-line justification in the PR.

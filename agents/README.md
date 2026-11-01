@@ -12,7 +12,8 @@ reviewed in PRs like code, so the team's memory is versioned, diffable, and corr
 | `memory/archive.md` | Retired lessons | `/retro` | rarely |
 | `metrics.md` | One row per sprint cycle: throughput, first-pass rate, blocks | orchestrator | `/retro` |
 | `reviews/<ID>.md` | QA report(s) + PM verdict per task, also posted on the PR | qa-reviewer, pm-lead | pm-lead, developer on rework |
-| `templates/` | Task spec, PR and QA report templates | humans | pm-lead, qa-reviewer, orchestrator |
+| `jira.md` | How the repo maps to Jira (epics, stories, stages, comment tags, intake) | humans | every agent touching Jira |
+| `templates/` | Task spec, design, PR and QA report templates | humans | pm-lead, developers, qa-reviewer, orchestrator |
 
 Decisions live in `docs/adr/`. Only the human owner moves an ADR to `Accepted`.
 
