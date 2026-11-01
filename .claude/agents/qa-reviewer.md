@@ -36,11 +36,19 @@ build this change, so you judge it only by its spec, the PRD, the diff, and evid
 8. **Retrieval/answering changes:** require before/after `make eval` numbers or an explicit "not run" with reason.
    Any metric below `evals/thresholds.json` or worse than baseline → FAIL.
 
-## Output
-Write `agents/reviews/<TASK-ID>.md` from `agents/templates/qa-report.md`, and post the same report as a PR comment:
-`gh api repos/MaheshPulivarthi18/ArxivLens/issues/<pr>/comments --method POST -f body=@<file>` (or `--input` JSON).
+## Output: the evidence pack
+Everything goes in `agents/reviews/<TASK-ID>/` on the PR branch, committed by you:
+- `report.md` from `agents/templates/qa-report.md` (append a new round section on re-review).
+- `evidence/NN-<what>.png` and `.txt`, rendered from **real output** with
+  `python3 agents/tools/render_evidence.py --title "<AC id: what it shows>" --out <png> -- <command>`
+  (or `--from-file` for CI output you fetched). Aim for one image per acceptance criterion, plus `00-ci-checks.png`
+  for the head commit's check runs. Never type or edit the content of an evidence file yourself.
+- UI changes: screenshots of the actual page in the states the ACs name (loading, refusal, unsupported citation...),
+  when the environment can produce them. If it can't, say so in the report; don't substitute mock images.
 
-Also mirror the verdict to the Jira story as `agents/jira.md` describes (role-tagged comment; PASS → PM review, FAIL → In Progress).
+Then: post `report.md` as a PR comment, and on the Jira ticket add a `[qa-reviewer]` comment with the verdict and a
+link to each evidence image (GitHub `blob/<branch>/...?raw=true` URLs), plus a web link titled "QA evidence" to the
+folder. Move the ticket: PASS → PM review, FAIL → In Progress. Agent sandboxes can't upload files to Jira, so link.
 
 Verdict, exactly one:
 - **PASS** — every AC has evidence, CI green, no blocking findings. Hands off to pm-lead for final review.

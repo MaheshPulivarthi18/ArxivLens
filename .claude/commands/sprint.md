@@ -66,7 +66,8 @@ For each selected new task and each rework item, sequentially:
    and anything you could not verify and why."
 3. Sanity-check `git diff --stat origin/main` and run `scripts/agent_guardrails.sh origin/main agent/<role>/<TASK-ID>`.
    Fix ownership violations before pushing.
-4. Commit `<TASK-ID>: <summary>`, push, and open the PR (new tasks) with `agents/templates/pr.md`, or push to the
+4. Commit `<TASK-ID>: <summary>`, push, and open the PR as a **draft** (`"draft": true` in the REST call; new tasks)
+   with `agents/templates/pr.md`, or push to the
    existing PR (rework). **Never merge. Never push to main.** Board: **In QA**.
    Jira: **In QA**; set `**PR:** #n` in the story description; comment `[<role>] PR #n opened → <link>`.
 
@@ -75,22 +76,33 @@ For each PR queued for QA, invoke `qa-reviewer` with only: PR number, branch, he
 rows, and the approved design doc if one exists. Do **not** pass the developer's self-report — QA judges from the spec,
 the PRD, the design, the diff and the evidence.
 - CI not finished → wait for it if the cycle has time (poll check runs every ~60 s, up to 15 min), else `PENDING`.
-- QA commits its report to `agents/reviews/<TASK-ID>.md` on the PR branch and posts it as a PR comment.
+- QA builds the **evidence pack** in `agents/reviews/<TASK-ID>/` on the PR branch: `report.md` plus
+  `evidence/NN-<name>.png` (+ `.txt` with the full output) rendered from real output with
+  `python3 agents/tools/render_evidence.py`: one image per acceptance criterion where possible, plus the CI check
+  runs for the head commit. UI changes also need screenshots of the actual page when the environment can produce them;
+  otherwise the report says so. QA commits the pack, posts the report as a PR comment, and on the Jira ticket adds a
+  role-tagged comment listing every evidence file link plus a web link "QA evidence" to the folder
+  (`createJiraIssueRemoteIssueLink`). Agent sandboxes cannot upload files to Jira (the media host is blocked), so
+  evidence is linked, never pasted or summarised from memory.
 - **PASS** → Step 6. **FAIL** → one rework round by the owner in this cycle (Step 4), then QA again.
   Second FAIL → **Blocked** with the report linked. **PENDING** → stays In QA for next cycle.
 - Jira: comment `[qa-reviewer] PASS|FAIL|PENDING — <one-line reason> → <review file link>`; PASS → **PM review**;
   FAIL → back to **In Progress**.
 
-## Step 6 — PM review (delegate to `pm-lead`)
-Give `pm-lead` the ticket, the PRD rows, the diff summary, and the QA report. pm-lead checks product fit, scope, docs,
-and that QA's evidence covers every AC. Verdict appended to `agents/reviews/<TASK-ID>.md` and posted as a PR comment:
-- **APPROVE** → board **Ready to merge**; add the PR label `ready-to-merge` if the API allows it
-  (`gh api repos/MaheshPulivarthi18/ArxivLens/issues/<pr>/labels --method POST -f 'labels[]=ready-to-merge'`).
-- **CHANGES** → rework round (Step 4) → QA → PM again. Counted toward the 2-round limit.
-- Jira: comment `[pm-lead] APPROVE|CHANGES — …`; APPROVE → **Ready to merge**; CHANGES → **In Progress**.
+## Step 6 — PM review and raise the PR (delegate to `pm-lead`)
+Give `pm-lead` the ticket, the PRD rows, the approved design (if any), the diff summary and the QA evidence pack.
+pm-lead opens every evidence file and checks product fit, scope, docs, and that each AC has convincing evidence.
+- **APPROVE** → pm-lead rewrites the PR description from `agents/templates/pr.md` with an **Evidence** section: one row
+  per AC with its screenshot embedded (`![](https://github.com/MaheshPulivarthi18/ArxivLens/blob/<branch>/agents/reviews/<ID>/evidence/<file>.png?raw=true)`),
+  CI check results, the QA verdict and the PM verdict. Then it **raises the PR**: marks it ready for review with
+  `gh api -X POST repos/MaheshPulivarthi18/ArxivLens/pulls/<n>/ccr/ready_for_review`, and adds the label
+  `ready-to-merge` if the API allows. Jira → **Ready to merge** + `[pm-lead] APPROVE — PR #n raised for review → link`.
+- **CHANGES** → numbered list appended to `report.md`, PR stays draft, Jira → **In Progress**, rework round (Step 4)
+  → QA → PM again. Counted toward the 2-round limit.
 
-## Step 7 — Merge gate (human)
-Agents never merge. The human merges PRs labelled/listed as **Ready to merge**. Next cycle's Step 2 moves them to Done.
+## Step 7 — PR review and merge (human)
+Agents never merge. The human reviews PRs that are ready for review (not draft) with the evidence in the description,
+then merges or comments. A human comment sends the task back to Step 4. Next cycle's Step 2 moves them to Done.
 
 ## Step 8 — Record
 On a branch `agent/pm/board-<YYYY-MM-DD>` (one PR per cycle), update:

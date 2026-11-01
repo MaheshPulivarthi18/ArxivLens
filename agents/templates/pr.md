@@ -22,7 +22,14 @@
 ### Follow-ups created
 - 
 
+### Evidence (filled by pm-lead when raising the PR)
+| AC | Evidence | |
+|---|---|---|
+| AC1 | `agents/reviews/<TASK-ID>/evidence/01-….png` | ![](https://github.com/MaheshPulivarthi18/ArxivLens/blob/<branch>/agents/reviews/<TASK-ID>/evidence/01-….png?raw=true) |
+
+CI: <check run results for the head commit>
+
 ### Review status (filled by the workflow)
-- QA (qa-reviewer): PENDING → `agents/reviews/<TASK-ID>.md`
+- QA (qa-reviewer): PENDING → `agents/reviews/<TASK-ID>/report.md`
 - PM (pm-lead): —
 - Merge: human, after QA PASS + PM APPROVE

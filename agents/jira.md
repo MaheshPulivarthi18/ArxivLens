@@ -24,7 +24,8 @@ If the Atlassian tools are not available in a session, **skip Jira sync, continu
 | Human decision (ADR) | **Task** assigned to Mahesh, label `human-decision` |
 | Tech design `docs/design/<ID>.md` | Link in the story description + comment when written |
 | PR | Link in the story description (`**PR:** #n`) + comment when opened |
-| QA report / PM verdict | Comment with verdict + link to `agents/reviews/<ID>.md` |
+| QA evidence pack | `[qa-reviewer]` comment linking each screenshot + web link "QA evidence" to `agents/reviews/<ID>/` |
+| PM verdict / PR raised | `[pm-lead]` comment: APPROVE + "PR #n raised for review", or CHANGES |
 
 Find a task's story with JQL: `project = KAN AND labels = "task-<ID>"`. Never rely on remembered issue keys.
 
@@ -60,6 +61,12 @@ matches; don't go by the transition's own name (the one into In QA is still call
 **Labels are for properties, not stages:** `arxivlens`, `task-<ID>`, `agent-<role>`, `design-required`, `blocked`,
 `human-decision`. Labels are set, not appended (`editJiraIssue` replaces the list): read the current labels, change
 what you need, write the full list back.
+
+## Evidence files
+Agent sandboxes cannot upload attachments to Jira (the Atlassian media host is blocked by the network proxy), so
+evidence screenshots live in the PR branch under `agents/reviews/<ID>/evidence/` and the ticket links to them.
+If Mahesh later allows `api.media.atlassian.com` in the environment's network settings, QA may also attach the PNGs
+with `uploadAttachmentToJiraIssue`.
 
 ## Comments: who did what
 Every comment starts with the role in brackets, so the ticket reads like a team thread even though the API acts as
