@@ -1,0 +1,28 @@
+$ bash agents/reviews/PM-1/checks/qa4.sh
+## Product PRD §6 QA-4 row at HEAD (status column + acceptance/task column):
+115:| QA-4 | Each citation is verified (semantic similarity ≥ threshold) and labeled supported/unsupported | P0 | ✅ | — |
+   status cell = ['WHITE HEAVY CHECK MARK'] | acceptance/task cell = '—'
+
+## internal/query/rag.go:142-154 at HEAD (support check):
+   142	            // 5. Verify Support (§9): Embed sentence and compute cosine similarity with chunk
+   143	            supported := false
+   144	            score := 0.0
+   145	
+   146	            sentVecs, err := r.embedClient.EmbedTexts(ctx, []string{cleanSent}, false)
+   147	            if err == nil && len(sentVecs) > 0 && len(chunkEmbeddings[markerIdx-1]) > 0 {
+   148	                sim := cosineSimilarity(sentVecs[0], chunkEmbeddings[markerIdx-1])
+   149	                score = math.Round(float64(sim)*10000) / 10000
+   150	                supported = score >= SupportThreshold
+   151	            } else {
+   152	                score = 0.75 // Fallback if embedding service unavailable
+   153	                supported = true
+   154	            }
+
+## The PR's own AI-2 spec on QA-4 (agents/tasks/AI-2.md, Goal):
+14:("Fallback if embedding service unavailable"). QA-4 requires every citation to be *verified*. An unverified citation
+15:labelled supported breaks the core trust promise, and it inflates `supported_citation_rate` in `make eval`. Fail closed:
+
+## Where the PR links AI-2 from the PRDs:
+HEAD:docs/PRD-Product.md:158:| | % citations marked *supported* | ≥ 90% | `evals/answer.jsonl` | `make eval` → `scripts/evaluate_answers.py` (`supported_citation_rate_min`). Caveat: inflated while
+
+[exit code 0]

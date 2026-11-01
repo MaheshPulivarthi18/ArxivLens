@@ -1,0 +1,37 @@
+$ python3 agents/reviews/PM-1/checks/ac1.py
+Product PRD §6: 27 requirement rows
+
+ING-6 [⏳ = HOURGLASS WITH FLOWING SAND] -> OK
+   links: agents/tasks/ING-6.md exists
+   text : [ING-6](../agents/tasks/ING-6.md): a crawl loop per configured category stops at a stored `since` watermark; a second run with no new papers emits zero `papers.discovered` events; a kill + restart creates no duplicate or skipped p...
+
+QA-8 [⏳ = HOURGLASS WITH FLOWING SAND] -> OK
+   links: agents/tasks/QA-8.md exists
+   text : [QA-8](../agents/tasks/QA-8.md): with no LLM configured, behaviour is identical to today; fabricated markers are dropped and LLM errors fall back to the template; `make eval` with the LLM on meets the §8 supported / refusal / `/v1...
+
+QA-9 [⏳ = HOURGLASS WITH FLOWING SAND] -> OK
+   links: none
+   text : Backlog (after QA-8, not yet specced). *Proposed acceptance (pm-lead, needs human approval)*: the answer text renders progressively in the UI; citations and support labels are only shown after validation finishes; the non-streamin...
+
+UI-5 [◐ partial = CIRCLE WITH LEFT HALF BLACK] -> OK
+   links: agents/tasks/FE-2.md exists
+   text : Per-citation "Copy BibTeX" exists (`frontend/src/components/ReferencesStack.jsx`). Remaining: [FE-2](../agents/tasks/FE-2.md) exports every citation of an answer as one `.bib` file. Saved questions: not specced; *Proposed acceptan...
+
+OPS-6 [⏳ = HOURGLASS WITH FLOWING SAND] -> OK
+   links: none
+   text : Backlog (not yet specced; needs the Prometheus metrics item from Technical PRD §11 first). *Proposed acceptance (pm-lead, needs human approval)*: a view showing per-stage throughput, consumer lag per group, and DLQ depth per topic...
+
+Rows not ✅ without acceptance/task: 0
+
+Technical PRD §11 roadmap 'Task' column:
+  P0  **LLM answer synthesis**                       -> agents/tasks/QA-8.md exists
+  P0  Containerize processor + embedder in compose   -> agents/tasks/OPS-H1.md exists
+  P1  Scheduled crawler                              -> agents/tasks/ING-6.md exists
+  P1  Unify Python deps                              -> agents/tasks/OPS-H2.md exists
+  P1  Batch embedding in RAG validation              -> agents/tasks/AI-3.md exists
+  P1  Span export                                    -> Backlog
+  P2  Metrics                                        -> Backlog
+  P2  Auth + rate limiting on query API              -> Backlog
+  P2  Figure/table extraction                        -> Backlog (post-v1; Product PRD §4 non-goal for v1)
+
+[exit code 0]

@@ -1,0 +1,47 @@
+$ python3 agents/reviews/PM-1/checks/link_check.py
+target                                                     HEAD  +PR#2  cited in
+agents/tasks                                               yes   yes    docs/PRD-Product.md (path)  [ok]
+agents/tasks/AI-2.md                                       yes   NO     docs/PRD-Product.md (link)  [ok]
+agents/tasks/AI-3.md                                       yes   NO     docs/PRD-Technical.md (link)  [ok]
+agents/tasks/EVAL-2.md                                     yes   NO     docs/PRD-Product.md (link)  [ok]
+agents/tasks/FE-2.md                                       yes   yes    docs/PRD-Product.md (link)  [ok]
+agents/tasks/ING-6.md                                      yes   yes    docs/PRD-Product.md (link), docs/PRD-Technical.md (link)  [ok]
+agents/tasks/OPS-H1.md                                     yes   yes    docs/PRD-Technical.md (link)  [ok]
+agents/tasks/OPS-H2.md                                     yes   yes    docs/PRD-Technical.md (link)  [ok]
+agents/tasks/OPS-H5.md                                     yes   NO     docs/PRD-Technical.md (link)  [ok]
+agents/tasks/QA-8.md                                       yes   yes    docs/PRD-Product.md (link), docs/PRD-Technical.md (link)  [ok]
+docs/PRD-Product.md                                        yes   yes    docs/PRD-Technical.md (link)  [ok]
+docs/PRD-Technical.md                                      yes   yes    docs/PRD-Product.md (link)  [ok]
+docs/adr/0001-llm-provider-and-budget.md                   yes   yes    docs/PRD-Product.md (link)  [ok]
+docs/adr/0002-where-synthesis-runs.md                      yes   yes    docs/PRD-Technical.md (link)  [ok]
+docs/adr/0003-unsupported-citation-policy.md               yes   yes    docs/PRD-Product.md (link)  [ok]
+docs/adr/0004-on-demand-ingest-path.md                     yes   yes    docs/PRD-Technical.md (link)  [ok]
+docs/adr/0005-default-crawl-categories.md                  yes   yes    docs/PRD-Product.md (link)  [ok]
+docs/adr/0006-recall-at-5-definition.md                    yes   NO     docs/PRD-Product.md (link), docs/PRD-Technical.md (link)  [ok]
+docs/adr/0007-multi-user-hosted-v2-scope.md                yes   NO     docs/PRD-Product.md (link)  [ok]
+docs/adr/0008-hnsw-parameters-at-scale.md                  yes   NO     docs/PRD-Technical.md (link)  [ok]
+docs/adr/0009-long-context-embedding-model.md              yes   NO     docs/PRD-Technical.md (link)  [ok]
+evals/answer.jsonl                                         NO    yes    docs/PRD-Product.md (path)  [PR#2]
+evals/corpus.txt                                           NO    yes    docs/PRD-Product.md (path)  [PR#2]
+evals/refusal.jsonl                                        NO    yes    docs/PRD-Product.md (path)  [PR#2]
+evals/retrieval.jsonl                                      NO    yes    docs/PRD-Product.md (path)  [PR#2]
+evals/thresholds.json                                      NO    yes    docs/PRD-Product.md (path), docs/PRD-Technical.md (path)  [PR#2]
+frontend/src/components/ReferencesStack.jsx                yes   yes    docs/PRD-Product.md (path)  [ok]
+scripts/benchmark_hnsw.py                                  yes   yes    docs/PRD-Product.md (path), docs/PRD-Technical.md (path)  [ok]
+scripts/eval_gate.py                                       NO    yes    docs/PRD-Technical.md (path)  [PR#2]
+scripts/evaluate_answers.py                                NO    yes    docs/PRD-Product.md (path)  [PR#2]
+scripts/evaluate_retrieval.py                              yes   yes    docs/PRD-Product.md (path), docs/PRD-Technical.md (path)  [ok]
+tests/test_m3_query.py                                     yes   yes    docs/PRD-Product.md (path)  [ok]
+tests/test_m4_chaos.py                                     yes   yes    docs/PRD-Product.md (path), docs/PRD-Technical.md (path)  [ok]
+tests/test_m4_chaos.py::test_idempotency_duplicate_event_row_invariance yes   yes    docs/PRD-Product.md (test fn)  [ok]
+
+Targets absent at PM-1 HEAD (dangle if #3 merges before #2):
+  evals/answer.jsonl   -> added by PR #2 (EVAL-1)
+  evals/corpus.txt   -> added by PR #2 (EVAL-1)
+  evals/refusal.jsonl   -> added by PR #2 (EVAL-1)
+  evals/retrieval.jsonl   -> added by PR #2 (EVAL-1)
+  evals/thresholds.json   -> added by PR #2 (EVAL-1)
+  scripts/eval_gate.py   -> added by PR #2 (EVAL-1)
+  scripts/evaluate_answers.py   -> added by PR #2 (EVAL-1)
+
+[exit code 0]

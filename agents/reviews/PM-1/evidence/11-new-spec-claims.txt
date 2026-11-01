@@ -1,0 +1,46 @@
+$ bash agents/reviews/PM-1/checks/spec_claims.sh
+## OPS-H5 / Tech PRD §5: no migration creates the HNSW index
+$ grep -rni hnsw migrations/
+(no matches)
+
+$ grep -n 'hnsw' scripts/benchmark_hnsw.py | grep -i 'create index\|ef_construction'
+32:            CREATE INDEX IF NOT EXISTS chunk_embeddings_hnsw_idx 
+35:            WITH (m = 16, ef_construction = 64);
+
+## OPS-H5: 'arxivlens migrate' runs a single file
+cmd/arxivlens/main.go:51:	var migrationFile string
+cmd/arxivlens/main.go:64:			log.Printf("[Migration] Running migration file: %s", migrationFile)
+cmd/arxivlens/main.go:65:			if err := database.RunMigrations(ctx, migrationFile); err != nil {
+cmd/arxivlens/main.go:74:	cmd.Flags().StringVar(&migrationFile, "file", "migrations/000001_init_schema.up.sql", "Path to migration SQL file")
+internal/db/db.go:44:func (d *DB) RunMigrations(ctx context.Context, migrationPath string) error {
+
+## OPS-H5: named M5/M6 test exists
+48:def test_pgvector_hnsw_index_presence_and_querying():
+
+## AI-2: fallback marks citation supported (rag.go)
+152:				score = 0.75 // Fallback if embedding service unavailable
+153:				supported = true
+
+## AI-3: one EmbedTexts call per hit and per cited sentence
+120:		vecs, err := r.embedClient.EmbedTexts(ctx, []string{h.Content}, false)
+146:			sentVecs, err := r.embedClient.EmbedTexts(ctx, []string{cleanSent}, false)
+
+## EVAL-2: PR #2 eval rerank mode is a bi-encoder, production uses /internal/rerank
+8:  4. Hybrid RRF + Second-Stage Cross-Encoder Reranker
+29:MODES = ["BM25 Keyword", "Dense Vector", "Hybrid RRF", "Hybrid RRF + Rerank"]
+161:            # Mode 4: Hybrid RRF + Rerank
+190:                ranked_rerank = [candidates[i][0] for i in np.argsort(scores)[::-1]]
+192:                ranked_rerank = []
+193:            t_rerank = (time.perf_counter() - t0) * 1000
+93:	url := fmt.Sprintf("%s/internal/rerank", c.baseURL)
+
+## AI-1 excludes behaviour changes (AI-2 rationale)
+13:Go tests. Lock its behaviour down before QA-8 replaces the template with an LLM.
+25:- Out of scope: changing thresholds or behaviour. If a test exposes a bug, fix it only if the fix is ≤ 20 lines and note it; otherwise write the failing case as `t.Skip("bug: ...")` and request a follow-up task.
+
+## Ownership of files named in new specs' Scope (AGENTS.md §1)
+OPS-H4 (backend): .gitignore, Makefile | OPS-H5 (backend): migrations/, internal/db, cmd/ | AI-2/AI-3 (ai): internal/query/rag.go(+_test) | EVAL-2 (ai): scripts/, evals/, tests/
+20:| **AI engineer** | `.claude/agents/ai-engineer.md` | `services/embedder/*.py`, `internal/query/rag.go` + `rag_test.go`, `scripts/`, `evals/`, `tests/` | `frontend/`, `migrations/`, Kafka code |
+21:| **Backend & distributed systems** | `.claude/agents/backend-engineer.md` | `cmd/`, `internal/` (except `rag.go`), `services/processor/`, `services/common/`, `services/embedder/Dockerfile`, `share
+
+[exit code 0]

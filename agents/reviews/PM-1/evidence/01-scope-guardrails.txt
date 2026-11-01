@@ -1,0 +1,19 @@
+$ bash -c git diff --stat origin/main...c697b29; echo; bash scripts/agent_guardrails.sh origin/main agent/pm/PM-1
+ agents/tasks/AI-2.md                          |  40 +++++++++
+ agents/tasks/AI-3.md                          |  36 ++++++++
+ agents/tasks/EVAL-2.md                        |  43 ++++++++++
+ agents/tasks/OPS-H4.md                        |  36 ++++++++
+ agents/tasks/OPS-H5.md                        |  43 ++++++++++
+ agents/tasks/PM-1.md                          |  23 +++++-
+ docs/PRD-Product.md                           | 115 ++++++++++++++------------
+ docs/PRD-Technical.md                         |  51 ++++++++----
+ docs/adr/0006-recall-at-5-definition.md       |  40 +++++++++
+ docs/adr/0007-multi-user-hosted-v2-scope.md   |  28 +++++++
+ docs/adr/0008-hnsw-parameters-at-scale.md     |  30 +++++++
+ docs/adr/0009-long-context-embedding-model.md |  29 +++++++
+ 12 files changed, 441 insertions(+), 73 deletions(-)
+
+::warning::514 changed lines (> 400). Consider splitting the task.
+Guardrails OK for role=pm (514 changed lines)
+
+[exit code 0]

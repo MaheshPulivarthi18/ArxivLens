@@ -1,0 +1,11 @@
+$ gh api repos/MaheshPulivarthi18/ArxivLens/actions/jobs/124899383143/logs | grep -iE 'role|scope|changed|warn|error|guardrail|OK'
+##[group]GITHUB_TOKEN Permissions
+Complete job name: Agent guardrails
+  token: ***
+hint: to use in all of your new repositories, which will suppress this warning,
+You are in 'detached HEAD' state. You can look around, make experimental
+[36;1mscripts/agent_guardrails.sh "origin/$BASE_REF" "$HEAD_REF"[0m
+##[warning]514 changed lines (> 400). Consider splitting the task.
+Guardrails OK for role=pm (514 changed lines)
+##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+

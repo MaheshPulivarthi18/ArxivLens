@@ -1,0 +1,5 @@
+$ bash -c echo "\$ git diff --name-only origin/main...c697b29 | grep -vE \"^(docs/|agents/)\""; git diff --name-only origin/main...c697b29 | grep -vE "^(docs/|agents/)" || echo "(no matches: every changed file is under docs/ or agents/)"
+$ git diff --name-only origin/main...c697b29 | grep -vE "^(docs/|agents/)"
+(no matches: every changed file is under docs/ or agents/)
+
+[exit code 0]

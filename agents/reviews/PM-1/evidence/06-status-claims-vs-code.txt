@@ -1,0 +1,74 @@
+$ bash agents/reviews/PM-1/checks/status_check.sh
+== ✅ rows: expect FOUND ==
+[FOUND]  ING-1 arXiv 3s politeness
+           internal/crawler/crawler.go:60:		rateLimit = 3 * time.Second
+[FOUND]  ING-2 content-hashed PDF
+           internal/downloader/downloader.go:6:	"crypto/sha256"
+           internal/downloader/downloader.go:61:	var sha256Hex string
+           internal/downloader/downloader.go:64:		log.Printf("[Downloader] PDF %s already in storage, reading for sha256 verification...", storageKey)
+[FOUND]  ING-4 on-demand ingest route
+           internal/query/server.go:72:	mux.HandleFunc("POST /v1/papers/ingest", s.handleIngestPaper)
+[FOUND]  ING-5 discover ingest
+           internal/query/ingester.go:262:func (ing *PaperIngester) DiscoverAndIngest(ctx context.Context, query string) (*IngestResult, error) {
+           internal/query/server.go:214:func (s *Server) handleDiscoverPaper(w http.ResponseWriter, r *http.Request) {
+[FOUND]  ING-7 versions as distinct records
+           migrations/000001_init_schema.up.sql:8:  version         INT  NOT NULL DEFAULT 1,
+           migrations/000001_init_schema.up.sql:21:  UNIQUE (arxiv_id, version)
+[FOUND]  QA-1 RRF fusion
+           internal/query/search.go:17:	RRFScore     float64 `json:"rrf_score"`
+           internal/query/search.go:71:	// 2. Hybrid RRF Search SQL Query matching §8
+           internal/query/search.go:96:		       COALESCE(1.0/(60 + v.rank), 0) + COALESCE(1.0/(60 + k.rank), 0) AS rrf_score
+[FOUND]  QA-2 cross-encoder rerank
+           internal/query/client.go:93:	url := fmt.Sprintf("%s/internal/rerank", c.baseURL)
+           services/embedder/api.py:7:  POST /internal/rerank  {"query": "...", "passages": [...]} -> {"scores": [...]}
+           services/embedder/api.py:91:@app.post("/internal/rerank", response_model=RerankResponse)
+[FOUND]  QA-4 SupportThreshold
+           internal/query/rag.go:15:	SupportThreshold      = 0.50  // Minimum cosine similarity to mark citation supported (§9)
+           internal/query/rag.go:150:				supported = score >= SupportThreshold
+[FOUND]  QA-5 refusal
+           internal/query/rag.go:14:	EarlyRefusalThreshold = 0.015 // Minimum RRF score required to attempt answer
+           internal/query/rag.go:86:	// 3. Refuse Early: If no relevant hits remain, cleanly refuse without hallucination
+[FOUND]  QA-6 appendix/supplementary penalty
+           internal/query/rag.go:78:		// Penalize incidental supplementary/hardware table mentions unless score is high (>= 0.70)
+           internal/query/rag.go:80:		if (strings.Contains(lowerSec, "supplementary") || strings.Contains(lowerSec, "table") || strings.Contains(lower
+[FOUND]  QA-7 category filter (API)
+           internal/query/search.go:41:	categories []string,
+           internal/query/search.go:80:			  AND ($3::text[] IS NULL OR p.categories && $3)
+           internal/query/search.go:91:			  AND ($3::text[] IS NULL OR p.categories && $3)
+[FOUND]  OPS-1 retry/DLQ
+           internal/kafka/consumer.go:21:	maxRetries int
+           internal/kafka/consumer.go:43:		maxRetries: 3,
+           internal/kafka/consumer.go:87:			for attempt := 1; attempt <= c.maxRetries; attempt++ {
+[FOUND]  OPS-2 --dry-run / --error-type
+           cmd/arxivlens/main.go:344:	replayCmd.Flags().StringVar(&errorType, "error-type", "", "Filter by error type (e.g. PdfParseError)")
+           cmd/arxivlens/main.go:346:	replayCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Simulate replay without publishing")
+[FOUND]  OPS-3 processed_events ledger
+           migrations/000001_init_schema.down.sql:1:DROP TABLE IF EXISTS processed_events;
+           migrations/000001_init_schema.up.sql:65:CREATE TABLE IF NOT EXISTS processed_events (
+           services/common/db.py:57:            INSERT INTO processed_events (consumer_group, event_id)
+[FOUND]  OPS-4 paper status route
+           internal/query/server.go:74:	mux.HandleFunc("GET /v1/papers/", s.handlePaperStatus)
+[FOUND]  OPS-5 traceparent
+           internal/telemetry/telemetry.go:35:// InjectTraceparent injects the current W3C traceparent into a carrier map
+           internal/telemetry/telemetry.go:45:// ExtractTraceparent extracts W3C trace context from a traceparent string
+           internal/telemetry/telemetry.go:46:func ExtractTraceparent(ctx context.Context, traceparent string) context.Context {
+[FOUND]  UI-1..4 components
+           frontend/src/components/HeroSearch.jsx
+           frontend/src/components/InfrastructureModal.jsx
+           frontend/src/components/IngestModal.jsx
+
+== ◐ UI-5: expect per-citation BibTeX FOUND, saved questions / bulk .bib ABSENT ==
+[FOUND]  UI-5 per-citation BibTeX
+           frontend/src/components/ReferencesStack.jsx:18:  const handleBibTeXCopy = (cit) => {
+           frontend/src/components/ReferencesStack.jsx:20:    const bibtex = `@article{arxiv_${cleanID},
+           frontend/src/components/ReferencesStack.jsx:28:    onCopy(bibtex, `📋 BibTeX reference copied for [${cit.marker}]!`);
+[ABSENT] UI-5 saved questions
+[ABSENT] UI-5 export all as .bib file
+
+== ⏳ rows: expect ABSENT ==
+[ABSENT] ING-6 scheduler / cron / watermark
+[ABSENT] QA-9 streaming answers
+[ABSENT] QA-8 LLM synthesis client
+[ABSENT] OPS-6 Prometheus / metrics dashboard
+
+[exit code 0]

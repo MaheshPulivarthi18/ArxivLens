@@ -1,0 +1,27 @@
+$ bash agents/reviews/PM-1/checks/keys_check.sh
+# Gate keys cited in Product PRD §8 (PM-1 HEAD) vs evals/thresholds.json on PR #2 (origin/agent/ai/EVAL-1)
+## evals/thresholds.json @ PR #2:
+{
+  "_source": "docs/PRD-Product.md section 8 (v1 targets). Change only through an Accepted ADR; never lower to make a run pass.",
+  "retrieval_recall_at_5_min": 0.80,
+  "supported_citation_rate_min": 0.90,
+  "correct_refusal_rate_min": 0.95,
+  "ask_p95_latency_ms_max": 3000,
+  "hybrid_rerank_beats_baselines": true
+}
+
+## key-by-key:
+  ask_p95_latency_ms_max  -> present in thresholds.json
+  correct_refusal_rate_min  -> present in thresholds.json
+  hybrid_rerank_beats_baselines  -> present in thresholds.json
+  retrieval_recall_at_5_min  -> present in thresholds.json
+  supported_citation_rate_min  -> present in thresholds.json
+
+## gated mode name used by PR #2 gate:
+23:GATED_MODE = "Hybrid RRF + Rerank"  # the configuration /v1/ask actually uses
+
+## Makefile 'eval' target @ PM-1 HEAD (fallback claim in §8):
+67:eval: ## Retrieval/answer eval; uses the gate from EVAL-1 when present
+68-	@if [ -f scripts/eval_gate.py ]; then $(PY) scripts/eval_gate.py; else $(PY) scripts/evaluate_retrieval.py; fi
+
+[exit code 0]

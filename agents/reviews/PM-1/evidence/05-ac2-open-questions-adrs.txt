@@ -1,0 +1,45 @@
+$ python3 agents/reviews/PM-1/checks/ac2.py
+== Product PRD §11 (HEAD)
+  Q1 -> docs/adr/0001-llm-provider-and-budget.md
+        title : # ADR-0001: LLM provider, latency and cost budget for answer synthesis
+        status: Proposed
+  Q2 -> docs/adr/0003-unsupported-citation-policy.md
+        title : # ADR-0003: What to do with unsupported citations
+        status: Proposed
+  Q3 -> docs/adr/0005-default-crawl-categories.md
+        title : # ADR-0005: Default continuously crawled categories
+        status: Proposed
+  Q4 -> docs/adr/0007-multi-user-hosted-v2-scope.md
+        title : # ADR-0007: Is multi-user or hosted deployment in scope for v2?
+        status: Proposed
+  Q5 -> docs/adr/0006-recall-at-5-definition.md
+        title : # ADR-0006: Definition of Recall@5 for the retrieval quality target
+        status: Proposed
+  main had: 5 questions on HEAD; 4 on origin/main
+== Technical PRD §12 (HEAD)
+  Q1 -> docs/adr/0002-where-synthesis-runs.md
+        title : # ADR-0002: Run LLM synthesis in the Go query service or the Python embedder API
+        status: Proposed
+  Q2 -> docs/adr/0004-on-demand-ingest-path.md
+        title : # ADR-0004: On-demand ingest — synchronous call or through Kafka
+        status: Proposed
+  Q3 -> docs/adr/0008-hnsw-parameters-at-scale.md
+        title : # ADR-0008: HNSW parameters (`m`, `ef_construction`, `ef_search`) beyond ~1M chunks
+        status: Proposed
+  Q4 -> docs/adr/0009-long-context-embedding-model.md
+        title : # ADR-0009: Swap to a long-context embedding model?
+        status: Proposed
+  Q5 -> docs/adr/0006-recall-at-5-definition.md
+        title : # ADR-0006: Definition of Recall@5 for the retrieval quality target
+        status: Proposed
+  main had: 5 questions on HEAD; 4 on origin/main
+
+== ADRs added by this PR (git diff origin/main...HEAD --diff-filter=A docs/adr)
+  docs/adr/0006-recall-at-5-definition.md: Status=Proposed | Decision section: _(Filled by the human.)_
+  docs/adr/0007-multi-user-hosted-v2-scope.md: Status=Proposed | Decision section: _(Filled by the human.)_
+  docs/adr/0008-hnsw-parameters-at-scale.md: Status=Proposed | Decision section: _(Filled by the human.)_
+  docs/adr/0009-long-context-embedding-model.md: Status=Proposed | Decision section: _(Filled by the human.)_
+
+Any ADR on HEAD with Status Accepted? none
+
+[exit code 0]

@@ -1,0 +1,29 @@
+$ bash agents/reviews/PM-1/checks/spec_struct.sh
+# New task specs added by this PR: required fields/sections present? (✓ = present)
+field                   AI-2     AI-3     EVAL-2   OPS-H4   OPS-H5   
+Owner                   ✓      ✓      ✓      ✓      ✓      
+Priority                ✓      ✓      ✓      ✓      ✓      
+PRD ref                 ✓      ✓      ✓      ✓      ✓      
+Depends on              ✓      ✓      ✓      ✓      ✓      
+Status                  ✓      ✓      ✓      ✓      ✓      
+## Goal                 ✓      ✓      ✓      ✓      ✓      
+## Scope                ✓      ✓      ✓      ✓      ✓      
+Out of scope            ✓      ✓      ✓      ✓      ✓      
+## Acceptance criteria  ✓      ✓      ✓      ✓      ✓      
+## Verification         ✓      ✓      ✓      ✓      ✓      
+## Notes                ✓      ✓      ✓      ✓      ✓      
+# of ACs                4        4        5        4        5        
+
+# Owner / Depends on / Status lines
+AI-2: ai-engineer | deps: AI-1 (test harness and fakes for `rag.go`; same file, so do it after AI-1 to avoid conflicts) | Ready (start after AI-1 merges)
+AI-3: ai-engineer | deps: AI-1 (tests lock behaviour), AI-2 (same code block; avoids merge conflicts) | Ready (start after AI-1 and AI-2 merge)
+EVAL-2: ai-engineer | deps: EVAL-1 (PR #2 merged) | Ready (start once PR #2 is merged)
+OPS-H4: backend-engineer | deps: EVAL-1 (PR #2 merged) | Ready (start once PR #2 is merged)
+OPS-H5: backend-engineer | deps: — (soft: OPS-H1 for AC5; without it, start the workers by hand per AGENTS.md §5) | Ready
+
+# Dependencies named in specs resolve to a task file?
+  AI-1 -> agents/tasks/AI-1.md exists
+  OPS-H1 -> agents/tasks/OPS-H1.md exists
+  EVAL-1 -> agents/tasks/EVAL-1.md exists
+
+[exit code 0]
