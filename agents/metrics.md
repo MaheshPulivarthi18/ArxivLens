@@ -15,3 +15,4 @@ Targets once the harness is stable: first-pass ≥ 70%, blocked ≤ 1 per cycle,
 | Date | Attempted | Shipped | First-pass | Fix rounds | Blocked | Merged since last | Awaiting human | Notes |
 |---|---|---|---|---|---|---|---|---|
 | 2026-11-01 | 0 | 0 | — | 0 | 0 | 0 | 5 ADRs | Setup, baseline |
+| 2026-11-01 | 2 | 2 | 0% (0/2) | 2 | 0 | 0 | 2 PRs + 9 ADRs | Cycle 1. Both tasks needed 1 review fix round. Sandbox egress blocked Go/npm/Docker/HF, so only Python and docs tasks were possible; Go and frontend checks rely on CI. |
