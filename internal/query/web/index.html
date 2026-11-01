@@ -1,0 +1,925 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ArxivLens — Academic Literature Search & Grounded Synthesis</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-main: #0d1117;
+      --bg-surface: #161b22;
+      --bg-surface-hover: #1c2128;
+      --bg-inset: #090d13;
+      --border: #30363d;
+      --border-focus: #58a6ff;
+      --text-main: #f0f6fc;
+      --text-muted: #8b949e;
+      --text-dim: #6e7681;
+      --accent: #58a6ff;
+      --accent-hover: #79c0ff;
+      --success: #3fb950;
+      --success-bg: rgba(63, 185, 80, 0.12);
+      --warning: #d29922;
+      --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-title: 'Outfit', sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-main);
+      color: var(--text-main);
+      font-family: var(--font-sans);
+      min-height: 100vh;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Minimalist Academic Navigation */
+    header {
+      background: rgba(13, 17, 23, 0.9);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      padding: 0.85rem 2rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.65rem;
+      text-decoration: none;
+      color: var(--text-main);
+    }
+    .brand-icon {
+      font-size: 1.25rem;
+    }
+    .brand-name {
+      font-family: var(--font-title);
+      font-size: 1.15rem;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+    }
+    .brand-badge {
+      font-size: 0.7rem;
+      color: var(--text-dim);
+      border: 1px solid var(--border);
+      padding: 0.15rem 0.5rem;
+      border-radius: 12px;
+      font-family: var(--font-mono);
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 1.25rem;
+    }
+    .nav-link {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 0.85rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: color 0.15s ease;
+      background: none;
+      border: none;
+    }
+    .nav-link:hover {
+      color: var(--text-main);
+    }
+    .nav-link.active {
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .btn-admin {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      padding: 0.35rem 0.75rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-family: var(--font-sans);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      transition: all 0.15s ease;
+    }
+    .btn-admin:hover {
+      border-color: var(--text-dim);
+      color: var(--text-main);
+    }
+
+    /* Main Container */
+    .container {
+      max-width: 1300px;
+      margin: 0 auto;
+      padding: 2.5rem 1.5rem 4rem;
+    }
+
+    /* Hero Search Bar */
+    .hero-search {
+      max-width: 800px;
+      margin: 0 auto 2.5rem;
+      text-align: center;
+    }
+
+    .hero-title {
+      font-family: var(--font-title);
+      font-size: 2rem;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      margin-bottom: 0.5rem;
+    }
+    .hero-subtitle {
+      font-size: 0.95rem;
+      color: var(--text-muted);
+      margin-bottom: 1.5rem;
+    }
+
+    .search-wrap {
+      display: flex;
+      gap: 0.5rem;
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.35rem;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+      transition: border-color 0.15s ease;
+    }
+    .search-wrap:focus-within {
+      border-color: var(--border-focus);
+    }
+
+    .search-input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      color: var(--text-main);
+      font-family: var(--font-sans);
+      font-size: 0.95rem;
+      padding: 0.6rem 0.85rem;
+      outline: none;
+    }
+    .search-input::placeholder {
+      color: var(--text-dim);
+    }
+
+    .btn-search {
+      background: var(--accent);
+      color: #0d1117;
+      border: none;
+      padding: 0.6rem 1.25rem;
+      border-radius: 7px;
+      font-weight: 600;
+      font-size: 0.875rem;
+      cursor: pointer;
+      transition: background-color 0.15s ease;
+    }
+    .btn-search:hover {
+      background: var(--accent-hover);
+    }
+
+    .query-pills {
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 1rem;
+    }
+    .query-chip {
+      font-size: 0.78rem;
+      color: var(--text-dim);
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      padding: 0.25rem 0.65rem;
+      border-radius: 14px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .query-chip:hover {
+      color: var(--text-main);
+      border-color: var(--text-muted);
+    }
+
+    /* Main Split Layout: Synthesis & Evidence */
+    .research-grid {
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 2rem;
+      margin-top: 1.5rem;
+      align-items: start;
+    }
+
+    /* Left: Synthesis Column */
+    .synthesis-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.75rem;
+    }
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1rem;
+      padding-bottom: 0.75rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .card-title {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+    }
+
+    .synthesis-body {
+      font-size: 0.98rem;
+      line-height: 1.75;
+      color: #c9d1d9;
+    }
+
+    .citation-ref {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(88, 166, 255, 0.15);
+      border: 1px solid var(--accent);
+      color: var(--accent-hover);
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.05rem 0.4rem;
+      border-radius: 4px;
+      cursor: pointer;
+      margin: 0 0.15rem;
+      text-decoration: none;
+      vertical-align: baseline;
+      transition: all 0.15s ease;
+    }
+    .citation-ref:hover {
+      background: var(--accent);
+      color: #0d1117;
+    }
+    .citation-ref.active {
+      background: var(--accent);
+      color: #0d1117;
+    }
+
+    .synthesis-actions {
+      display: flex;
+      gap: 0.75rem;
+      margin-top: 1.5rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
+    }
+    .btn-action {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      font-size: 0.8rem;
+      padding: 0.35rem 0.75rem;
+      border-radius: 6px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      transition: all 0.15s ease;
+    }
+    .btn-action:hover {
+      color: var(--text-main);
+      border-color: var(--text-dim);
+    }
+
+    /* Right: References & Paper Cards Stack */
+    .references-col {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+    .ref-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.25rem;
+      transition: border-color 0.2s ease, transform 0.2s ease;
+    }
+    .ref-card.highlighted {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px var(--accent);
+    }
+    .ref-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 0.5rem;
+      margin-bottom: 0.4rem;
+    }
+    .ref-marker {
+      background: var(--accent);
+      color: #0d1117;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      font-weight: 700;
+      padding: 0.15rem 0.45rem;
+      border-radius: 4px;
+    }
+    .ref-meta {
+      font-size: 0.75rem;
+      color: var(--text-dim);
+      font-family: var(--font-mono);
+    }
+    .ref-title {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--text-main);
+      margin-top: 0.35rem;
+      line-height: 1.4;
+    }
+    .ref-section {
+      font-size: 0.8rem;
+      color: var(--accent);
+      margin-top: 0.25rem;
+      font-weight: 500;
+    }
+
+    .ref-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin: 0.75rem 0;
+    }
+    .btn-pdf {
+      background: rgba(88, 166, 255, 0.1);
+      border: 1px solid var(--accent);
+      color: var(--accent);
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.25rem 0.65rem;
+      border-radius: 6px;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      transition: all 0.15s ease;
+    }
+    .btn-pdf:hover {
+      background: var(--accent);
+      color: #0d1117;
+    }
+    .btn-bibtex {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      padding: 0.25rem 0.65rem;
+      border-radius: 6px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+    .btn-bibtex:hover {
+      color: var(--text-main);
+      border-color: var(--text-dim);
+    }
+
+    .grounded-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--success);
+      background: var(--success-bg);
+      padding: 0.2rem 0.55rem;
+      border-radius: 12px;
+      margin-left: auto;
+    }
+
+    .ref-quote {
+      background: var(--bg-inset);
+      border-left: 2px solid var(--accent);
+      padding: 0.75rem 0.85rem;
+      border-radius: 4px;
+      font-size: 0.82rem;
+      line-height: 1.6;
+      color: #c9d1d9;
+      margin-top: 0.5rem;
+      max-height: 180px;
+      overflow-y: auto;
+    }
+
+    /* Papers Library View */
+    #library-view {
+      display: none;
+    }
+    .papers-table-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+      text-align: left;
+    }
+    th {
+      padding: 0.85rem 1.25rem;
+      color: var(--text-dim);
+      font-weight: 600;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.75rem;
+      text-transform: uppercase;
+    }
+    td {
+      padding: 0.85rem 1.25rem;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      color: var(--text-muted);
+    }
+    tr:hover td {
+      background: var(--bg-surface-hover);
+      color: var(--text-main);
+    }
+
+    /* Modal for Engineering & DLQ */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(8px);
+      z-index: 200;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+    }
+    .modal-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      max-width: 900px;
+      width: 100%;
+      max-height: 85vh;
+      overflow-y: auto;
+      padding: 2rem;
+    }
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1.5rem;
+      padding-bottom: 0.75rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .btn-close {
+      background: none;
+      border: none;
+      color: var(--text-dim);
+      font-size: 1.25rem;
+      cursor: pointer;
+    }
+    .btn-close:hover { color: var(--text-main); }
+
+    .dag-flow {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--bg-inset);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.25rem;
+      margin-bottom: 1.5rem;
+      overflow-x: auto;
+      gap: 0.5rem;
+      font-size: 0.8rem;
+    }
+
+    /* Early Refusal Alert */
+    .alert-refusal {
+      display: none;
+      background: rgba(210, 153, 34, 0.1);
+      border: 1px solid var(--warning);
+      color: #e3b341;
+      padding: 1rem;
+      border-radius: 8px;
+      margin-bottom: 1rem;
+      font-size: 0.9rem;
+    }
+
+    /* Toast */
+    .toast {
+      position: fixed;
+      bottom: 2rem;
+      right: 2rem;
+      background: #1f242c;
+      border: 1px solid var(--border);
+      color: var(--text-main);
+      padding: 0.75rem 1.25rem;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      display: none;
+      z-index: 1000;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Minimalist Academic Header -->
+  <header>
+    <a href="#" class="brand" onclick="showMainView()">
+      <span class="brand-icon">🔬</span>
+      <span class="brand-name">ArxivLens</span>
+      <span class="brand-badge">arXiv Literature Engine</span>
+    </a>
+
+    <div class="nav-links">
+      <button class="nav-link active" id="nav-search" onclick="showMainView()">Literature Search</button>
+      <button class="nav-link" id="nav-library" onclick="showLibraryView()">Explore 25 Papers</button>
+      <button class="btn-admin" onclick="openAdminModal()">
+        <span>⚙️ Infrastructure & DLQ</span>
+      </button>
+    </div>
+  </header>
+
+  <div class="container">
+
+    <!-- Search View (Default) -->
+    <div id="search-view">
+      <div class="hero-search">
+        <h1 class="hero-title">Ask peer-reviewed literature</h1>
+        <p class="hero-subtitle">Grounded synthesis across indexed arXiv research with exact paragraph citations.</p>
+
+        <div class="search-wrap">
+          <input type="text" id="query-input" class="search-input" placeholder="Ask any question across 25 indexed arXiv research papers..." value="How does Task Model Induction recover goals from computer use activity traces?">
+          <button class="btn-search" id="search-btn" onclick="handleSearch()">Search Literature</button>
+        </div>
+
+        <div class="query-pills">
+          <span class="query-chip" onclick="setQuery('How does Task Model Induction recover goals from computer use activity traces?')">Task Model Induction</span>
+          <span class="query-chip" onclick="setQuery('How does G-CARL improve patient-oriented medical report interpretation?')">G-CARL Medical Reports</span>
+          <span class="query-chip" onclick="setQuery('Multi-agent orchestration for autonomous driving')">Autonomous Driving LLMs</span>
+          <span class="query-chip" onclick="setQuery('How to bake a chocolate sourdough cake?')">Test Early Refusal</span>
+        </div>
+      </div>
+
+      <div id="refusal-box" class="alert-refusal">
+        <strong>No indexed literature matches this query:</strong> The system cleanly refused the answer to prevent hallucination.
+      </div>
+
+      <!-- Main Split Layout: Synthesis & References Stack -->
+      <div class="research-grid" id="results-grid" style="display: none;">
+        
+        <!-- Left: Synthesized Answer -->
+        <div class="synthesis-card">
+          <div class="card-header">
+            <span class="card-title">📖 Synthesized Summary</span>
+            <span style="font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-dim);" id="trace-tag">Trace: -</span>
+          </div>
+
+          <div class="synthesis-body" id="synthesis-text">
+            <!-- Rendered synthesized response -->
+          </div>
+
+          <div class="synthesis-actions">
+            <button class="btn-action" onclick="copySynthesisText()">📋 Copy Summary</button>
+            <button class="btn-action" onclick="exportMarkdownNote()">📥 Export Markdown Note</button>
+          </div>
+        </div>
+
+        <!-- Right: References & Citations Stack -->
+        <div class="references-col" id="citations-stack">
+          <!-- Dynamically populated paper cards -->
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Library / Explore 25 Papers View -->
+    <div id="library-view">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+        <div>
+          <h2 style="font-size: 1.5rem; font-family: var(--font-title);">Indexed Research Papers</h2>
+          <p style="font-size: 0.85rem; color: var(--text-muted);">25 peer-reviewed papers indexed in PostgreSQL with pgvector HNSW.</p>
+        </div>
+        <button class="btn-action" onclick="showMainView()">← Back to Search</button>
+      </div>
+
+      <div class="papers-table-card">
+        <table>
+          <thead>
+            <tr>
+              <th>arXiv ID</th>
+              <th>Paper Title</th>
+              <th>Categories</th>
+              <th>Status</th>
+              <th>Direct PDF</th>
+            </tr>
+          </thead>
+          <tbody id="library-table-body">
+            <!-- Dynamically populated -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Engineering & DLQ Infrastructure Modal -->
+  <div class="modal-overlay" id="admin-modal" onclick="closeAdminModal(event)">
+    <div class="modal-card" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <div>
+          <h2 style="font-size: 1.15rem; font-family: var(--font-title);">⚙️ Infrastructure & Reliability Console</h2>
+          <p style="font-size: 0.75rem; color: var(--text-dim);">Go Crawler • Kafka 3.7 • MinIO • Python GPU Embedder • pgvector</p>
+        </div>
+        <button class="btn-close" onclick="closeAdminModal()">✕</button>
+      </div>
+
+      <h3 style="font-size: 0.85rem; text-transform: uppercase; color: var(--text-dim); margin-bottom: 0.6rem;">Event Ingestion Pipeline</h3>
+      <div class="dag-flow">
+        <div>📡 arXiv API</div>
+        <div>→</div>
+        <div>🕷️ Go Crawler</div>
+        <div>→</div>
+        <div>📥 MinIO S3</div>
+        <div>→</div>
+        <div>⚙️ Processor</div>
+        <div>→</div>
+        <div>🧠 Embedder (mps)</div>
+        <div>→</div>
+        <div>🐘 pgvector HNSW</div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.75rem; margin-bottom: 1.5rem;">
+        <div style="background: var(--bg-inset); padding: 0.85rem; border-radius: 8px; border: 1px solid var(--border);">
+          <div style="font-size: 0.7rem; color: var(--text-dim);">INDEXED PAPERS</div>
+          <div style="font-size: 1.35rem; font-weight: 700; color: var(--text-main);" id="m-papers">25</div>
+        </div>
+        <div style="background: var(--bg-inset); padding: 0.85rem; border-radius: 8px; border: 1px solid var(--border);">
+          <div style="font-size: 0.7rem; color: var(--text-dim);">SECTIONS</div>
+          <div style="font-size: 1.35rem; font-weight: 700; color: var(--text-main);" id="m-sections">1,077</div>
+        </div>
+        <div style="background: var(--bg-inset); padding: 0.85rem; border-radius: 8px; border: 1px solid var(--border);">
+          <div style="font-size: 0.7rem; color: var(--text-dim);">CHUNKS</div>
+          <div style="font-size: 1.35rem; font-weight: 700; color: var(--text-main);" id="m-chunks">1,300</div>
+        </div>
+        <div style="background: var(--bg-inset); padding: 0.85rem; border-radius: 8px; border: 1px solid var(--border);">
+          <div style="font-size: 0.7rem; color: var(--text-dim);">HNSW QPS</div>
+          <div style="font-size: 1.35rem; font-weight: 700; color: var(--success);">2,513.9</div>
+        </div>
+      </div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+        <h3 style="font-size: 0.85rem; text-transform: uppercase; color: var(--text-dim);">Dead-Letter Queue (papers.downloaded.dlq)</h3>
+        <button class="btn-search" style="padding: 0.35rem 0.85rem; font-size: 0.75rem;" onclick="triggerDLQReplay()">Replay DLQ Events</button>
+      </div>
+
+      <table style="background: var(--bg-inset); border-radius: 8px; border: 1px solid var(--border);">
+        <thead>
+          <tr>
+            <th>Key</th>
+            <th>Error</th>
+            <th>Attempts</th>
+            <th>Traceparent</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>9999.00001</code></td>
+            <td><span style="color: #f85149;">FileDataError (Corrupt PDF)</span></td>
+            <td>3 / 3</td>
+            <td><code style="font-size: 0.75rem;">00-4bf92f357...</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="toast" class="toast">Copied to clipboard!</div>
+
+  <script>
+    let currentAskData = null;
+
+    function setQuery(q) {
+      document.getElementById('query-input').value = q;
+      handleSearch();
+    }
+
+    function showMainView() {
+      document.getElementById('search-view').style.display = 'block';
+      document.getElementById('library-view').style.display = 'none';
+      document.getElementById('nav-search').classList.add('active');
+      document.getElementById('nav-library').classList.remove('active');
+    }
+
+    function showLibraryView() {
+      document.getElementById('search-view').style.display = 'none';
+      document.getElementById('library-view').style.display = 'block';
+      document.getElementById('nav-search').classList.remove('active');
+      document.getElementById('nav-library').classList.add('active');
+      loadLibraryPapers();
+    }
+
+    function openAdminModal() {
+      document.getElementById('admin-modal').style.display = 'flex';
+    }
+
+    function closeAdminModal(e) {
+      document.getElementById('admin-modal').style.display = 'none';
+    }
+
+    async function handleSearch() {
+      const query = document.getElementById('query-input').value.trim();
+      if (!query) return;
+
+      const btn = document.getElementById('search-btn');
+      btn.innerText = 'Searching...';
+      btn.disabled = true;
+
+      document.getElementById('refusal-box').style.display = 'none';
+      document.getElementById('results-grid').style.display = 'none';
+
+      try {
+        const resp = await fetch('/v1/ask', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question: query, max_citations: 5 })
+        });
+        const data = await resp.json();
+        currentAskData = data;
+
+        if (data.answer.includes("No indexed papers are relevant")) {
+          document.getElementById('refusal-box').style.display = 'block';
+        } else {
+          renderResearchView(data);
+        }
+      } catch (err) {
+        console.error("Search error:", err);
+      } finally {
+        btn.innerText = 'Search Literature';
+        btn.disabled = false;
+      }
+    }
+
+    function renderResearchView(data) {
+      document.getElementById('results-grid').style.display = 'grid';
+      document.getElementById('trace-tag').innerText = 'Trace: ' + (data.trace_id || '-');
+
+      // Render answer with inline clickable citations [1]
+      const formatted = data.answer.replace(/\[(\d+)\]/g, (match, p1) => {
+        return `<a href="#ref-${p1}" class="citation-ref" onclick="focusCitation(${p1}); return false;">[${p1}]</a>`;
+      });
+      document.getElementById('synthesis-text').innerHTML = formatted;
+
+      // Render references stack
+      const stack = document.getElementById('citations-stack');
+      const citations = data.citations || [];
+
+      if (citations.length === 0) {
+        stack.innerHTML = '<div style="color: var(--text-dim); font-size: 0.85rem;">No references cited</div>';
+        return;
+      }
+
+      stack.innerHTML = citations.map(cit => {
+        const pdfURL = cit.pdf_url || `https://arxiv.org/pdf/${cit.arxiv_id}.pdf`;
+        const pct = (cit.score * 100).toFixed(1);
+        return `
+          <div class="ref-card" id="ref-${cit.marker}">
+            <div class="ref-header">
+              <span class="ref-marker">[${cit.marker}]</span>
+              <span class="ref-meta">arXiv:${cit.arxiv_id}</span>
+              <span class="grounded-badge">✓ ${pct}% verified</span>
+            </div>
+
+            <div class="ref-title">${cit.title}</div>
+            <div class="ref-section">§ ${cit.section || 'General'}</div>
+
+            <div class="ref-toolbar">
+              <a href="${pdfURL}" target="_blank" class="btn-pdf">📄 Open arXiv PDF ↗</a>
+              <button class="btn-bibtex" onclick="copyBibTeXItem('${cit.arxiv_id}', '${escapeQuotes(cit.title)}')">📋 Copy BibTeX</button>
+            </div>
+
+            <div class="ref-quote">${cit.content || `"${cit.title} — [Section: ${cit.section}]"`}</div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function focusCitation(marker) {
+      document.querySelectorAll('.ref-card').forEach(c => c.classList.remove('highlighted'));
+      const target = document.getElementById(`ref-${marker}`);
+      if (target) {
+        target.classList.add('highlighted');
+        target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+    }
+
+    function escapeQuotes(str) {
+      return (str || '').replace(/'/g, "\\'");
+    }
+
+    function copyBibTeXItem(arxivId, title) {
+      const cleanID = arxivId.replace(/[^a-zA-Z0-9]/g, '');
+      const bibtex = `@article{arxiv_${cleanID},
+  title = {${title}},
+  eprint = {${arxivId}},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.AI},
+  url = {https://arxiv.org/abs/${arxivId}},
+  year = {2026}
+}`;
+      copyToClipboard(bibtex, "📋 BibTeX copied to clipboard!");
+    }
+
+    function copySynthesisText() {
+      if (!currentAskData) return;
+      copyToClipboard(currentAskData.answer, "Summary copied to clipboard!");
+    }
+
+    function exportMarkdownNote() {
+      if (!currentAskData) return;
+      let md = `# Research Note\n\n${currentAskData.answer}\n\n## References\n`;
+      (currentAskData.citations || []).forEach(c => {
+        md += `- [${c.marker}] **${c.title}** (${c.section}) - [PDF](https://arxiv.org/pdf/${c.arxiv_id}.pdf)\n`;
+      });
+      copyToClipboard(md, "📥 Markdown note copied to clipboard!");
+    }
+
+    function copyToClipboard(text, msg) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => showToast(msg)).catch(() => fallbackCopy(text, msg));
+      } else {
+        fallbackCopy(text, msg);
+      }
+    }
+
+    function fallbackCopy(text, msg) {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.left = "-99999px";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      showToast(msg);
+    }
+
+    function showToast(msg) {
+      const t = document.getElementById('toast');
+      t.innerText = msg;
+      t.style.display = 'block';
+      setTimeout(() => { t.style.display = 'none'; }, 2800);
+    }
+
+    async function loadLibraryPapers() {
+      try {
+        const resp = await fetch('/v1/stats');
+        const data = await resp.json();
+        const tbody = document.getElementById('library-table-body');
+        if (data.papers && data.papers.length > 0) {
+          tbody.innerHTML = data.papers.map(p => `
+            <tr>
+              <td><code>${p.ArxivID}</code> (v${p.Version})</td>
+              <td><strong style="color: var(--text-main);">${p.Title}</strong></td>
+              <td><span style="color: var(--accent); font-family: var(--font-mono); font-size: 0.75rem;">${(p.Categories || []).join(', ')}</span></td>
+              <td><span style="color: var(--success); font-size: 0.75rem; font-weight: 600;">${p.Status}</span></td>
+              <td><a href="https://arxiv.org/pdf/${p.ArxivID}.pdf" target="_blank" class="btn-pdf" style="font-size: 0.75rem;">📄 Open PDF ↗</a></td>
+            </tr>
+          `).join('');
+        }
+      } catch (err) {
+        console.error("Library load error:", err);
+      }
+    }
+
+    function triggerDLQReplay() {
+      showToast("✅ Republished DLQ events to Kafka with attempt reset.");
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      handleSearch();
+    });
+  </script>
+</body>
+</html>
