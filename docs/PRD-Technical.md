@@ -194,6 +194,7 @@ erDiagram
 
 Design choices:
 - **`halfvec(768)`** halves vector storage compared with `vector(768)`, with negligible loss in recall.
+- **HNSW cosine index (gap):** no migration creates it yet. `chunk_embeddings_hnsw_idx` (`m=16, ef_construction=64`) is created only by `scripts/benchmark_hnsw.py`, so a fresh `make migrate` has exact (sequential) vector scans. Tracked by [OPS-H5](../agents/tasks/OPS-H5.md).
 - **`(chunk_id, model)` primary key** lets several embedding models co-exist, so a re-index can run without downtime.
 - **Generated `tsvector`** keeps BM25-style full-text search in sync with no application code.
 - **`processed_events`** is the per-consumer-group idempotency ledger.
@@ -328,12 +329,22 @@ Chaos tests (`tests/test_m4_chaos.py`) check two invariants: (a) redelivering an
 | Area | Requirement |
 |---|---|
 | **Throughput** | Horizontal scale up to 12 consumers per group (one per partition) |
-| **Latency** | `/v1/search` p95 < 1.5 s; `/v1/ask` p95 < 3 s on a laptop-class machine |
+| **Latency** | `/v1/search` p95 < 1.5 s; `/v1/ask` p95 < 3 s on the **primary reference machine** below, with the full stack (infra + workers + query service + embedder API) on that one machine, a warm cache (models loaded, one warm-up query), and the `evals/` corpus indexed |
 | **External politeness** | ≤ 1 arXiv API request / 3 s; identifying User-Agent |
 | **Durability** | PDFs in MinIO volume; Postgres and Kafka on named Docker volumes |
 | **Observability** | W3C `traceparent` on every event and DLQ record; `trace_id` returned from `/v1/ask` |
 | **Portability** | Go services build to a single static binary; Python services have Dockerfiles |
 | **Security (v1)** | Local-only defaults. Production must override credentials through env vars, enable TLS for MinIO/Postgres, and put the query API behind auth. |
+
+### Reference hardware (for latency targets)
+
+| Profile | Spec | Use |
+|---|---|---|
+| **Primary (MPS)** | Apple silicon M-series (M1 Pro or newer), 16 GB unified memory, macOS 14+, PyTorch MPS backend for the embedder and reranker, Docker Desktop with ≥ 8 GB RAM for Postgres/Kafka/MinIO | Latency targets above are **gated** on this profile |
+| **CPU-only** | x86-64, 8 vCPU, 16 GB RAM, no GPU (e.g. a CI runner or cloud VM), PyTorch CPU | Measured and reported, but **informational only**; expect slower rerank and embed |
+
+Report each latency number with the profile it was measured on. A result from any other machine must say so and cannot
+pass or fail a latency gate. *(PM-1 choice; the owner should confirm his actual dev machine matches the primary profile.)*
 
 ### Postgres tuning (compose)
 `shared_buffers=512MB`, `work_mem=32MB`, `effective_cache_size=1536MB`, `maintenance_work_mem=256MB`. These are sized for HNSW builds and hybrid queries on a 16 GB dev machine.
@@ -349,26 +360,30 @@ Chaos tests (`tests/test_m4_chaos.py`) check two invariants: (a) redelivering an
 | `test_m4_chaos.py` | Duplicate-event invariance, corrupt PDF → DLQ | Full stack |
 | `test_m5_m6_telemetry_eval.py` | traceparent round-trip, ranking metrics, HNSW index | Full stack |
 
+- **`make eval`** (`scripts/eval_gate.py`, pending EVAL-1 / PR #2) runs the retrieval and answer evals over `evals/` and fails on any `evals/thresholds.json` miss.
 - **`scripts/evaluate_retrieval.py`** compares BM25, vector, hybrid RRF, and RRF + rerank on Recall@5, MRR, and NDCG@5.
 - **`scripts/benchmark_hnsw.py`** sweeps `ef_search ∈ {20, 40, 80, 160}` and reports p50/p95/p99 latency, QPS, and index build time.
 
 ## 11. Roadmap
 
-| Priority | Item | Notes |
-|---|---|---|
-| P0 | **LLM answer synthesis** | Replace the template in `rag.go` with prompted generation over reranked chunks. The citation validator already guards against fabricated markers. |
-| P0 | Containerize processor + embedder in compose | Dockerfiles exist; add services and GPU/MPS notes |
-| P1 | Scheduled crawler | Cron/loop with a `since` watermark per category |
-| P1 | Unify Python deps | Add `minio`, `ulid-py`, `fastapi`, `uvicorn` to a single `requirements.txt` |
-| P1 | Batch embedding in RAG validation | Embed all sentences and chunks in one call instead of one call each |
-| P1 | Span export | OTLP exporter to Jaeger/Tempo |
-| P2 | Metrics | Prometheus: consumer lag, DLQ depth, stage latency |
-| P2 | Auth + rate limiting on query API | Needed before any shared deployment |
-| P2 | Figure/table extraction | Multi-modal chunks |
+| Priority | Item | Notes | Task |
+|---|---|---|---|
+| P0 | **LLM answer synthesis** | Replace the template in `rag.go` with prompted generation over reranked chunks. The citation validator already guards against fabricated markers. | [QA-8](../agents/tasks/QA-8.md) (Blocked: ADR-0001, ADR-0002) |
+| P0 | Containerize processor + embedder in compose | Dockerfiles exist; add services and GPU/MPS notes | [OPS-H1](../agents/tasks/OPS-H1.md) |
+| P1 | Scheduled crawler | Cron/loop with a `since` watermark per category | [ING-6](../agents/tasks/ING-6.md) |
+| P1 | Unify Python deps | Add `minio`, `ulid-py`, `fastapi`, `uvicorn` to a single `requirements.txt` | [OPS-H2](../agents/tasks/OPS-H2.md) |
+| P1 | Batch embedding in RAG validation | Embed all sentences and chunks in one call instead of one call each | [AI-3](../agents/tasks/AI-3.md) |
+| P1 | Span export | OTLP exporter to Jaeger/Tempo | Backlog |
+| P2 | Metrics | Prometheus: consumer lag, DLQ depth, stage latency | Backlog |
+| P2 | Auth + rate limiting on query API | Needed before any shared deployment | Backlog |
+| P2 | Figure/table extraction | Multi-modal chunks | Backlog (post-v1; Product PRD §4 non-goal for v1) |
 
 ## 12. Open technical questions
 
-1. Should LLM synthesis run in Go (calling the API directly) or in the Python embedder API?
-2. Should the on-demand ingest path publish to Kafka instead of running synchronously, for consistent idempotency and DLQ behavior?
-3. What HNSW parameters (`m`, `ef_construction`) should production use once the corpus passes ~1M chunks?
-4. Should the embedding model be swapped to a long-context model (e.g. 8k tokens) to reduce chunk boundary effects?
+Each question is tracked by an ADR. All are **Proposed**; only the owner sets Accepted or Rejected.
+
+1. Should LLM synthesis run in Go (calling the API directly) or in the Python embedder API? → [ADR-0002](adr/0002-where-synthesis-runs.md)
+2. Should the on-demand ingest path publish to Kafka instead of running synchronously, for consistent idempotency and DLQ behavior? → [ADR-0004](adr/0004-on-demand-ingest-path.md)
+3. What HNSW parameters (`m`, `ef_construction`) should production use once the corpus passes ~1M chunks? → [ADR-0008](adr/0008-hnsw-parameters-at-scale.md)
+4. Should the embedding model be swapped to a long-context model (e.g. 8k tokens) to reduce chunk boundary effects? → [ADR-0009](adr/0009-long-context-embedding-model.md)
+5. How is Recall@5 computed (paper-level or chunk-level)? → [ADR-0006](adr/0006-recall-at-5-definition.md)
