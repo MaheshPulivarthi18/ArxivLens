@@ -21,3 +21,8 @@
 
 ### Follow-ups created
 - 
+
+### Review status (filled by the workflow)
+- QA (qa-reviewer): PENDING → `agents/reviews/<TASK-ID>.md`
+- PM (pm-lead): —
+- Merge: human, after QA PASS + PM APPROVE

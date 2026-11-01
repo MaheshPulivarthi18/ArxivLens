@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fails an agent PR that edits files outside its role's owned paths (see AGENTS.md §1).
 # Usage: scripts/agent_guardrails.sh <base-ref> <head-branch-name>
-# Branch convention: agent/<role>/<TASK-ID>, role in {ai, backend, frontend, pm}.
+# Branch convention: agent/<role>/<TASK-ID>, role in {ai, backend, frontend, pm, qa}.
 set -euo pipefail
 
 BASE="${1:?base ref, e.g. origin/main}"
@@ -15,8 +15,9 @@ case "$ROLE" in
   ai)       ALLOW='^(services/embedder/(api|worker)\.py$|internal/query/rag(_test)?\.go$|scripts/|evals/|tests/)' ;;
   backend)  ALLOW='^(cmd/|internal/|services/(processor|common)/|services/embedder/Dockerfile$|services/AGENTS\.md$|shared/|migrations/|tests/|docker-compose\.yml$|Makefile$|\.github/|requirements[^/]*\.txt$|\.gitignore$|go\.(mod|sum)$|scripts/agent_guardrails\.sh$)' ;;
   frontend) ALLOW='^frontend/' ;;
+  qa)       ALLOW='^agents/reviews/' ;;
   pm)       ALLOW='^(docs/|AGENTS\.md$|CLAUDE\.md$|[a-z]+/AGENTS\.md$|\.claude/)' ;;
-  *) echo "Unknown role '$ROLE' in branch '$BRANCH' (expected agent/<ai|backend|frontend|pm>/<TASK-ID>)"; exit 1 ;;
+  *) echo "Unknown role '$ROLE' in branch '$BRANCH' (expected agent/<ai|backend|frontend|pm|qa>/<TASK-ID>)"; exit 1 ;;
 esac
 
 # rag.go belongs to the AI engineer even though it lives under internal/.

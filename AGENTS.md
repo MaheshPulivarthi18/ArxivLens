@@ -20,6 +20,20 @@ Agents have no memory between sessions. Everything an agent needs to know lives 
 | **AI engineer** | `.claude/agents/ai-engineer.md` | `services/embedder/*.py`, `internal/query/rag.go` + `rag_test.go`, `scripts/`, `evals/`, `tests/` | `frontend/`, `migrations/`, Kafka code |
 | **Backend & distributed systems** | `.claude/agents/backend-engineer.md` | `cmd/`, `internal/` (except `rag.go`), `services/processor/`, `services/common/`, `services/embedder/Dockerfile`, `shared/`, `migrations/`, `tests/`, `docker-compose.yml`, `Makefile`, `.github/`, `requirements*.txt`, `go.mod` | `frontend/`, `rag.go` |
 | **Frontend** | `.claude/agents/frontend-engineer.md` | `frontend/` | Everything outside `frontend/` |
+| **QA / PR reviewer** | `.claude/agents/qa-reviewer.md` | `agents/reviews/` only | Product code, tests, CI, ticket ACs |
+
+### Workflow (every task, no exceptions)
+
+| Stage | Who | Output | Next |
+|---|---|---|---|
+| 1. Spec | pm-lead | `agents/tasks/<ID>.md` with PRD ref + acceptance criteria | Ready |
+| 2. Build | owning developer | branch `agent/<role>/<ID>` + PR | In QA |
+| 3. QA | qa-reviewer (independent, fresh context) | `agents/reviews/<ID>.md` + PR comment: PASS / FAIL / PENDING, with CI and test evidence per AC | PASS → PM review · FAIL → back to developer |
+| 4. Final review | pm-lead | APPROVE / CHANGES appended to the review file + PR comment | APPROVE → Ready to merge |
+| 5. Merge | **human** | merges the PR | Done |
+
+Max 2 rework rounds (QA FAIL or PM CHANGES) per task per cycle, then Blocked with the reports linked.
+Nobody reviews their own work. The developer's self-report is never passed to QA.
 
 Every role may also edit `agents/` (task notes, board, progress, lessons), the PRD status columns, and `README.md`.
 **CI enforces this** on `agent/*` branches with `scripts/agent_guardrails.sh` (also blocks agents from accepting ADRs,
@@ -65,6 +79,10 @@ mark the task `Blocked (needs ADR)`, and move on.
 3. If the task touches retrieval or answering: `make eval` does not regress (paste before/after numbers in the PR).
 4. Docs updated: PRD status column, README if user-facing behaviour or commands changed.
 5. PR opened with the template in `agents/templates/pr.md`; board and PROGRESS updated.
+6. QA report says **PASS** and pm-lead says **APPROVE** in `agents/reviews/<TASK-ID>.md`. Only then is it Ready to merge.
+
+**CI is the source of truth for test results.** Agent sandboxes may lack Go 1.25, npm, Docker or Hugging Face access,
+so "not run locally" is acceptable — "passes" without a CI run or command output is not.
 
 ## 4. Repo map
 
