@@ -14,11 +14,11 @@ import (
 type RecordHandler func(ctx context.Context, record *kgo.Record) error
 
 type Consumer struct {
-	client        *kgo.Client
-	group         string
-	topics        []string
-	producer      *Producer
-	maxRetries    int
+	client     *kgo.Client
+	group      string
+	topics     []string
+	producer   *Producer
+	maxRetries int
 }
 
 func NewConsumer(brokers []string, group string, topics []string, producer *Producer) (*Consumer, error) {

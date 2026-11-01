@@ -6,13 +6,13 @@ import (
 )
 
 type Config struct {
-	PostgresURL     string
-	KafkaBrokers    []string
-	MinioEndpoint   string
-	MinioAccessKey  string
-	MinioSecretKey  string
-	MinioBucket     string
-	MinioUseSSL     bool
+	PostgresURL    string
+	KafkaBrokers   []string
+	MinioEndpoint  string
+	MinioAccessKey string
+	MinioSecretKey string
+	MinioBucket    string
+	MinioUseSSL    bool
 }
 
 func LoadConfig() *Config {

@@ -25,13 +25,13 @@ type Feed struct {
 }
 
 type Entry struct {
-	ID        string     `xml:"id"`
-	Published string     `xml:"published"`
-	Title     string     `xml:"title"`
-	Summary   string     `xml:"summary"`
-	Authors   []Author   `xml:"author"`
+	ID         string     `xml:"id"`
+	Published  string     `xml:"published"`
+	Title      string     `xml:"title"`
+	Summary    string     `xml:"summary"`
+	Authors    []Author   `xml:"author"`
 	Categories []Category `xml:"category"`
-	Links     []Link     `xml:"link"`
+	Links      []Link     `xml:"link"`
 }
 
 type Author struct {

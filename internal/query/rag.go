@@ -130,7 +130,7 @@ func (r *RAGService) Ask(
 				continue
 			}
 			markerIdx, _ := strconv.Atoi(m[1])
-			
+
 			// Detect fabricated markers outside 1..K
 			if markerIdx < 1 || markerIdx > k {
 				continue
@@ -138,7 +138,7 @@ func (r *RAGService) Ask(
 
 			hit := hits[markerIdx-1]
 			cleanSent := strings.TrimSpace(markerRegex.ReplaceAllString(sent, ""))
-			
+
 			// 5. Verify Support (§9): Embed sentence and compute cosine similarity with chunk
 			supported := false
 			score := 0.0

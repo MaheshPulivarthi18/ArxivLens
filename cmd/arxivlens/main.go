@@ -204,9 +204,9 @@ func newStatusCmd() *cobra.Command {
 
 func newQueryCmd() *cobra.Command {
 	var (
-		port         int
-		embedderURL  string
-		modelName    string
+		port        int
+		embedderURL string
+		modelName   string
 	)
 
 	cmd := &cobra.Command{
