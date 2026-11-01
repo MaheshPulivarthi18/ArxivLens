@@ -38,25 +38,28 @@ Find a task's story with JQL: `project = KAN AND labels = "task-<ID>"`. Never re
 | Research UI & citations | KAN-5 | FE-1 (KAN-19), FE-2 (KAN-20) |
 | Product planning & decisions | KAN-6 | PM-1 (KAN-21), ADR decisions (KAN-22, KAN-23) |
 
-## Status and stage
-The project currently has the statuses **To Do, In Progress, In Review, Done**. Stages that have no status of their own
-are shown with a `stage-*` label. If Mahesh adds statuses named exactly **Design**, **In QA**, **PM review** or
-**Ready to merge**, use those instead of the labels (check `listJiraIssueTransitions` for the story).
+## Status = workflow stage
+The board's columns are the workflow stages, one Jira status each:
+**To Do → Design → In Progress → In QA → PM review → Ready to merge → Done**.
 
-| Workflow stage | Jira status | Stage label (keep exactly one) | Who moves it |
-|---|---|---|---|
-| Ready (spec done) | To Do | — | pm-lead |
-| Design (if `design-required`) | In Progress | `stage-design` | developer |
-| Design approved | In Progress | `stage-design-approved` | pm-lead |
-| Building | In Progress | `stage-build` | developer |
-| In QA | In Review | `stage-qa` | developer (when PR opens), qa-reviewer (on re-review) |
-| PM review | In Review | `stage-pm-review` | qa-reviewer (on PASS) |
-| Ready to merge | In Review | `ready-to-merge` | pm-lead (on APPROVE) |
-| Done | Done | — | orchestrator, after the human merges |
-| Blocked | unchanged | `blocked` (+ comment with the reason) | whoever is blocked |
+| Workflow stage | Jira status | Who moves it there |
+|---|---|---|
+| Ready (spec done) | To Do | pm-lead |
+| Design (only `design-required` tasks) | Design | developer, when they start the design |
+| Building (design approved or not needed) | In Progress | developer (pm-lead after approving a design) |
+| In QA | In QA | developer, when the PR opens |
+| PM review | PM review | qa-reviewer, on PASS |
+| Ready to merge | Ready to merge | pm-lead, on APPROVE |
+| Done | Done | orchestrator, after the human merges |
+| Rework (QA FAIL / PM CHANGES) | In Progress | qa-reviewer / pm-lead |
+| Blocked | unchanged + label `blocked` + comment with the reason | whoever is blocked |
 
-Labels are set, not appended (`editJiraIssue` replaces the list): read the current labels, swap the `stage-*` one,
-write the full list back.
+**Moving a ticket:** call `listJiraIssueTransitions` and pick the transition whose **target status** (`to.name`)
+matches; don't go by the transition's own name (the one into In QA is still called "In Review").
+
+**Labels are for properties, not stages:** `arxivlens`, `task-<ID>`, `agent-<role>`, `design-required`, `blocked`,
+`human-decision`. Labels are set, not appended (`editJiraIssue` replaces the list): read the current labels, change
+what you need, write the full list back.
 
 ## Comments: who did what
 Every comment starts with the role in brackets, so the ticket reads like a team thread even though the API acts as

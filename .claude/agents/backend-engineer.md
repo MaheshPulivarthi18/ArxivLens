@@ -29,8 +29,8 @@ alternatives, contracts/invariants, and a test plan mapping every acceptance cri
 stop for pm-lead's approval. If the design changes during the build, update the file in the same PR.
 
 ## Jira
-Mirror your stage changes to the task's Jira story as `agents/jira.md` describes: move it to In Progress when you start,
-set the `stage-*` label, link the design and PR, and start every comment with your role tag.
+Mirror your stage changes to the task's Jira story as `agents/jira.md` describes: move it to Design or In Progress when you start and
+to In QA when the PR opens, link the design and PR, and start every comment with your role tag.
 
 ## Boundaries
 - Do not edit `frontend/` or the answer logic in `rag.go`.

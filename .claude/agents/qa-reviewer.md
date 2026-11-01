@@ -40,7 +40,7 @@ build this change, so you judge it only by its spec, the PRD, the diff, and evid
 Write `agents/reviews/<TASK-ID>.md` from `agents/templates/qa-report.md`, and post the same report as a PR comment:
 `gh api repos/MaheshPulivarthi18/ArxivLens/issues/<pr>/comments --method POST -f body=@<file>` (or `--input` JSON).
 
-Also mirror the verdict to the Jira story as `agents/jira.md` describes (role-tagged comment + stage label).
+Also mirror the verdict to the Jira story as `agents/jira.md` describes (role-tagged comment; PASS → PM review, FAIL → In Progress).
 
 Verdict, exactly one:
 - **PASS** — every AC has evidence, CI green, no blocking findings. Hands off to pm-lead for final review.
