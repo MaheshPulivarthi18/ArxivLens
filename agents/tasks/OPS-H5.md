@@ -5,7 +5,7 @@
 | **Owner** | backend-engineer |
 | **Priority** | P1 |
 | **PRD ref** | QA-1; Product PRD §8 `/v1/search` p95 < 1.5 s; Technical PRD §5 (HNSW gap note) |
-| **Depends on** | — |
+| **Depends on** | — (soft: OPS-H1 for AC5; without it, start the workers by hand per AGENTS.md §5) |
 | **Status** | Ready |
 
 ## Goal
@@ -27,7 +27,7 @@ passes only if the benchmark script happened to run first. Also, `arxivlens migr
 - [ ] AC2 — Running `make migrate` twice in a row succeeds (idempotent).
 - [ ] AC3 — Go unit test: the migration runner selects `*.up.sql` only, in lexical order (`000001` before `000002`). Passes with no DB.
 - [ ] AC4 — `EXPLAIN` of the vector CTE in the hybrid query from `internal/query` is pasted in the PR, with the planner's choice noted. If the planner does not use the index (e.g. because of the join or model filter), open a follow-up request in Notes instead of changing the query here.
-- [ ] AC5 — `make test-full` M1 and M5/M6 pass on a fresh stack without running `scripts/benchmark_hnsw.py` first.
+- [ ] AC5 — `make test-full` M1 and M5/M6 pass on a fresh stack without running `scripts/benchmark_hnsw.py` first. Use OPS-H1's `make stack-up` if merged; otherwise start the processor/embedder workers by hand (AGENTS.md §5) and say so in the PR. If no Docker is available, write "not run: infra unavailable" plus the exact commands. AC1–AC3 still need evidence.
 
 ## Verification
 ```bash

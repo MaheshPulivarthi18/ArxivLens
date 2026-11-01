@@ -329,22 +329,26 @@ Chaos tests (`tests/test_m4_chaos.py`) check two invariants: (a) redelivering an
 | Area | Requirement |
 |---|---|
 | **Throughput** | Horizontal scale up to 12 consumers per group (one per partition) |
-| **Latency** | `/v1/search` p95 < 1.5 s; `/v1/ask` p95 < 3 s on the **primary reference machine** below, with the full stack (infra + workers + query service + embedder API) on that one machine, a warm cache (models loaded, one warm-up query), and the `evals/` corpus indexed |
+| **Latency** | `/v1/search` p95 < 1.5 s; `/v1/ask` p95 < 3 s, measured on the **primary reference machine** below (*Proposed*, see "Reference hardware"), with the full stack (infra + workers + query service + embedder API) on that one machine, a warm cache (models loaded, one warm-up query), and the `evals/` corpus indexed |
 | **External politeness** | ≤ 1 arXiv API request / 3 s; identifying User-Agent |
 | **Durability** | PDFs in MinIO volume; Postgres and Kafka on named Docker volumes |
 | **Observability** | W3C `traceparent` on every event and DLQ record; `trace_id` returned from `/v1/ask` |
 | **Portability** | Go services build to a single static binary; Python services have Dockerfiles |
 | **Security (v1)** | Local-only defaults. Production must override credentials through env vars, enable TLS for MinIO/Postgres, and put the query API behind auth. |
 
-### Reference hardware (for latency targets)
+### Reference hardware (for latency targets) — *Proposed (pm-lead, needs human approval)*
 
-| Profile | Spec | Use |
+This whole subsection, including the gating rule below, is a pm-lead proposal from PM-1. It is not yet policy. Until
+Mahesh approves it (or decides otherwise), the existing gates (e.g. EVAL-1's `ask_p95_latency_ms_max`) apply unchanged
+on whatever machine runs `make eval`.
+
+| Profile | Spec | Proposed use |
 |---|---|---|
 | **Primary (MPS)** | Apple silicon M-series (M1 Pro or newer), 16 GB unified memory, macOS 14+, PyTorch MPS backend for the embedder and reranker, Docker Desktop with ≥ 8 GB RAM for Postgres/Kafka/MinIO | Latency targets above are **gated** on this profile |
 | **CPU-only** | x86-64, 8 vCPU, 16 GB RAM, no GPU (e.g. a CI runner or cloud VM), PyTorch CPU | Measured and reported, but **informational only**; expect slower rerank and embed |
 
-Report each latency number with the profile it was measured on. A result from any other machine must say so and cannot
-pass or fail a latency gate. *(PM-1 choice; the owner should confirm his actual dev machine matches the primary profile.)*
+*Proposed rule:* report each latency number with the profile it was measured on. A result from any other machine must
+say so and cannot pass or fail a latency gate. *(The owner should also confirm his actual dev machine matches the primary profile.)*
 
 ### Postgres tuning (compose)
 `shared_buffers=512MB`, `work_mem=32MB`, `effective_cache_size=1536MB`, `maintenance_work_mem=256MB`. These are sized for HNSW builds and hybrid queries on a 16 GB dev machine.

@@ -39,3 +39,9 @@ git diff --stat origin/main   # only docs/ and agents/
   - **New specs:** OPS-H4, OPS-H5, AI-2, AI-3, EVAL-2. AI-2 is separate from AI-1 because AI-1 excludes behaviour changes.
   - **Follow-up after PR #2 merges:** remove the AGENTS.md §5 gotcha "Retrieval eval queries are hardcoded in `scripts/evaluate_retrieval.py`", the matching ai-engineer lesson, and the "pending EVAL-1" notes in Product PRD §8 and Technical PRD §10. AGENTS.md was left unchanged here, because the gotcha is still true on main.
   - Not specced (blocked or not yet cheap): QA-9 (after QA-8), OTLP export, Prometheus/OPS-6, auth (scope depends on ADR-0007), on-demand ingest via Kafka (ADR-0004).
+- 2026-11-01 (pm-lead, fix round 1, after independent review):
+  1. Technical PRD §9 "Reference hardware" and its gating rule are now labelled *Proposed (pm-lead, needs human approval)*. Until approved, existing gates apply unchanged on any machine. The Product PRD §8 references to it are marked (Proposed).
+  2. EVAL-2 now gates `/v1/search` p95 unconditionally and records the machine profile in the results JSON. Profile-aware gating is deferred until Mahesh decides on §9. The spec says `search_p95_latency_ms_max` is a new gate key, taken from the existing PRD target, and needs Mahesh's confirmation in the PR (new AC4).
+  3. EVAL-2 now names `tests/test_eval_gate.py` and adds its pytest command to Verification.
+  4. OPS-H5 has a soft dependency on OPS-H1 for AC5, or the workers can be started by hand (AGENTS.md §5).
+  The PR #2 follow-up note (remove the AGENTS.md §5 gotcha, the ai-engineer lesson, and the "pending EVAL-1" notes) was already recorded above.
