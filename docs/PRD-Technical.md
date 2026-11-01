@@ -283,6 +283,7 @@ flowchart TD
 ```
 
 Constants are set in `internal/query/rag.go`: relevance cutoff `0.45`, auxiliary-section cutoff `0.70`, `SupportThreshold = 0.50`.
+Known gap (Product PRD QA-4 ◐ partial): the diagram shows the happy path. If the embedder call fails or the cited chunk has no embedding, `rag.go` currently sets `score = 0.75`, `supported = true` without verification. [AI-2](../agents/tasks/AI-2.md) changes this to fail closed (`supported = false`, `score = 0`).
 
 ### 7.3 On-demand ingest (`/v1/papers/ingest`, `/v1/papers/discover`)
 This path runs synchronously and skips Kafka, for an interactive experience:

@@ -112,7 +112,7 @@ Status: ✅ done (verified against the code 2026-11-01, PM-1) · ◐ partial · 
 | QA-1 | Hybrid search combining semantic vectors and keyword (BM25) via rank fusion | P0 | ✅ | — |
 | QA-2 | Cross-encoder reranking of top candidates | P0 | ✅ | — |
 | QA-3 | Answers carry numbered citations `[n]` mapping to paper, section, passage, PDF link | P0 | ✅ | — |
-| QA-4 | Each citation is verified (semantic similarity ≥ threshold) and labeled supported/unsupported | P0 | ✅ | — |
+| QA-4 | Each citation is verified (semantic similarity ≥ threshold) and labeled supported/unsupported | P0 | ◐ partial | Verified on the happy path (cosine similarity ≥ `SupportThreshold = 0.50` in `internal/query/rag.go`). Fails open: when the embedder call fails or the cited chunk has no embedding, the citation is labelled supported with score 0.75 without being verified. Remaining: [AI-2](../agents/tasks/AI-2.md) makes it fail closed (unverified → unsupported, score 0). |
 | QA-5 | Refuse cleanly when no passage passes the relevance bar | P0 | ✅ | — |
 | QA-6 | De-prioritize appendix, supplementary, and table passages unless strongly relevant | P1 | ✅ | — |
 | QA-7 | Filter by arXiv category | P1 | ✅ (API) | — |

@@ -45,3 +45,4 @@ git diff --stat origin/main   # only docs/ and agents/
   3. EVAL-2 now names `tests/test_eval_gate.py` and adds its pytest command to Verification.
   4. OPS-H5 has a soft dependency on OPS-H1 for AC5, or the workers can be started by hand (AGENTS.md §5).
   The PR #2 follow-up note (remove the AGENTS.md §5 gotcha, the ai-engineer lesson, and the "pending EVAL-1" notes) was already recorded above.
+- Round 1 QA FAIL → fixed QA-4 status, AI-3 AC4, AI-2 Notes

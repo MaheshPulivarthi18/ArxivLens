@@ -36,5 +36,5 @@ make eval   # when infra is available
 ```
 
 ## Notes
-- Specced by pm-lead in PM-1 from EVAL-1 finding (c). AI-1 covers testing existing behaviour but explicitly excludes behaviour changes, so this is a separate task.
+- Specced by pm-lead in PM-1 from EVAL-1 finding (c). AI-1 locks existing behaviour with tests and allows only small bug fixes (≤ 20 lines). The AI-2 code change is about 3 lines, but it is a separate task because failing closed is a product-behaviour decision (QA-4 trust promise, affects the gated supported-citation metric), not a bug fix found while testing.
 - Verified on main: `rag.go` lines ~146–154 (`score = 0.75 // Fallback if embedding service unavailable`, `supported = true`).

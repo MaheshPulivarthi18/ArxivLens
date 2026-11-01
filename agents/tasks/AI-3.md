@@ -22,7 +22,7 @@ and one call for all distinct cited sentences cuts `/v1/ask` latency, and QA-8 w
 - [ ] AC1 — The call-count test passes (≤ 2 `EmbedTexts` calls per `Ask`).
 - [ ] AC2 — All existing AI-1/AI-2 tests pass unchanged (no test edited to fit the new code).
 - [ ] AC3 — `make eval`: supported-citation rate unchanged (±0.01) and `/v1/ask` p50/p95 before/after pasted, or "not run: infra unavailable" plus the exact command.
-- [ ] AC4 — Technical PRD §11 row status updated in the PR.
+- [ ] AC4 — In the same PR, the Technical PRD §11 row "Batch embedding in RAG validation" has its Notes cell prefixed with `✅ Done (AI-3, PR #<n>):` (§11 has no Status column; the row stays so the Task link remains). Check: `grep -n "Batch embedding in RAG validation" docs/PRD-Technical.md` shows the prefix.
 
 ## Verification
 ```bash
