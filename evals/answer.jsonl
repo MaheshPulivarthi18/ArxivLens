@@ -1,0 +1,22 @@
+{"id": "a001", "question": "How does the Transformer use multi-head attention instead of recurrence?", "expected_arxiv_ids": ["1706.03762"]}
+{"id": "a002", "question": "What pre-training objectives does BERT use?", "expected_arxiv_ids": ["1810.04805"]}
+{"id": "a003", "question": "What changes to BERT's pretraining recipe does RoBERTa make?", "expected_arxiv_ids": ["1907.11692"]}
+{"id": "a004", "question": "How does T5 cast every NLP task into a text-to-text format?", "expected_arxiv_ids": ["1910.10683"]}
+{"id": "a005", "question": "How does GPT-3 perform few-shot learning without gradient updates?", "expected_arxiv_ids": ["2005.14165"]}
+{"id": "a006", "question": "How does retrieval-augmented generation combine a retriever with a seq2seq generator?", "expected_arxiv_ids": ["2005.11401"]}
+{"id": "a007", "question": "How are the question and passage encoders trained in dense passage retrieval?", "expected_arxiv_ids": ["2004.04906"]}
+{"id": "a008", "question": "What is late interaction in ColBERT?", "expected_arxiv_ids": ["2004.12832"]}
+{"id": "a009", "question": "How do HNSW graphs speed up approximate nearest neighbor search?", "expected_arxiv_ids": ["1603.09320"]}
+{"id": "a010", "question": "How does LoRA reduce the number of trainable parameters during fine-tuning?", "expected_arxiv_ids": ["2106.09685"]}
+{"id": "a011", "question": "Why does chain-of-thought prompting improve reasoning in large language models?", "expected_arxiv_ids": ["2201.11903"]}
+{"id": "a012", "question": "How is the reward model trained in InstructGPT?", "expected_arxiv_ids": ["2203.02155"]}
+{"id": "a013", "question": "How does Direct Preference Optimization avoid training a separate reward model?", "expected_arxiv_ids": ["2305.18290"]}
+{"id": "a014", "question": "What is the clipped surrogate objective in PPO?", "expected_arxiv_ids": ["1707.06347"]}
+{"id": "a015", "question": "How does language model loss scale with the number of parameters?", "expected_arxiv_ids": ["2001.08361", "2203.15556"]}
+{"id": "a016", "question": "How does FlashAttention reduce memory traffic on GPUs?", "expected_arxiv_ids": ["2205.14135"]}
+{"id": "a017", "question": "Why do residual connections make very deep networks easier to train?", "expected_arxiv_ids": ["1512.03385"]}
+{"id": "a018", "question": "How does the Vision Transformer turn an image into a token sequence?", "expected_arxiv_ids": ["2010.11929"]}
+{"id": "a019", "question": "How does CLIP perform zero-shot image classification?", "expected_arxiv_ids": ["2103.00020"]}
+{"id": "a020", "question": "Why do latent diffusion models run the diffusion process in a compressed latent space?", "expected_arxiv_ids": ["2112.10752"]}
+{"id": "a021", "question": "How does Adam compute per-parameter adaptive learning rates?", "expected_arxiv_ids": ["1412.6980"]}
+{"id": "a022", "question": "How does ReAct combine reasoning and acting in language models?", "expected_arxiv_ids": ["2210.03629"]}

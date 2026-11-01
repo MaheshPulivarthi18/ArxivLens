@@ -11,17 +11,28 @@ Metrics Computed:
   - Recall@5
   - MRR (Mean Reciprocal Rank)
   - NDCG@5
+
+Queries come from evals/retrieval.jsonl (EVAL-1); none are hardcoded here.
+Heavy dependencies (psycopg, numpy, sentence-transformers) are imported lazily so
+`--help` and the metric helpers work without infra.
 """
 
+import argparse
+import json
 import math
+import os
 import time
 from typing import List, Dict, Any
-import numpy as np
-import psycopg
-import requests
 
-from scripts.m0_skeleton import BGEEmbedder
-from services.common.config import config
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_DATASET = os.path.join(REPO_ROOT, "evals", "retrieval.jsonl")
+MODES = ["BM25 Keyword", "Dense Vector", "Hybrid RRF", "Hybrid RRF + Rerank"]
+
+
+def load_cases(path: str = DEFAULT_DATASET) -> List[Dict[str, Any]]:
+    """Read a JSONL eval set, skipping blank lines."""
+    with open(path, encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
 
 
 def compute_mrr(ranked_doc_ids: List[int], relevant_doc_ids: List[int]) -> float:
@@ -50,49 +61,40 @@ def compute_ndcg_at_k(ranked_doc_ids: List[int], relevant_doc_ids: List[int], k:
     return (dcg / idcg) if idcg > 0 else 0.0
 
 
-def run_retrieval_evaluation():
+def run_retrieval_evaluation(dataset_path: str = DEFAULT_DATASET) -> Dict[str, Any]:
+    """Run all 4 modes over the dataset. Returns per-mode mean metrics plus coverage counts."""
+    import numpy as np
+    import psycopg
+
+    from scripts.m0_skeleton import BGEEmbedder
+    from services.common.config import config
+
     print("=" * 70)
     print("ArxivLens — Information Retrieval Evaluation Suite (§11)")
     print("=" * 70)
 
+    eval_queries = load_cases(dataset_path)
+    skipped: List[str] = []
+
     conn = psycopg.connect(config.postgres_url)
     embedder = BGEEmbedder()
 
-    # Define test queries and target ground truth keywords/papers
-    eval_queries = [
-        {
-            "query": "grounded checklist reward learning medical report interpretation",
-            "target_arxiv": "2608.20331",
-        },
-        {
-            "query": "active data collection travel behavior weather demand prediction",
-            "target_arxiv": "2608.20320",
-        },
-        {
-            "query": "patient-oriented multimodal generation clinical factuality",
-            "target_arxiv": "2608.20331",
-        },
-        {
-            "query": "reinforcement learning multi-agent travel simulation",
-            "target_arxiv": "2608.20320",
-        },
-    ]
-
-    modes = ["BM25 Keyword", "Dense Vector", "Hybrid RRF", "Hybrid RRF + Rerank"]
-    results = {m: {"recall@5": [], "mrr": [], "ndcg@5": [], "latencies_ms": []} for m in modes}
+    results = {m: {"recall@5": [], "mrr": [], "ndcg@5": [], "latencies_ms": []} for m in MODES}
 
     with conn.cursor() as cur:
         for q_item in eval_queries:
             query = q_item["query"]
-            target_arxiv = q_item["target_arxiv"]
+            relevant_arxiv_ids = list(q_item["relevant_arxiv_ids"])
 
-            # Get relevant chunk IDs for this paper
+            # Relevant chunks = every chunk of any relevant paper
             cur.execute(
-                "SELECT pc.id FROM paper_chunks pc JOIN papers p ON p.id = pc.paper_id WHERE p.arxiv_id = %s;",
-                (target_arxiv,),
+                "SELECT pc.id FROM paper_chunks pc JOIN papers p ON p.id = pc.paper_id WHERE p.arxiv_id = ANY(%s);",
+                (relevant_arxiv_ids,),
             )
             relevant_chunks = [r[0] for r in cur.fetchall()]
             if not relevant_chunks:
+                # Paper not indexed: record it so the gate can fail on incomplete coverage.
+                skipped.append(q_item["id"])
                 continue
 
             q_vec = embedder.embed_texts([query], is_query=True)[0]
@@ -205,17 +207,38 @@ def run_retrieval_evaluation():
 
     conn.close()
 
+    summary: Dict[str, Any] = {"modes": {}, "cases_total": len(eval_queries), "skipped_case_ids": skipped}
+    summary["cases_evaluated"] = len(eval_queries) - len(skipped)
+
     print("\nBenchmark Results Summary Table:")
     print(f"{'Configuration':<24} | {'Recall@5':<10} | {'MRR':<8} | {'NDCG@5':<8} | {'Avg Latency (ms)':<15}")
     print("-" * 75)
     for mode, metrics in results.items():
-        rec = np.mean(metrics["recall@5"]) if metrics["recall@5"] else 0.0
-        mrr = np.mean(metrics["mrr"]) if metrics["mrr"] else 0.0
-        ndcg = np.mean(metrics["ndcg@5"]) if metrics["ndcg@5"] else 0.0
-        lat = np.mean(metrics["latencies_ms"]) if metrics["latencies_ms"] else 0.0
+        rec = float(np.mean(metrics["recall@5"])) if metrics["recall@5"] else 0.0
+        mrr = float(np.mean(metrics["mrr"])) if metrics["mrr"] else 0.0
+        ndcg = float(np.mean(metrics["ndcg@5"])) if metrics["ndcg@5"] else 0.0
+        lat = float(np.mean(metrics["latencies_ms"])) if metrics["latencies_ms"] else 0.0
+        summary["modes"][mode] = {"recall@5": rec, "mrr": mrr, "ndcg@5": ndcg, "avg_latency_ms": lat}
         print(f"{mode:<24} | {rec:<10.4f} | {mrr:<8.4f} | {ndcg:<8.4f} | {lat:<15.2f}")
     print("=" * 75)
+    print(f"Cases evaluated: {summary['cases_evaluated']}/{summary['cases_total']}")
+    if skipped:
+        print(f"WARNING: skipped (paper not indexed): {', '.join(skipped)}")
+    return summary
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Retrieval eval (Recall@5 / MRR / NDCG@5) over 4 modes. "
+                                     "Needs Postgres with the evals/corpus.txt papers indexed (DATABASE_URL).")
+    parser.add_argument("--dataset", default=DEFAULT_DATASET, help="JSONL eval set (default: evals/retrieval.jsonl)")
+    parser.add_argument("--json-out", help="Also write the summary as JSON to this path")
+    args = parser.parse_args(argv)
+    summary = run_retrieval_evaluation(args.dataset)
+    if args.json_out:
+        with open(args.json_out, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+    return 0
 
 
 if __name__ == "__main__":
-    run_retrieval_evaluation()
+    raise SystemExit(main())

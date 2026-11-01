@@ -1,0 +1,33 @@
+# arXiv IDs the eval sets assume are indexed. One ID per line (no version suffix); text after '#' is ignored.
+# Seed with: see evals/README.md. Every ID referenced in retrieval.jsonl / answer.jsonl must be listed here.
+2608.20331  # original eval paper: grounded checklist reward learning, medical report interpretation
+2608.20320  # original eval paper: active data collection, travel behaviour / weather demand prediction
+1706.03762  # Attention Is All You Need
+1810.04805  # BERT
+1907.11692  # RoBERTa
+1910.10683  # T5: Exploring the Limits of Transfer Learning with a Unified Text-to-Text Transformer
+2005.14165  # GPT-3: Language Models are Few-Shot Learners
+2005.11401  # Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks
+2004.04906  # Dense Passage Retrieval for Open-Domain Question Answering
+2004.12832  # ColBERT
+2104.08663  # BEIR benchmark
+2309.07597  # C-Pack (BGE embeddings)
+1603.09320  # HNSW graphs for approximate nearest neighbour search
+2106.09685  # LoRA
+2201.11903  # Chain-of-Thought Prompting
+2203.02155  # InstructGPT: Training language models to follow instructions with human feedback
+2305.18290  # Direct Preference Optimization
+1707.06347  # Proximal Policy Optimization
+2001.08361  # Scaling Laws for Neural Language Models
+2203.15556  # Chinchilla: Training Compute-Optimal Large Language Models
+2205.14135  # FlashAttention
+2104.09864  # RoFormer (rotary position embedding)
+1512.03385  # ResNet: Deep Residual Learning
+2010.11929  # ViT: An Image is Worth 16x16 Words
+2103.00020  # CLIP
+2006.11239  # DDPM: Denoising Diffusion Probabilistic Models
+2112.10752  # Latent Diffusion Models
+1412.6980   # Adam
+1502.03167  # Batch Normalization
+1406.2661   # Generative Adversarial Networks
+2210.03629  # ReAct

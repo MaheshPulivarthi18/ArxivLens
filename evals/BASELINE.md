@@ -1,0 +1,23 @@
+# Eval baseline — templated `/v1/ask` (pre-QA-8)
+
+**Status: not run: infra unavailable in agent sandbox** (2026-11-01, EVAL-1). Docker Hub, Hugging Face, arXiv and the
+Go 1.25 toolchain are unreachable there, so no stack, model, or corpus could be brought up. No numbers are claimed.
+
+## Commands for the human (repo root)
+```bash
+make infra-up && make migrate
+python3 services/embedder/api.py &                    # :8081
+make build-go && ./bin/arxivlens query --port 8080 &   # query service on :8080
+# seed every ID in evals/corpus.txt — see evals/README.md "Seeding the corpus"
+make eval                                             # or: python3 scripts/eval_gate.py
+```
+Then paste the printed table and the `evals/results/<timestamp>.json` path below and commit this file.
+
+| Metric | Target (PRD §8) | Baseline |
+|---|---|---|
+| Recall@5 (Hybrid RRF + Rerank) | ≥ 0.80 | not run |
+| Hybrid+rerank beats BM25 and dense on MRR, NDCG@5 | yes | not run |
+| Supported citations | ≥ 90% | not run |
+| Correct refusals | ≥ 95% | not run |
+| `/v1/ask` p95 | < 3000 ms | not run |
+| (info) answers citing an expected paper | — | not run |
