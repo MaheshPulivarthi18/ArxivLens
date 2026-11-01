@@ -1,0 +1,9 @@
+$ python3 /tmp/claude-0/-home-claude/67e2add1-e9b7-5ce0-b3be-88a19838307a/scratchpad/ac2.py
+corpus.txt: 31 IDs, unique=True, all well-formed=True
+retrieval.jsonl  n= 34 (min 30) size_ok=True schema_ok=True ids_not_in_corpus=none unique_text=True
+answer.jsonl     n= 22 (min 20) size_ok=True schema_ok=True ids_not_in_corpus=none unique_text=True
+refusal.jsonl    n= 22 (min 20) size_ok=True schema_ok=True ids_not_in_corpus=none unique_text=True
+case ids unique across sets: True (78 ids)
+corpus IDs never referenced by any case: none
+
+[exit code 0]

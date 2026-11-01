@@ -1,0 +1,15 @@
+$ bash -c echo '--- grep results in .gitignore:'; grep -n 'results' .gitignore || echo '(no match: evals/results/ not ignored)'; echo '--- git check-ignore evals/results/x.json:'; git check-ignore -v evals/results/x.json || echo "not ignored (exit $?)"; echo '--- .gitignore changed in this PR?'; git diff --name-only origin/main...HEAD -- .gitignore | grep . || echo '(no)'; echo '--- guardrail allow-list for role ai (gitignore is backend-only):'; grep -n -E '^  (ai|backend)\)' scripts/agent_guardrails.sh | cut -c1-140; echo '--- ticket AC5 line:'; grep -n 'AC5' agents/tasks/EVAL-1.md | cut -c1-200
+--- grep results in .gitignore:
+(no match: evals/results/ not ignored)
+--- git check-ignore evals/results/x.json:
+not ignored (exit 1)
+--- .gitignore changed in this PR?
+(no)
+--- guardrail allow-list for role ai (gitignore is backend-only):
+15:  ai)       ALLOW='^(services/embedder/(api|worker)\.py$|internal/query/rag(_test)?\.go$|scripts/|evals/|tests/)' ;;
+16:  backend)  ALLOW='^(cmd/|internal/|services/(processor|common)/|services/embedder/Dockerfile$|services/AGENTS\.md$|shared/|migrations/|t
+--- ticket AC5 line:
+34:- [ ] AC5 — `evals/results/` added to `.gitignore` (request in Notes if outside your scope — pm-lead/backend can apply). *Requested below (`.gitignore` is backend-owned per `scripts/agent_guard
+47:- **Follow-up request, backend-engineer:** (1) add `evals/results/` to `.gitignore` (AC5). (2) Add `tests/test_evals_data.py` to `make test-py` / `test-unit`. It needs no infra and runs in under 1 
+
+[exit code 0]

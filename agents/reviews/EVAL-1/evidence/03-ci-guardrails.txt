@@ -1,0 +1,4 @@
+$ gh api repos/MaheshPulivarthi18/ArxivLens/actions/jobs/124897289547/logs | grep -E 'Guardrails|changed lines'
+##[warning]811 changed lines (> 400). Consider splitting the task.
+Guardrails OK for role=ai (811 changed lines)
+

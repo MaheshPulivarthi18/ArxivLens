@@ -1,0 +1,14 @@
+$ bash /tmp/claude-0/-home-claude/67e2add1-e9b7-5ce0-b3be-88a19838307a/scratchpad/mutate.sh
+CAUGHT    drop ask_errors==0 check (always passes)                   -> 1 failed, 19 passed in 0.16s
+CAUGHT    drop retrieval coverage check (always 1.0)                 -> 1 failed, 19 passed in 0.11s
+CAUGHT    failed refusal-set call counted as refusal                 -> 1 failed, 19 passed in 0.07s
+CAUGHT    failed call excluded from latency                          -> 1 failed, 19 passed in 0.08s
+CAUGHT    lower recall threshold 0.80 -> 0.75                        -> 2 failed, 18 passed in 0.10s
+CAUGHT    p95 boundary: 3000 ms allowed (target+1)                   -> 1 failed, 19 passed in 0.10s
+SURVIVED  recall boundary: >= becomes > (0.80 fails)                 -> 20 passed in 0.07s
+CAUGHT    hybrid-beats check disabled                                -> 1 failed, 19 passed in 0.07s
+CAUGHT    re-hardcode a query in retrieval script                    -> 1 failed, 19 passed in 0.10s
+CAUGHT    missing metric treated as pass                             -> 2 failed, 18 passed in 0.08s
+CAUGHT    skip-answers path: gate ignores answers=None               -> 1 failed, 19 passed in 0.07s
+
+[exit code 0]

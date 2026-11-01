@@ -1,0 +1,15 @@
+$ bash -c grep -n -A2 -E '^test-(unit|py):' Makefile; echo '--- .github/workflows/ci.yml'; grep -n -E 'make test-|pytest' .github/workflows/ci.yml; echo '--- references to test_evals_data outside tests/ and agents/:'; grep -rn test_evals_data Makefile .github/ || echo '(none)'
+42:test-unit: test-go test-py ## Fast tests, no infra (Go + M0). Frontend tests: make test-fe
+43-
+44-test-go: ## Go unit tests
+--
+47:test-py: ## M0 Python unit tests (downloads BGE model on first run)
+48-	$(PYTEST) -q tests/test_m0.py
+49-
+--- .github/workflows/ci.yml
+22:      - run: make test-go
+44:      - run: make test-py
+--- references to test_evals_data outside tests/ and agents/:
+(none)
+
+[exit code 0]

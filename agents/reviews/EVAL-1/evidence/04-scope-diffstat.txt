@@ -1,0 +1,21 @@
+$ bash -c git diff --stat origin/main...HEAD; echo; echo '--- guardrail check run locally:'; scripts/agent_guardrails.sh origin/main agent/ai/EVAL-1
+ README.md                     |   4 +-
+ agents/tasks/EVAL-1.md        |  18 ++--
+ evals/BASELINE.md             |  23 ++++++
+ evals/README.md               |  45 ++++++++++
+ evals/answer.jsonl            |  22 +++++
+ evals/corpus.txt              |  33 ++++++++
+ evals/refusal.jsonl           |  22 +++++
+ evals/retrieval.jsonl         |  34 ++++++++
+ evals/thresholds.json         |   8 ++
+ scripts/eval_gate.py          | 139 +++++++++++++++++++++++++++++++
+ scripts/evaluate_answers.py   | 179 ++++++++++++++++++++++++++++++++++++++++
+ scripts/evaluate_retrieval.py |  97 +++++++++++++---------
+ tests/test_evals_data.py      | 187 ++++++++++++++++++++++++++++++++++++++++++
+ 13 files changed, 767 insertions(+), 44 deletions(-)
+
+--- guardrail check run locally:
+::warning::811 changed lines (> 400). Consider splitting the task.
+Guardrails OK for role=ai (811 changed lines)
+
+[exit code 0]

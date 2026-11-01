@@ -1,0 +1,12 @@
+$ bash -c echo '--- full gate, no Postgres/psycopg:'; PYTHONPATH=. python3 scripts/eval_gate.py --results-dir /tmp/claude-0/-home-claude/67e2add1-e9b7-5ce0-b3be-88a19838307a/scratchpad/res 2>&1; echo "exit=$?"; echo '--- answers only, query service unreachable (127.0.0.1:9):'; PYTHONPATH=. python3 scripts/eval_gate.py --skip-retrieval --api-url http://127.0.0.1:9 --timeout 2 --results-dir /tmp/claude-0/-home-claude/67e2add1-e9b7-5ce0-b3be-88a19838307a/scratchpad/res 2>&1 | tail -2 | cut -c1-110; echo "exit=${PIPESTATUS[0]}"; echo '--- result files written:'; ls /tmp/claude-0/-home-claude/67e2add1-e9b7-5ce0-b3be-88a19838307a/scratchpad/res 2>&1
+--- full gate, no Postgres/psycopg:
+eval could not run: ModuleNotFoundError: No module named 'psycopg'
+exit=2
+--- answers only, query service unreachable (127.0.0.1:9):
+WARNING: request errors  : a001, a002, a003, a004, a005, a006, a007, a008, a009, a010, a011, a012, a013, a014,
+eval could not run: ConnectionError: every /v1/ask request to http://127.0.0.1:9 failed
+exit=2
+--- result files written:
+ls: cannot access '/tmp/claude-0/-home-claude/67e2add1-e9b7-5ce0-b3be-88a19838307a/scratchpad/res': No such file or directory
+
+[exit code 2]

@@ -1,0 +1,6 @@
+$ gh api repos/MaheshPulivarthi18/ArxivLens/commits/dc1fe80fb07f5eb7a029af2ce96f743095dd898d/check-runs --jq '.check_runs[] | "\(.name): \(.status) \(.conclusion)"'
+Python M0 unit tests: completed success
+Agent guardrails: completed success
+Frontend (lint, test, build): completed success
+Go (vet, gofmt, test, build): completed success
+
