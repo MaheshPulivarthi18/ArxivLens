@@ -51,3 +51,39 @@ This is a test-only hardening task. It pins the current behaviour behind ING-1 a
 
 ## Hand-off
 PASS → pm-lead final review
+
+---
+
+## PM decision — pm-lead · 2026-11-02
+
+**Verdict:** APPROVE (ready for human merge)
+**Reviewed:** code commit `af0461d`, evidence/QA commit `c34d40a`; spec `agents/tasks/OPS-H3.md` as corrected in `d173713`.
+
+### Product fit and scope
+- This is test-only hardening. It pins the current behaviour behind ING-1/ING-7 (Atom mapping, version split into distinct `(arxiv_id, version)` records), ING-4 (ID/URL normalisation) and OPS-1 (3x in-process retry with exponential backoff). All four PRD rows are already ✅, so no status change is needed. It does not change runtime behaviour or any shared contract (events, HTTP API, schema, embedding model).
+- Ownership: the code changes are limited to `internal/crawler/`, `internal/kafka/` and `internal/query/ingester_test.go`, which backend-engineer owns. `rag.go`, `frontend/`, `migrations/` and CI are untouched. The `agents/` edits are allowed.
+- Size: the code commit is 321+/57- (378 lines), under the 400 target. The guardrail's 410-line warning comes from adding the spec-fix commit, and the job still passes.
+- No scope creep. Old-style ID support was correctly left out, the duplicate `atomFeed` structs in `ingester.go` are untouched, and no tests or thresholds were weakened (there were no Go tests before).
+- I read the full `crawler.go` diff myself. The mapping body moved verbatim into `parseAtomFeed`. The parse error is still wrapped as `failed to parse Atom XML: %w` and returned with `totalDiscovered`. The `len(papers)==0` check is equivalent to the old one because there is one record per entry. The upsert receives the same 8 populated fields.
+
+### Evidence checked
+| File | What I checked | OK |
+|---|---|---|
+| `00-ci-checks.png/.txt` | 4/4 check runs on `af0461d` are completed/success (Go, Python M0, Frontend, Agent guardrails), all in run 41369125729 | ✅ |
+| `01-ac1-ci-go-test.png/.txt` | Go 1.25.0. `make lint-go` (go vet), `make test-go` and `go test ./...` give `ok` for crawler, kafka and query. `make build-go` runs. Covers AC1 | ✅ |
+| `02-ac1-test-files.png/.txt` | `origin/main` has no `_test.go` files and the head has exactly 3, so the `ok` lines can only come from the new tests | ✅ |
+| `03-ac2-extract-id-tests.png/.txt` | 14 cases, 4 `wantErr` (empty, whitespace-only, free text, `cs/0601001`). Expected values match the regex `\d{4}\.\d{4,5}`. Covers AC2 | ✅ |
+| `04-ac3-parse-atom-feed.png/.txt` | Defined at `crawler.go:191` and called at `:125`. Expects `2307.08691` v2 and `2401.12345` v1, plus authors (blank author dropped, name trimmed), categories, UTC published date and PDF URL. Fixture has 2 entries. Covers AC3 | ✅ |
+| `05-ac4-backoff.png/.txt` | `TestRetryBackoff` checks 1→200ms and 2→400ms. The `consumer.go` diff only swaps the sleep expression for `retryBackoff(attempt)`. Loop `1..maxRetries`, `attempt < maxRetries` and `maxRetries: 3` are unchanged. Covers AC4 | ✅ |
+| `06-ac5-moved-code.png/.txt` | Whitespace-normalised removed-vs-added diff shows only extraction glue. Covers AC5. M2 suite: "not run" (no infra), which the AC allows | ✅ |
+| `07-local-gofmt-gotest.png/.txt` | `gofmt -l` is clean on all tracked Go files. Local `go test` is blocked by the Go 1.24.7 toolchain (expected, documented in spec). Minor: the `go version` line printed no output in the capture, but the error text shows 1.24.7 | ✅ |
+
+### QA findings: blocking?
+1. [nit] Spec Status, AC ticks, board and PROGRESS not updated on the branch. **Not blocking.** The orchestrator's record step updates them on its record, not on the task branch.
+2. [nit] `TestRetrySleepSchedule` mirrors the loop instead of exercising `Consumer.Start`. **Not blocking.** The spec puts Kafka-backed tests out of scope, and the diff proves the loop is unchanged. The test is redundant but harmless.
+3. [spec] CI runs `go test ./...` without `-v`/`-cover`. **Not blocking.** Package `ok` lines plus the 0→3 test-file evidence are enough for AC1. I'm taking this as a follow-up.
+
+### Follow-ups (for backlog grooming; not part of this PR)
+- F1 (backend-engineer, harness): make `make test-go` / CI run `go test -cover ./...` (optionally `-v`) so CI logs show coverage and test names. Spec verification commands and CI should match.
+- F2 (backend-engineer, P2): add the missing pinning tests QA listed. These are a non-RFC3339 `<published>` (zero time), an `<id>` without `/abs/`, a two-digit `v12` in `parseAtomFeed`, a two-ID input and an old-style ID in URL form for `ExtractCleanArxivID`.
+- F3 (pm-lead): spec old-style arXiv ID support (`cs/0601001`) against ING-4. This is a behaviour change and needs a product decision first.
