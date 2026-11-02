@@ -48,3 +48,58 @@ Mostly yes. The PRDs now say how every unfinished requirement will be accepted, 
 
 ## Hand-off
 FAIL → back to pm-lead for finding 1, which is a one-cell PRD edit. Findings 2–6 are non-blocking. After the fix, a round-2 check needs only `checks/qa4.sh` and `checks/ac1.py` re-run.
+
+---
+
+# QA report — PM-1 · PR #3 · round 2
+
+**Verdict:** PASS
+**Reviewed commit:** `f4cd9abc03e985c59308fd07c12b43a075050860` · **Date:** 2026-11-02
+**Ticket:** `agents/tasks/PM-1.md` · **PRD:** Product PRD §6, §8, §11; Technical PRD §9, §11, §12
+**Evidence (round 2):** `agents/reviews/PM-1/evidence/12-r2-*` to `22-r2-*`, rendered with `render_evidence.py` from real output on the head commit. The round-1 `checks/` scripts were re-run unchanged.
+
+The blocking round-1 finding is fixed. QA-4 is now `◐ partial`. Its row describes the fail-open path accurately and links AI-2. Findings 4 and 5 are fixed too. The fix commit `f4cd9ab` changes 5 files (+5/−3) and stays inside the PM's paths. All 3 ACs still hold on head, and all 4 CI checks are green.
+
+## Test results
+| Check | Source | Result |
+|---|---|---|
+| Go (vet, gofmt, test, build) | CI | pass ([12](evidence/12-r2-ci-checks.png)) |
+| Python M0 unit tests | CI | pass ([12](evidence/12-r2-ci-checks.png)) |
+| Frontend (lint, test, build) | CI | pass ([12](evidence/12-r2-ci-checks.png)) |
+| Agent guardrails | CI + local | pass, role=pm ([13](evidence/13-r2-ci-guardrails-log.png), [18](evidence/18-r2-ac3-guardrails.png)). The 1125-line warning counts the QA pack. The PM-owned diff (`docs/`, `agents/tasks/`) is +443/−73. |
+| Ticket verification (`git diff --stat origin/main`) | local | only `docs/` and `agents/` ([19](evidence/19-r2-ac3-changed-files.png)) |
+| `make test-unit`, `make lint` | not run locally: the sandbox has no Go 1.25 toolchain. No code changed, and CI covers both | — |
+| `make eval` | not applicable: docs-only PR | n/a |
+
+## Round-1 findings: status
+| # | Round-1 finding | Status at `f4cd9ab` | Evidence |
+|---|---|---|---|
+| 1 | [blocking] QA-4 ✅ while `rag.go:151-153` fails open | **Resolved.** The status is now `◐ partial`. The Acceptance/task cell says "fails open … labelled supported with score 0.75 without being verified" and links [AI-2](../agents/tasks/AI-2.md), which exists. The description matches the code: the `else` branch at `rag.go:151-154` covers both a sentence-embed failure and a missing chunk embedding. Technical PRD §7.2 adds a matching "Known gap" note that links AI-2. | [14](evidence/14-r2-fix-commit.png), [15](evidence/15-r2-qa4.png), [16](evidence/16-r2-ac1-pending-rows.png) |
+| 2 | [nit] 7 PRD paths dangle until PR #2 merges | **Still open (merge order).** PR #2 is still open and unmerged. The same 7 paths are absent on this branch and are added by PR #2. **Merge #2 before #3.** | [22](evidence/22-r2-prd-links.png) |
+| 3 | [nit] Diff over 400 lines | Unchanged. No split recommended. | [13](evidence/13-r2-ci-guardrails-log.png) |
+| 4 | [spec] AI-3 AC4 "row status updated" with no status column | **Resolved.** AC4 now requires the Notes cell to start with `✅ Done (AI-3, PR #<n>):` and gives a grep check. The §11 header is `Priority \| Item \| Notes \| Task`, so the instruction can be carried out. | [21](evidence/21-r2-ai3-ac4.png) |
+| 5 | [nit] AI-2 rationale misstated AI-1's scope | **Resolved.** The Notes now say that AI-1 allows bug fixes of 20 lines or fewer, and that AI-2 is separate because failing closed is a product-behaviour decision. | [14](evidence/14-r2-fix-commit.png) |
+| 6 | [spec] Human decisions pending (§9 hardware, proposed acceptances, ADRs 0006–0009) | Unchanged. This is for Mahesh and is not a defect. | — |
+
+## Acceptance criteria (re-checked at head)
+| AC | Met? | Evidence |
+|---|---|---|
+| AC1 — every ⏳ row has an acceptance statement or a linked task ID | ✅ | [16](evidence/16-r2-ac1-pending-rows.png): 6 rows in Product PRD §6 are not ✅ (ING-6, QA-4 ◐, QA-8, QA-9, UI-5 ◐, OPS-6). Every one is OK, and the count of rows without an acceptance/task is 0. All linked specs exist. Every Task link in the Technical PRD §11 roadmap resolves. |
+| AC2 — every open question links an ADR | ✅ | [17](evidence/17-r2-ac2-open-questions-adrs.png): Product §11 Q1–Q5 and Technical §12 Q1–Q5 each link an existing ADR with a matching title, and every one is `Status: Proposed`. The new ADRs 0006–0009 have a blank Decision section. No ADR is Accepted. |
+| AC3 — no source code changed (docs/ and agents/ only) | ✅ | [19](evidence/19-r2-ac3-changed-files.png): every changed file is under `docs/` or `agents/`. [18](evidence/18-r2-ac3-guardrails.png): local guardrails pass for role=pm. |
+
+The ✅/⏳ claims vs the code were re-run ([20](evidence/20-r2-status-claims-vs-code.png)). Every ✅ row still has code behind it, UI-5 ◐ still holds, and no ⏳ row has code behind it. The only status that changed is QA-4, as covered in finding 1.
+
+## PRD fit
+Yes. The status columns now match the code, including the fail-open path in QA-4. Every unfinished row says how it will be accepted. Every open question has a Proposed ADR. §8 names a dataset and a command for each metric.
+
+## Findings (new in round 2)
+1. [nit] `agents/tasks/PM-1.md` AC1 evidence text still lists five non-✅ rows and leaves out QA-4 (now ◐ → AI-2). The PRD itself is correct, so this is stale ticket prose. pm-lead can update it when closing the ticket.
+2. [spec] AI-2 has no AC that brings the PRD back in line once the fix lands. AI-3 has one (AC4). Without it, the PRD will drift again. Suggested AC5 for AI-2: "In the same PR, Product PRD QA-4 goes back to ✅ and the Technical PRD §7.2 'Known gap' note is removed." AGENTS.md DoD item 4 covers this in general terms, so this is not blocking.
+3. [nit] (carried over from round 1, finding 2) **Merge order: #2 before #3.** After that, merge the board update branch that links these specs.
+
+## Missing tests
+- None applicable (docs-only).
+
+## Hand-off
+PASS → pm-lead final review, then a human merges, after PR #2. The new findings are non-blocking, and finding 2 is a spec suggestion for pm-lead.

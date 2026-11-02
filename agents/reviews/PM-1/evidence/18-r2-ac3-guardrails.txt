@@ -1,0 +1,5 @@
+$ bash scripts/agent_guardrails.sh origin/main agent/pm/PM-1
+::warning::1125 changed lines (> 400). Consider splitting the task.
+Guardrails OK for role=pm (1125 changed lines)
+
+[exit code 0]

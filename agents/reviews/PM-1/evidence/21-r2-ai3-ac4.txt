@@ -1,0 +1,8 @@
+$ grep -n -e AC4 -e ^| Priority -e Batch embedding in RAG validation agents/tasks/AI-3.md docs/PRD-Technical.md
+agents/tasks/AI-3.md:7:| **PRD ref** | Technical PRD §11 "Batch embedding in RAG validation"; Product PRD §8 `/v1/ask` p95 < 3 s |
+agents/tasks/AI-3.md:25:- [ ] AC4 — In the same PR, the Technical PRD §11 row "Batch embedding in RAG validation" has its Notes cell prefixed with `✅ Done (AI-3, PR #<n>):` (§11 has no Status column; the row stays so the Task link remains). Check: `grep -n "Batch embedding in RAG validation" docs/PRD-Technical.md` shows the prefix.
+agents/tasks/AI-3.md:36:- Specced by pm-lead in PM-1 from the board Backlog item "Batch embedding in RAG validation".
+docs/PRD-Technical.md:374:| Priority | Item | Notes | Task |
+docs/PRD-Technical.md:380:| P1 | Batch embedding in RAG validation | Embed all sentences and chunks in one call instead of one call each | [AI-3](../agents/tasks/AI-3.md) |
+
+[exit code 0]

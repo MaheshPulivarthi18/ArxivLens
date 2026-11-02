@@ -1,0 +1,71 @@
+$ git show --stat --patch --format=%H%n%s f4cd9abc03e985c59308fd07c12b43a075050860
+f4cd9abc03e985c59308fd07c12b43a075050860
+PM-1: address QA round 1 (QA-4 ◐ + AI-2 link, AI-3 AC4, AI-2 notes)
+---
+ agents/tasks/AI-2.md  | 2 +-
+ agents/tasks/AI-3.md  | 2 +-
+ agents/tasks/PM-1.md  | 1 +
+ docs/PRD-Product.md   | 2 +-
+ docs/PRD-Technical.md | 1 +
+ 5 files changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/agents/tasks/AI-2.md b/agents/tasks/AI-2.md
+index c511e19..788ff9a 100644
+--- a/agents/tasks/AI-2.md
++++ b/agents/tasks/AI-2.md
+@@ -36,5 +36,5 @@ make eval   # when infra is available
+ ```
+ 
+ ## Notes
+-- Specced by pm-lead in PM-1 from EVAL-1 finding (c). AI-1 covers testing existing behaviour but explicitly excludes behaviour changes, so this is a separate task.
++- Specced by pm-lead in PM-1 from EVAL-1 finding (c). AI-1 locks existing behaviour with tests and allows only small bug fixes (≤ 20 lines). The AI-2 code change is about 3 lines, but it is a separate task because failing closed is a product-behaviour decision (QA-4 trust promise, affects the gated supported-citation metric), not a bug fix found while testing.
+ - Verified on main: `rag.go` lines ~146–154 (`score = 0.75 // Fallback if embedding service unavailable`, `supported = true`).
+diff --git a/agents/tasks/AI-3.md b/agents/tasks/AI-3.md
+index 3a80429..cf6c0d8 100644
+--- a/agents/tasks/AI-3.md
++++ b/agents/tasks/AI-3.md
+@@ -22,7 +22,7 @@ and one call for all distinct cited sentences cuts `/v1/ask` latency, and QA-8 w
+ - [ ] AC1 — The call-count test passes (≤ 2 `EmbedTexts` calls per `Ask`).
+ - [ ] AC2 — All existing AI-1/AI-2 tests pass unchanged (no test edited to fit the new code).
+ - [ ] AC3 — `make eval`: supported-citation rate unchanged (±0.01) and `/v1/ask` p50/p95 before/after pasted, or "not run: infra unavailable" plus the exact command.
+-- [ ] AC4 — Technical PRD §11 row status updated in the PR.
++- [ ] AC4 — In the same PR, the Technical PRD §11 row "Batch embedding in RAG validation" has its Notes cell prefixed with `✅ Done (AI-3, PR #<n>):` (§11 has no Status column; the row stays so the Task link remains). Check: `grep -n "Batch embedding in RAG validation" docs/PRD-Technical.md` shows the prefix.
+ 
+ ## Verification
+ ```bash
+diff --git a/agents/tasks/PM-1.md b/agents/tasks/PM-1.md
+index f39cab2..20a02dc 100644
+--- a/agents/tasks/PM-1.md
++++ b/agents/tasks/PM-1.md
+@@ -45,3 +45,4 @@ git diff --stat origin/main   # only docs/ and agents/
+   3. EVAL-2 now names `tests/test_eval_gate.py` and adds its pytest command to Verification.
+   4. OPS-H5 has a soft dependency on OPS-H1 for AC5, or the workers can be started by hand (AGENTS.md §5).
+   The PR #2 follow-up note (remove the AGENTS.md §5 gotcha, the ai-engineer lesson, and the "pending EVAL-1" notes) was already recorded above.
++- Round 1 QA FAIL → fixed QA-4 status, AI-3 AC4, AI-2 Notes
+diff --git a/docs/PRD-Product.md b/docs/PRD-Product.md
+index 7c7c5fa..7e1b1b9 100644
+--- a/docs/PRD-Product.md
++++ b/docs/PRD-Product.md
+@@ -112,7 +112,7 @@ Status: ✅ done (verified against the code 2026-11-01, PM-1) · ◐ partial ·
+ | QA-1 | Hybrid search combining semantic vectors and keyword (BM25) via rank fusion | P0 | ✅ | — |
+ | QA-2 | Cross-encoder reranking of top candidates | P0 | ✅ | — |
+ | QA-3 | Answers carry numbered citations `[n]` mapping to paper, section, passage, PDF link | P0 | ✅ | — |
+-| QA-4 | Each citation is verified (semantic similarity ≥ threshold) and labeled supported/unsupported | P0 | ✅ | — |
++| QA-4 | Each citation is verified (semantic similarity ≥ threshold) and labeled supported/unsupported | P0 | ◐ partial | Verified on the happy path (cosine similarity ≥ `SupportThreshold = 0.50` in `internal/query/rag.go`). Fails open: when the embedder call fails or the cited chunk has no embedding, the citation is labelled supported with score 0.75 without being verified. Remaining: [AI-2](../agents/tasks/AI-2.md) makes it fail closed (unverified → unsupported, score 0). |
+ | QA-5 | Refuse cleanly when no passage passes the relevance bar | P0 | ✅ | — |
+ | QA-6 | De-prioritize appendix, supplementary, and table passages unless strongly relevant | P1 | ✅ | — |
+ | QA-7 | Filter by arXiv category | P1 | ✅ (API) | — |
+diff --git a/docs/PRD-Technical.md b/docs/PRD-Technical.md
+index 768ffc0..c9a05ac 100644
+--- a/docs/PRD-Technical.md
++++ b/docs/PRD-Technical.md
+@@ -283,6 +283,7 @@ flowchart TD
+ ```
+ 
+ Constants are set in `internal/query/rag.go`: relevance cutoff `0.45`, auxiliary-section cutoff `0.70`, `SupportThreshold = 0.50`.
++Known gap (Product PRD QA-4 ◐ partial): the diagram shows the happy path. If the embedder call fails or the cited chunk has no embedding, `rag.go` currently sets `score = 0.75`, `supported = true` without verification. [AI-2](../agents/tasks/AI-2.md) changes this to fail closed (`supported = false`, `score = 0`).
+ 
+ ### 7.3 On-demand ingest (`/v1/papers/ingest`, `/v1/papers/discover`)
+ This path runs synchronously and skips Kafka, for an interactive experience:
+
+[exit code 0]
