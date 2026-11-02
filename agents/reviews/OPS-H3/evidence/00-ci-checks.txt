@@ -1,7 +1,0 @@
-$ gh api repos/MaheshPulivarthi18/ArxivLens/commits/af0461d79d0ba1b6fdad2773706cbb1d27d499e2/check-runs --jq .check_runs[] | "\(.name) | \(.status) | \(.conclusion) | \(.html_url)"
-Frontend (lint, test, build) | completed | success | https://github.com/MaheshPulivarthi18/ArxivLens/actions/runs/41369125729/job/125035567523
-Python M0 unit tests | completed | success | https://github.com/MaheshPulivarthi18/ArxivLens/actions/runs/41369125729/job/125035567482
-Go (vet, gofmt, test, build) | completed | success | https://github.com/MaheshPulivarthi18/ArxivLens/actions/runs/41369125729/job/125035567407
-Agent guardrails | completed | success | https://github.com/MaheshPulivarthi18/ArxivLens/actions/runs/41369125729/job/125035567355
-
-[exit code 0]
