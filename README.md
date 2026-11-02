@@ -4,8 +4,7 @@
 
 ArxivLens crawls arXiv, downloads paper PDFs, parses them into section-aware chunks, embeds them with `BAAI/bge-base-en-v1.5`, and serves hybrid (vector + BM25) search and a citation-validated Q&A endpoint behind a React UI.
 
-- 📘 [Product PRD](docs/PRD-Product.md): who it's for, what it does, success metrics
-- 🛠️ [Technical PRD](docs/PRD-Technical.md): architecture, data model, event contracts, reliability design
+- 🧑‍💻 [CONTRIBUTING.md](CONTRIBUTING.md): setup, commands, code layout and rules for contributors
 
 ---
 
@@ -213,16 +212,10 @@ python scripts/benchmark_hnsw.py           # pgvector HNSW ef_search sweep (p50/
 
 ---
 
-## Development with the agent team
+## Contributing
 
-ArxivLens is developed by four AI agents (PM/lead, AI engineer, backend & distributed-systems engineer, frontend engineer)
-coordinated through files in this repo, with a human merging every PR.
-
-- [`AGENTS.md`](AGENTS.md): rules, ownership, commands, Definition of Done (read first by every agent session)
-- [`agents/`](agents/README.md): task board, task specs, progress log, lessons, metrics
-- [`docs/adr/`](docs/adr/): decisions waiting for (or made by) the human owner
-- `.claude/agents/` role definitions · `/sprint` runs one cycle · `/retro` turns friction into improvements
-- `make help` lists the harness targets used by agents and CI
+See [CONTRIBUTING.md](CONTRIBUTING.md). Product requirements, design decisions and planning are kept outside this repo;
+it contains only the runnable application, its tests and its CI.
 
 ---
 
@@ -231,5 +224,3 @@ coordinated through files in this repo, with a human merging every PR.
 - `/v1/ask` builds its answer **from a template** over the top reranked chunks. It does not call an LLM yet, though the citation validation pipeline is in place for when one is added.
 - The processor and embedder workers are not in `docker-compose.yml` yet. Run them on the host (which gives them Apple-silicon MPS acceleration).
 - Tracing propagates `traceparent` but does not export spans to a collector.
-
-See the [Technical PRD](docs/PRD-Technical.md#11-roadmap) for the roadmap.
