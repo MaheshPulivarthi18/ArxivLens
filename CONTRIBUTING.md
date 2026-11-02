@@ -20,12 +20,12 @@ make setup-fe                              # frontend deps (npm ci)
 | Command | What | Needs infra? |
 |---|---|---|
 | `make help` | List targets | — |
-| `make test-unit` | `go vet` + Go tests + `pytest tests/test_m0.py` | No |
+| `make test-unit` | Go tests + `pytest tests/test_m0.py` | No |
 | `make lint` | `go vet`, `gofmt` check, frontend `oxlint` | No |
 | `make build` | Go binary + frontend build | No |
 | `make infra-up` / `make infra-down` | Postgres+pgvector, Kafka, MinIO | Docker |
 | `make test-full` | All milestone suites M0–M6 | Docker + workers running |
-| `make eval` | Retrieval/answer quality gate over `evals/` | Docker + indexed corpus |
+| `make eval` | Retrieval eval (quality gate over `evals/` once EVAL-1, PR #2, lands) | Docker + indexed corpus |
 
 Frontend (from `frontend/`): `npm run dev` (:5173, proxies `/v1` → :8080), `npm run lint`, `npm run build`.
 Python services: `python services/processor/worker.py`, `python services/embedder/worker.py`, `python services/embedder/api.py` (:8081).
@@ -39,7 +39,7 @@ services/        Python: processor, embedder (worker + FastAPI), common
 shared/events/   Event envelope contracts (Go + Python, kept in sync)
 migrations/      SQL schema
 scripts/         ML primitives, batch ingest, eval tooling, HNSW benchmark
-evals/           Versioned eval datasets and thresholds (test data for `make eval`)
+evals/           Versioned eval datasets and thresholds for `make eval` (added by EVAL-1, PR #2)
 tests/           Milestone suites M0–M6 (pytest)
 frontend/        React 19 + Vite UI
 ```
@@ -51,7 +51,7 @@ frontend/        React 19 + Vite UI
 - HTTP API: routes in `internal/query/server.go` and the API table in `README.md`
 - DB schema: new numbered migrations may only *add* tables or indexes; never edit an applied migration
 - Embedding model + dimension: `BAAI/bge-base-en-v1.5`, 768-d `halfvec`
-- Quality gates: thresholds in `evals/thresholds.json` are never lowered to make a change pass
+- Quality gates: thresholds (`evals/thresholds.json` once EVAL-1 lands) are never lowered to make a change pass
 
 **Pipeline reliability** (keep `tests/test_m4_chaos.py` green):
 - Natural-key upserts, commit-after-process, 3× retry with backoff then DLQ with full diagnostics, idempotent replays
