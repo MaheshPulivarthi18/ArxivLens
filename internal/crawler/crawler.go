@@ -78,7 +78,6 @@ func (c *Crawler) Crawl(ctx context.Context, searchQuery string, limit int) (int
 	}
 
 	totalDiscovered := 0
-	versionRegex := regexp.MustCompile(`v(\d+)$`)
 
 	for start := 0; start < limit; start += pageSize {
 		select {
@@ -123,68 +122,28 @@ func (c *Crawler) Crawl(ctx context.Context, searchQuery string, limit int) (int
 			return totalDiscovered, fmt.Errorf("arxiv API returned status: %d", resp.StatusCode)
 		}
 
-		var feed Feed
-		if err := xml.Unmarshal(body, &feed); err != nil {
-			return totalDiscovered, fmt.Errorf("failed to parse Atom XML: %w", err)
+		papers, err := parseAtomFeed(body)
+		if err != nil {
+			return totalDiscovered, err
 		}
 
-		if len(feed.Entries) == 0 {
+		if len(papers) == 0 {
 			log.Printf("[Crawler] No more entries found.")
 			break
 		}
 
-		for _, entry := range feed.Entries {
-			// Extract arXiv ID (e.g., from http://arxiv.org/abs/2401.12345v2)
-			rawID := entry.ID
-			parts := strings.Split(rawID, "/abs/")
-			arxivIDWithVersion := rawID
-			if len(parts) > 1 {
-				arxivIDWithVersion = parts[1]
-			}
-
-			arxivID := arxivIDWithVersion
-			version := 1
-			if matches := versionRegex.FindStringSubmatch(arxivIDWithVersion); len(matches) > 1 {
-				version, _ = strconv.Atoi(matches[1])
-				arxivID = versionRegex.ReplaceAllString(arxivIDWithVersion, "")
-			}
-
-			title := strings.Join(strings.Fields(entry.Title), " ")
-			abstract := strings.Join(strings.Fields(entry.Summary), " ")
-
-			var authors []string
-			for _, a := range entry.Authors {
-				if strings.TrimSpace(a.Name) != "" {
-					authors = append(authors, strings.TrimSpace(a.Name))
-				}
-			}
-
-			var categories []string
-			for _, cat := range entry.Categories {
-				if cat.Term != "" {
-					categories = append(categories, cat.Term)
-				}
-			}
-
-			var pubTime time.Time
-			if entry.Published != "" {
-				pubTime, _ = time.Parse(time.RFC3339, entry.Published)
-			}
-
-			pdfURL := fmt.Sprintf("https://arxiv.org/pdf/%s.pdf", arxivID)
+		for i := range papers {
+			paperRec := &papers[i]
+			arxivID := paperRec.ArxivID
+			version := paperRec.Version
+			title := paperRec.Title
+			abstract := paperRec.Abstract
+			authors := paperRec.Authors
+			categories := paperRec.Categories
+			pubTime := paperRec.PublishedAt
+			pdfURL := paperRec.SourceURL
 
 			// 1. Natural-key upsert into database (Layer 1 idempotency)
-			paperRec := &db.PaperRecord{
-				ArxivID:     arxivID,
-				Version:     version,
-				Title:       title,
-				Abstract:    abstract,
-				Authors:     authors,
-				Categories:  categories,
-				PublishedAt: pubTime,
-				SourceURL:   pdfURL,
-			}
-
 			_, err := c.database.UpsertDiscoveredPaper(ctx, paperRec)
 			if err != nil {
 				log.Printf("[Crawler] Warning: Failed to upsert paper %s: %v", arxivID, err)
@@ -223,4 +182,69 @@ func (c *Crawler) Crawl(ctx context.Context, searchQuery string, limit int) (int
 
 	log.Printf("[Crawler] Crawl finished. Total discovered: %d", totalDiscovered)
 	return totalDiscovered, nil
+}
+
+// versionRegex matches the trailing version suffix of an arXiv ID (e.g. "v2").
+var versionRegex = regexp.MustCompile(`v(\d+)$`)
+
+// parseAtomFeed maps an arXiv Atom API response body to paper records.
+func parseAtomFeed(body []byte) ([]db.PaperRecord, error) {
+	var feed Feed
+	if err := xml.Unmarshal(body, &feed); err != nil {
+		return nil, fmt.Errorf("failed to parse Atom XML: %w", err)
+	}
+
+	papers := make([]db.PaperRecord, 0, len(feed.Entries))
+	for _, entry := range feed.Entries {
+		// Extract arXiv ID (e.g., from http://arxiv.org/abs/2401.12345v2)
+		rawID := entry.ID
+		parts := strings.Split(rawID, "/abs/")
+		arxivIDWithVersion := rawID
+		if len(parts) > 1 {
+			arxivIDWithVersion = parts[1]
+		}
+
+		arxivID := arxivIDWithVersion
+		version := 1
+		if matches := versionRegex.FindStringSubmatch(arxivIDWithVersion); len(matches) > 1 {
+			version, _ = strconv.Atoi(matches[1])
+			arxivID = versionRegex.ReplaceAllString(arxivIDWithVersion, "")
+		}
+
+		title := strings.Join(strings.Fields(entry.Title), " ")
+		abstract := strings.Join(strings.Fields(entry.Summary), " ")
+
+		var authors []string
+		for _, a := range entry.Authors {
+			if strings.TrimSpace(a.Name) != "" {
+				authors = append(authors, strings.TrimSpace(a.Name))
+			}
+		}
+
+		var categories []string
+		for _, cat := range entry.Categories {
+			if cat.Term != "" {
+				categories = append(categories, cat.Term)
+			}
+		}
+
+		var pubTime time.Time
+		if entry.Published != "" {
+			pubTime, _ = time.Parse(time.RFC3339, entry.Published)
+		}
+
+		pdfURL := fmt.Sprintf("https://arxiv.org/pdf/%s.pdf", arxivID)
+
+		papers = append(papers, db.PaperRecord{
+			ArxivID:     arxivID,
+			Version:     version,
+			Title:       title,
+			Abstract:    abstract,
+			Authors:     authors,
+			Categories:  categories,
+			PublishedAt: pubTime,
+			SourceURL:   pdfURL,
+		})
+	}
+	return papers, nil
 }

@@ -62,16 +62,16 @@ jobs:
         run: if npm run | grep -q " test"; then npm test; else echo "no frontend tests yet"; fi
       - run: npm run build
 
-  agent-guardrails:
-    name: Agent guardrails
+  agent-ownership:
+    name: Agent ownership check
     if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'agent/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Check edits stay inside the owner's directories
+      - name: Agent branches stay inside their code area
         env:
           HEAD_REF: ${{ github.head_ref }}
           BASE_REF: ${{ github.base_ref }}
-        run: scripts/agent_guardrails.sh "origin/$BASE_REF" "$HEAD_REF"
+        run: .github/scripts/ownership-check.sh "origin/$BASE_REF" "$HEAD_REF"
