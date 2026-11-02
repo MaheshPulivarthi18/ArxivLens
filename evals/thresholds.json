@@ -1,5 +1,5 @@
 {
-  "_source": "docs/PRD-Product.md section 8 (v1 targets). Change only through an Accepted ADR; never lower to make a run pass.",
+  "_source": "Product PRD §8 v1 targets (arxivlens-agents: https://github.com/MaheshPulivarthi18/arxivlens-agents/blob/main/docs/PRD-Product.md). recall@5 is paper-level per ADR-0006. Change only through an Accepted ADR; never lower to make a run pass.",
   "retrieval_recall_at_5_min": 0.80,
   "supported_citation_rate_min": 0.90,
   "correct_refusal_rate_min": 0.95,

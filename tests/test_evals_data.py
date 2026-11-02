@@ -1,8 +1,15 @@
-"""EVAL-1: no-infra checks for the golden eval sets and the eval gate logic."""
+"""EVAL-1: no-infra checks for the golden eval sets and the eval gate logic.
+
+Metric definitions: ADR-0006 (paper-level Recall@5) and ADR-0010 (rerank ordering) in
+https://github.com/MaheshPulivarthi18/arxivlens-agents/tree/main/docs/adr
+"""
 
 import json
+import math
 import os
 import re
+import sys
+import types
 
 import pytest
 
@@ -152,43 +159,166 @@ class _FakeResp:
 
 
 class _FakeCursor:
-    """Answers the three mode queries of run_modes_for_case by matching the SQL text."""
+    """Answers the coverage and mode queries of the retrieval eval by matching the SQL text."""
 
-    def __init__(self, rrf_rows):
-        self.rrf_rows = rrf_rows
-        self._last = None
+    def __init__(self, pool, embedded=("1706.03762", "1810.04805")):
+        self.pool = pool  # RRF pool rows: (chunk_id, arxiv_id, content, rrf_score)
+        self.embedded = embedded  # arXiv IDs with embeddings for the current model
+        self.executed = []
 
     def execute(self, sql, params):
-        self._last = sql
+        self.executed.append((sql, params))
 
     def fetchall(self):
-        if self._last == evaluate_retrieval.BM25_SQL:
-            return [(1,), (2,)]
-        if self._last == evaluate_retrieval.DENSE_SQL:
-            return [(2,), (1,)]
-        if self._last == evaluate_retrieval.RRF_SQL:
-            return self.rrf_rows
-        raise AssertionError(f"unexpected SQL: {self._last}")
+        sql, params = self.executed[-1]
+        if sql == evaluate_retrieval.COVERAGE_SQL:
+            return [(a,) for a in params["ids"] if a in self.embedded]
+        if sql == evaluate_retrieval.BM25_SQL:
+            return [(1, "1810.04805"), (2, "1706.03762")]
+        if sql == evaluate_retrieval.DENSE_SQL:
+            return [(2, "1706.03762"), (1, "1810.04805")]
+        if sql == evaluate_retrieval.RRF_POOL_SQL:
+            return self.pool[:params["pool"]]
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+
+def _pool(n=20):
+    # Alternating papers so the reranked top 5 is distinguishable from the RRF top 5.
+    return [(i, "1706.03762" if i % 2 else "1810.04805", f"chunk {i}", 1.0 / (60 + i)) for i in range(1, n + 1)]
 
 
 def test_gated_mode_calls_production_rerank_endpoint(monkeypatch):
     calls = []
 
     def fake_urlopen(req, timeout=None):
-        calls.append((req.full_url, req.get_method(), json.loads(req.data.decode("utf-8")), timeout))
-        return _FakeResp({"scores": [0.1, 0.9, 0.5]})
+        body = json.loads(req.data.decode("utf-8"))
+        calls.append((req.full_url, req.get_method(), body, timeout))
+        return _FakeResp({"scores": [float(i) for i in range(len(body["passages"]))]})  # reverses RRF order
 
     monkeypatch.setattr(evaluate_retrieval.urllib.request, "urlopen", fake_urlopen)
     rerank = evaluate_retrieval.make_http_rerank("http://embedder:8081/", timeout_s=7.0)
-    rrf_rows = [(10, "chunk ten", 0.03), (20, "chunk twenty", 0.02), (30, "chunk thirty", 0.01)]
-    out = evaluate_retrieval.run_modes_for_case(_FakeCursor(rrf_rows), "what is attention?", "[0.1]", rerank)
+    out = evaluate_retrieval.run_modes_for_case(_FakeCursor(_pool()), "what is attention?", "[0.1]", "M", rerank)
 
     assert eval_gate.GATED_MODE == evaluate_retrieval.RERANK_MODE
     assert calls == [("http://embedder:8081/internal/rerank", "POST",
-                      {"query": "what is attention?", "passages": ["chunk ten", "chunk twenty", "chunk thirty"]},
-                      7.0)]
-    assert out["Hybrid RRF"][0] == [10, 20, 30]
-    assert out[eval_gate.GATED_MODE][0] == [20, 30, 10]  # ordered by the endpoint's scores
+                      {"query": "what is attention?", "passages": [f"chunk {i}" for i in range(1, 21)]}, 7.0)]
+    assert [c for c, _ in out["Hybrid RRF"][0]] == [1, 2, 3, 4, 5]
+    assert [c for c, _ in out[eval_gate.GATED_MODE][0]] == [20, 19, 18, 17, 16]  # ordered by the endpoint's scores
+
+
+# --- R3-4 (ADR-0010 parity): pool of 20, one rerank call, stable sort, top 5; SQL mirrors search.go ---
+
+def test_adr0010_parity_pool_one_call_stable_ties_top5():
+    cur = _FakeCursor(_pool(30))  # more rows available than the pool size
+    calls = []
+
+    def rerank(query, passages):
+        calls.append(list(passages))
+        # Ties everywhere except chunk 7 and chunk 12; ties must keep RRF order.
+        return [0.9 if p in ("chunk 7", "chunk 12") else 0.5 for p in passages]
+
+    out = evaluate_retrieval.run_modes_for_case(cur, "q", "[0.1]", "BAAI/bge-base-en-v1.5", rerank)
+    pool_params = [p for sql, p in cur.executed if sql == evaluate_retrieval.RRF_POOL_SQL]
+    assert pool_params == [{"vec": "[0.1]", "model": "BAAI/bge-base-en-v1.5", "query": "q", "pool": 20}]
+    assert len(calls) == 1 and len(calls[0]) == 20
+    assert [c for c, _ in out[evaluate_retrieval.RERANK_MODE][0]] == [7, 12, 1, 2, 3]
+    assert evaluate_retrieval.RRF_POOL_SIZE == 20 and evaluate_retrieval.RESULT_LIMIT == 5
+
+
+def test_rerank_pool_empty_makes_no_call():
+    assert evaluate_retrieval.rerank_pool("q", [], lambda q, p: pytest.fail("rerank called")) == []
+
+
+def test_rrf_pool_sql_mirrors_search_go():
+    sql = evaluate_retrieval.RRF_POOL_SQL
+    assert sql.count("LIMIT 50") == 2 and evaluate_retrieval.RRF_ARM_LIMIT == 50
+    assert "WHERE ce.model = %(model)s" in sql
+    assert "1.0/(60 + v.rank)" in sql and "1.0/(60 + k.rank)" in sql
+    assert "ORDER BY ce.embedding <=> %(vec)s::halfvec" in sql
+    assert "ORDER BY ts_rank_cd(pc.content_tsv, q) DESC" in sql
+    assert "ce.model = %(model)s" in evaluate_retrieval.DENSE_SQL
+    go = os.path.join(os.path.dirname(EVALS), "internal", "query", "search.go")
+    if os.path.exists(go):  # drift guard: production still uses the values mirrored above
+        with open(go, encoding="utf-8") as f:
+            src = f.read()
+        assert src.count("LIMIT 50") == 2
+        assert "WHERE ce.model = $2" in src
+        assert "1.0/(60 + v.rank)" in src and "1.0/(60 + k.rank)" in src
+
+
+# --- R3-1/R3-2/R3-3 (ADR-0006): paper-level recall vs chunk precision ---
+
+def _hits(*arxiv_ids):
+    return [(i, a) for i, a in enumerate(arxiv_ids, start=1)]
+
+
+def test_one_relevant_paper_filling_top5_is_full_recall():
+    m = evaluate_retrieval.score_case(_hits(*["1706.03762"] * 5), ["1706.03762"])
+    assert m["recall@5"] == 1.0 and m["chunk_precision@5"] == 1.0
+    assert m["mrr"] == 1.0 and m["ndcg@5"] == 1.0
+
+
+def test_best_chunk_first_then_other_papers_is_full_recall_low_precision():
+    # The ADR-0006 example: precision@5-like scoring gave 0.2 here; paper-level recall is 1.0.
+    m = evaluate_retrieval.score_case(_hits("1706.03762", "1810.04805", "1512.03385", "2005.14165", "1910.10683"),
+                                      ["1706.03762"])
+    assert m["recall@5"] == 1.0
+    assert m["chunk_precision@5"] == pytest.approx(0.2)
+
+
+def test_two_relevant_papers_one_retrieved_is_half_recall():
+    m = evaluate_retrieval.score_case(_hits(*["1706.03762"] * 5), ["1706.03762", "1810.04805"])
+    assert m["recall@5"] == 0.5
+    assert m["chunk_precision@5"] == 1.0  # precision can't tell that a relevant paper is missing
+    assert m["mrr"] == 1.0
+    assert m["ndcg@5"] == pytest.approx(1.0 / (1.0 + 1.0 / math.log2(3)))
+
+
+def test_duplicate_chunks_do_not_raise_recall():
+    one = evaluate_retrieval.score_case(_hits("1706.03762", "1512.03385"), ["1706.03762", "1810.04805"])
+    dup = evaluate_retrieval.score_case(_hits("1706.03762", "1706.03762", "1706.03762", "1512.03385"),
+                                        ["1706.03762", "1810.04805"])
+    assert one["recall@5"] == dup["recall@5"] == 0.5
+    assert dup["ndcg@5"] == one["ndcg@5"]
+    assert dup["chunk_precision@5"] > one["chunk_precision@5"]
+
+
+def test_paper_level_mrr_and_ndcg_use_deduped_ranking():
+    # Chunks: A A A B C -> papers A B C. Relevant C is paper rank 3 (chunk rank 5).
+    m = evaluate_retrieval.score_case(_hits("1512.03385", "1512.03385", "1512.03385", "2005.14165", "1706.03762"),
+                                      ["1706.03762"])
+    assert m["mrr"] == pytest.approx(1 / 3)
+    assert m["ndcg@5"] == pytest.approx(1.0 / math.log2(4))
+    assert m["recall@5"] == 1.0
+    # Paper beyond the top 5 papers does not count; versioned IDs are normalised.
+    m = evaluate_retrieval.score_case(_hits("1", "2", "3", "4", "5", "1706.03762v7"), ["1706.03762"])
+    assert m["recall@5"] == 0.0 and m["mrr"] == pytest.approx(1 / 6)
+    assert evaluate_retrieval.dedupe_to_papers(["a", "b", "a", "c", "b"]) == ["a", "b", "c"]
+
+
+def test_recall_denominator_is_all_relevant_papers_not_capped_at_k():
+    relevant = ["1", "2", "3", "4", "5", "6"]
+    m = evaluate_retrieval.score_case(_hits("1", "2", "3", "4", "5"), relevant)
+    assert m["recall@5"] == pytest.approx(5 / 6)  # ADR-0006: / |relevant_arxiv_ids|, never min(|relevant|, 5)
+
+
+def test_chunk_precision_divides_by_k_even_with_fewer_hits():
+    m = evaluate_retrieval.score_case(_hits("1706.03762", "1706.03762"), ["1706.03762"])
+    assert m["chunk_precision@5"] == pytest.approx(0.4) and m["recall@5"] == 1.0
+
+
+def test_gate_ignores_chunk_precision():
+    res = _results()
+    for m in res["retrieval"]["modes"].values():
+        m["chunk_precision@5"] = 0.0
+    assert all(c["passed"] for c in eval_gate.check_thresholds(res, eval_gate.load_thresholds()))
+    res = _results(recall=0.79)
+    res["retrieval"]["modes"][eval_gate.GATED_MODE]["chunk_precision@5"] = 1.0
+    checks = {c["metric"]: c for c in eval_gate.check_thresholds(res, eval_gate.load_thresholds())}
+    assert checks[f"recall@5 ({eval_gate.GATED_MODE})"]["value"] == 0.79
+    assert not checks[f"recall@5 ({eval_gate.GATED_MODE})"]["passed"]
+    with open(eval_gate.__file__, encoding="utf-8") as f:
+        assert '["chunk_precision@5"]' not in f.read()  # the gate only reads it with .get() for the info row
 
 
 def test_retrieval_script_has_no_local_bi_encoder_rerank():
@@ -241,19 +371,27 @@ def test_coverage_two_paper_case_with_one_indexed_reports_missing_id():
     assert evaluate_retrieval.missing_arxiv_ids(["1810.04805", "1512.03385"], []) == ["1810.04805", "1512.03385"]
 
 
-def test_relevant_chunks_for_two_paper_case_with_one_indexed_is_fail_closed():
+def test_coverage_requires_embeddings_for_current_model():
+    # R3-6: a paper with chunks but no embeddings (or embeddings for another model) is not indexed.
+    sql = evaluate_retrieval.COVERAGE_SQL
+    assert "JOIN chunk_embeddings ce ON ce.chunk_id = pc.id" in sql and "ce.model = %(model)s" in sql
+    # Fake DB: (arxiv_id, chunk_id) chunk rows and (chunk_id, model) embedding rows, evaluated like the SQL.
+    chunks = [("1706.03762", 1), ("1706.03762", 2), ("1810.04805", 3), ("1512.03385", 4)]
+    embeddings = [(1, "M"), (3, "OTHER")]  # 1810.04805 embedded with another model, 1512.03385 not at all
+
     class Cur:
-        def execute(self, sql, params):
-            assert sql == evaluate_retrieval.COVERAGE_SQL
-            self.ids = params[0]
+        def execute(self, q, params):
+            assert q == sql
+            self.p = params
 
         def fetchall(self):
-            return [(a, cid) for a, cid in [("1706.03762", 1), ("1706.03762", 2)] if a in self.ids]
+            emb = {c for c, m in embeddings if m == self.p["model"]}
+            return sorted({(a,) for a, c in chunks if c in emb and a in self.p["ids"]})
 
-    chunks, missing = evaluate_retrieval.relevant_chunks_for_case(Cur(), ["1706.03762", "1810.04805"])
-    assert (chunks, missing) == ([], ["1810.04805"])
-    chunks, missing = evaluate_retrieval.relevant_chunks_for_case(Cur(), ["1706.03762"])
-    assert (chunks, missing) == ([1, 2], [])
+    ids = ["1706.03762", "1810.04805", "1512.03385"]
+    assert evaluate_retrieval.missing_for_case(Cur(), ids, "M") == ["1810.04805", "1512.03385"]
+    assert evaluate_retrieval.missing_for_case(Cur(), ids, "OTHER") == ["1706.03762", "1512.03385"]
+    assert evaluate_retrieval.missing_for_case(Cur(), ["1706.03762"], "M") == []
 
 
 def test_gate_fails_when_a_two_paper_case_is_partially_indexed():
@@ -328,3 +466,77 @@ def test_percentile_nearest_rank():
     assert evaluate_answers.percentile(list(range(1, 101)), 95) == 95
     assert evaluate_answers.percentile([], 95) is None
     assert json.dumps(evaluate_answers.percentile([3.0], 50)) == "3.0"
+
+
+# --- R3-5: run_retrieval_evaluation checks /healthz before any rerank and fails closed (all infra stubbed) ---
+
+def _stub_infra(monkeypatch, events, health, cursor):
+    class Conn:
+        def cursor(self):
+            events.append("db.cursor")
+            return self
+
+        def __enter__(self):
+            return cursor
+
+        def __exit__(self, *a):
+            return False
+
+        def close(self):
+            pass
+
+    class Embedder:
+        def __init__(self, model_name=None):
+            events.append(f"embedder:{model_name}")
+
+        def embed_texts(self, texts, is_query=False):
+            return [[0.1, 0.2]]
+
+    def connect(url):
+        events.append("db.connect")
+        return Conn()
+
+    def fake_urlopen(req, timeout=None):
+        url = req if isinstance(req, str) else req.full_url
+        events.append(url.rsplit("/", 1)[-1] if url.endswith("healthz") else "rerank")
+        if url.endswith("/healthz"):
+            return _FakeResp(health)
+        return _FakeResp({"scores": [0.0] * len(json.loads(req.data)["passages"])})
+
+    monkeypatch.setitem(sys.modules, "psycopg", types.SimpleNamespace(connect=connect))
+    monkeypatch.setitem(sys.modules, "scripts.m0_skeleton", types.SimpleNamespace(BGEEmbedder=Embedder))
+    monkeypatch.setitem(sys.modules, "services.common.config", types.SimpleNamespace(
+        config=types.SimpleNamespace(postgres_url="postgresql://stub", embedding_model="M")))
+    monkeypatch.setattr(evaluate_retrieval.urllib.request, "urlopen", fake_urlopen)
+
+
+def _two_cases(tmp_path):
+    path = tmp_path / "r.jsonl"
+    path.write_text(json.dumps({"id": "r1", "query": "q1", "relevant_arxiv_ids": ["1706.03762"]}) + "\n" +
+                    json.dumps({"id": "r2", "query": "q2", "relevant_arxiv_ids": ["1706.03762", "1512.03385"]}) + "\n")
+    return str(path)
+
+
+def test_run_checks_healthz_before_any_rerank_and_reports_metrics(monkeypatch, tmp_path):
+    events = []
+    _stub_infra(monkeypatch, events, {"status": "ok", "reranker": True}, _FakeCursor(_pool()))
+    s = evaluate_retrieval.run_retrieval_evaluation(_two_cases(tmp_path), "http://embedder:8081", 5.0)
+    assert events[0] == "healthz" and events.count("healthz") == 1
+    assert events.index("healthz") < events.index("rerank") and events.count("rerank") == 1
+    assert "embedder:M" in events
+    assert s["cases_evaluated"] == 1 and s["skipped_case_ids"] == ["r2"]
+    assert s["missing_arxiv_ids"] == {"r2": ["1512.03385"]}
+    assert s["embedding_model"] == "M" and s["rerank_pool_size"] == 20
+    gated = s["modes"][evaluate_retrieval.RERANK_MODE]
+    # Ties (all 0.0) keep RRF order: chunks 1..5 -> papers 1706, 1810 -> relevant 1706 at rank 1.
+    assert gated["recall@5"] == 1.0 and gated["mrr"] == 1.0
+    assert gated["chunk_precision@5"] == pytest.approx(0.6)
+
+
+@pytest.mark.parametrize("health", [{"status": "ok", "reranker": False}, {"status": "ok"}])
+def test_run_with_failed_healthz_yields_no_summary(monkeypatch, tmp_path, health):
+    events = []
+    _stub_infra(monkeypatch, events, health, _FakeCursor(_pool()))
+    with pytest.raises(evaluate_retrieval.RerankError):
+        evaluate_retrieval.run_retrieval_evaluation(_two_cases(tmp_path), "http://embedder:8081", 5.0)
+    assert events == ["healthz"]  # no DB, no embedder, no rerank call

@@ -1,6 +1,6 @@
 # evals/ — golden eval sets and quality gate (EVAL-1)
 
-Quality targets come from Product PRD §8 and live in `thresholds.json`. **Never lower a threshold or delete a
+Quality targets come from Product PRD §8 (in [arxivlens-agents](https://github.com/MaheshPulivarthi18/arxivlens-agents/blob/main/docs/PRD-Product.md)) and live in `thresholds.json`. **Never lower a threshold or delete a
 case to make a run pass**; a wrong threshold needs an Accepted ADR.
 
 | File | Schema | Min size |
@@ -20,11 +20,29 @@ make eval                                # = python3 scripts/eval_gate.py; exit 
 python3 scripts/evaluate_retrieval.py    # retrieval only (DATABASE_URL + ARXIVLENS_EMBEDDER_URL, default http://localhost:8081)
 python3 scripts/evaluate_answers.py      # /v1/ask only (ARXIVLENS_API_URL, default http://localhost:8080)
 ```
-The gated retrieval mode, "Hybrid RRF + Rerank", reorders the Hybrid RRF top-10 by the production cross-encoder:
-`POST /internal/rerank` on the embedder API, which is the same endpoint `/v1/ask` calls. The retrieval eval refuses to
-run if the embedder API's `/healthz` reports `"reranker": false`, because in that state the endpoint falls back to
-bi-encoder scores. The gate also fails unless the results record that production rerank path.
-Coverage is checked per arXiv ID. A case is skipped unless every one of its `relevant_arxiv_ids` has indexed chunks,
+### What the retrieval gate measures
+Decisions: [ADR-0006](https://github.com/MaheshPulivarthi18/arxivlens-agents/blob/main/docs/adr/0006-recall-at-5-definition.md)
+(metric definition) and [ADR-0010](https://github.com/MaheshPulivarthi18/arxivlens-agents/blob/main/docs/adr/0010-ask-sorts-by-rerank.md)
+(ordering), both in arxivlens-agents.
+
+- **Recall@5 (gated, ≥ 0.80) is paper-level.** Each mode returns 5 chunks (the `/v1/ask` default `maxCitations`). They
+  are deduped to arXiv IDs in rank order, and Recall@5 = `|top-5 papers ∩ relevant_arxiv_ids| / |relevant_arxiv_ids|`.
+  MRR and NDCG@5 use the same paper ranking. Extra chunks from a paper that is already counted do not raise any of them.
+- **`chunk_precision@5` is a diagnostic and is not gated:** `|top-5 chunks from a relevant paper| / 5`. It is printed
+  and saved in the results JSON.
+- **Gated mode "Hybrid RRF + Rerank" follows ADR-0010.** The RRF candidate pool of 20 uses the same SQL as
+  `internal/query/search.go` (50 per arm, `ce.model` filter, k = 60). The whole pool is reranked in one
+  `POST /internal/rerank` call to the embedder API's cross-encoder, then stable-sorted by score (ties keep RRF order)
+  and cut to the top 5. **Production `/v1/ask` returns this ordering only once RET-1 merges.** Until then, the gate
+  measures the ADR-0010 target behaviour, not today's `/v1/ask`, which reranks only its RRF top 5 and does not sort.
+  The eval refuses to run if `/healthz` reports `"reranker": false`, because the endpoint would then fall back to
+  bi-encoder scores. A rerank error fails the run; it does not fall back to RRF order. The gate also fails unless the
+  results record the production rerank path.
+- The baselines (BM25, dense, RRF without rerank) are scored the same way on their top 5 chunks. Dense and RRF only
+  use embeddings for the current `EMBEDDING_MODEL`.
+
+Coverage is checked per arXiv ID. A paper counts as indexed only if it has chunks **with embeddings for the current
+model** (`chunk_embeddings.model`). A case is skipped unless every one of its `relevant_arxiv_ids` is indexed,
 and the missing IDs are printed and saved under `missing_arxiv_ids`. The gate fails if any case is skipped (coverage
 must be 1.0), and a partial run (`--skip-retrieval` / `--skip-answers`) never passes.
 Every failed `/v1/ask` call (HTTP error, timeout, bad JSON) fails the gate via the `ask_errors == 0` check. It is

@@ -4,7 +4,7 @@ ArxivLens — eval quality gate (EVAL-1). Used by `make eval`.
 
 Runs the retrieval eval (scripts/evaluate_retrieval.py, needs Postgres + indexed corpus) and the
 answer/refusal eval (scripts/evaluate_answers.py, needs the query service), compares the results
-with evals/thresholds.json (Product PRD §8), writes evals/results/<timestamp>.json, prints a table,
+with evals/thresholds.json (Product PRD §8, in arxivlens-agents), writes evals/results/<timestamp>.json, prints a table,
 and exits 0 only if every check passes.
 
 Exit codes: 0 = all checks pass, 1 = a check failed or was not measured, 2 = an eval could not run.
@@ -24,9 +24,11 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 from scripts import evaluate_retrieval as er  # noqa: E402  (stdlib-only at import time)
 
-# Hybrid RRF top-10 reordered by the production cross-encoder (embedder API /internal/rerank, the endpoint
-# /v1/ask calls via EmbedClient.Rerank). Note: /v1/ask itself does not reorder by rerank score; it uses
-# the score to filter (rag.go). See agents/tasks/EVAL-1.md Notes.
+# ADR-0010 ordering: RRF pool of 20 (search.go SQL), reranked in one call to the production cross-encoder
+# (embedder API /internal/rerank, the endpoint /v1/ask calls via EmbedClient.Rerank), stable-sorted by score,
+# top 5. Production /v1/ask orders this way only after RET-1 merges; until then this gates the target behaviour.
+# Recall@5 here is paper-level (ADR-0006). chunk_precision@5 is reported for information and never gated.
+# ADRs: https://github.com/MaheshPulivarthi18/arxivlens-agents/tree/main/docs/adr
 GATED_MODE = er.RERANK_MODE
 BASELINE_MODES = ("BM25 Keyword", "Dense Vector")
 
@@ -83,7 +85,8 @@ def check_thresholds(results: Dict[str, Any], thresholds: Dict[str, Any]) -> Lis
     return checks
 
 
-def print_table(checks: List[Dict[str, Any]], answers: Optional[Dict[str, Any]]) -> None:
+def print_table(checks: List[Dict[str, Any]], answers: Optional[Dict[str, Any]],
+                retrieval: Optional[Dict[str, Any]] = None) -> None:
     print("\n" + "=" * 78)
     print(f"{'Metric':<48} | {'Value':>9} | {'Target':>10} | Result")
     print("-" * 78)
@@ -91,6 +94,9 @@ def print_table(checks: List[Dict[str, Any]], answers: Optional[Dict[str, Any]])
         val = "n/a" if c["value"] is None else f"{c['value']:.4f}"
         result = "PASS" if c["passed"] else ("NOT RUN" if c["value"] is None else "FAIL")
         print(f"{c['metric']:<48} | {val:>9} | {c['op'] + ' ' + str(c['target']):>10} | {result}")
+    cp = ((retrieval or {}).get("modes", {}).get(GATED_MODE) or {}).get("chunk_precision@5")
+    if cp is not None:
+        print(f"{'(info, not gated) chunk_precision@5 (' + GATED_MODE + ')':<48} | {cp:>9.4f} |")
     if answers:
         print(f"{'(info) expected_paper_hit_rate':<48} | {answers['expected_paper_hit_rate']:>9.4f} |")
         p50 = answers["ask_p50_ms"]
@@ -134,7 +140,7 @@ def main(argv=None) -> int:
         return 2
 
     checks = check_thresholds(results, thresholds)
-    print_table(checks, results["answers"])
+    print_table(checks, results["answers"], results["retrieval"])
 
     os.makedirs(args.results_dir, exist_ok=True)
     stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
