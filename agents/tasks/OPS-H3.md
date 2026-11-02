@@ -45,3 +45,9 @@ may not run locally. In that case `gofmt -l .` is the only local check; AC1–AC
 ## Notes
 - 2026-11-02 (pm-lead): spec fixed before build — pinned current behaviour for old-style IDs and backoff; named parseAtomFeed; Go tests verified in CI only.
 - Old-style arXiv ID support (`cs/0601001`) → follow-up to spec (pm-lead).
+- 2026-11-02 (backend-engineer): implemented on `agent/backend/OPS-H3`. Added `parseAtomFeed` + `versionRegex` (package var)
+  in `crawler.go` (Crawl calls it), `retryBackoff` in `consumer.go`, tests `internal/{crawler,kafka,query}/*_test.go`,
+  fixture `internal/crawler/testdata/arxiv_feed.xml`. Local: `gofmt -l internal/` clean; full `go test ./internal/...`
+  could not run (Go 1.24.7, module deps not cached, proxy blocked). New tests pass under Go 1.24 in a stdlib-only scratch
+  copy, and the real `crawler.go` passes `go vet` against stubbed db/kafka/events. `tests/test_m2_pipeline.py` not run (no infra).
+  AC1 awaits the CI run on the PR.

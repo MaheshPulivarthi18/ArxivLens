@@ -50,6 +50,11 @@ func (c *Consumer) Close() {
 	}
 }
 
+// retryBackoff returns the in-process retry delay after a failed attempt: 100ms × 2^attempt.
+func retryBackoff(attempt int) time.Duration {
+	return time.Duration(100*(1<<attempt)) * time.Millisecond
+}
+
 // Start consuming loop.
 func (c *Consumer) Start(ctx context.Context, handler RecordHandler) error {
 	log.Printf("[Kafka Consumer] Starting group=%s topics=%v", c.group, c.topics)
@@ -94,8 +99,7 @@ func (c *Consumer) Start(ctx context.Context, handler RecordHandler) error {
 					record.Topic, record.Partition, record.Offset, attempt, c.maxRetries, handleErr)
 
 				if attempt < c.maxRetries {
-					backoff := time.Duration(100*(1<<attempt)) * time.Millisecond
-					time.Sleep(backoff)
+					time.Sleep(retryBackoff(attempt))
 				}
 			}
 
