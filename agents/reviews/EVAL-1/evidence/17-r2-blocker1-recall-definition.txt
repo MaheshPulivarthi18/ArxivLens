@@ -1,0 +1,24 @@
+$ bash -c echo "## lines of compute_recall_at_k touched by 5001cce..f750bb9 (empty = unchanged):"; git diff 5001cce f750bb9 -- scripts/evaluate_retrieval.py | grep -n "^[-+].*\(compute_recall_at_k\|min(len(relevant_doc_ids)\)" | grep -v "results\[mode_name\]" ; echo "## at head:"; grep -n -A5 "def compute_recall_at_k" scripts/evaluate_retrieval.py; echo "## caller: relevant set = every chunk of every relevant paper:"; grep -n "COVERAGE_SQL = \|return (\[\] if missing\|compute_recall_at_k(hits" scripts/evaluate_retrieval.py; echo "## gate still gates this value as PRD recall@5:"; grep -n "recall@5 ({GATED_MODE})" scripts/eval_gate.py; echo "## ADR-0006 on origin/main?"; git ls-tree -r --name-only origin/main docs/adr | grep 0006 || echo "(not on origin/main)"; echo "## ADR-0006 on origin/agent/pm/PM-1 (PR #3):"; f=$(git ls-tree -r --name-only origin/agent/pm/PM-1 docs/adr | grep 0006); echo "$f"; git show origin/agent/pm/PM-1:$f | grep -n -i -m2 "status"; echo "## ticket status line:"; grep -n "Status\*\*" agents/tasks/EVAL-1.md
+## lines of compute_recall_at_k touched by 5001cce..f750bb9 (empty = unchanged):
+## at head:
+111:def compute_recall_at_k(ranked_doc_ids: List[int], relevant_doc_ids: List[int], k: int = 5) -> float:
+112-    if not relevant_doc_ids:
+113-        return 0.0
+114-    top_k = set(ranked_doc_ids[:k])
+115-    hits = len(top_k.intersection(set(relevant_doc_ids)))
+116-    return hits / min(len(relevant_doc_ids), k)
+## caller: relevant set = every chunk of every relevant paper:
+130:COVERAGE_SQL = ("SELECT p.arxiv_id, pc.id FROM paper_chunks pc JOIN papers p ON p.id = pc.paper_id "
+179:    return ([] if missing else [r[1] for r in rows]), missing
+256:                results[mode_name]["recall@5"].append(compute_recall_at_k(hits, relevant_chunks, k=5))
+## gate still gates this value as PRD recall@5:
+67:    checks.append(_check(f"recall@5 ({GATED_MODE})", None if gated is None else gated["recall@5"],
+## ADR-0006 on origin/main?
+(not on origin/main)
+## ADR-0006 on origin/agent/pm/PM-1 (PR #3):
+docs/adr/0006-recall-at-5-definition.md
+3:- **Status:** Proposed
+## ticket status line:
+9:| **Status** | In review (rework round 2). Review Blocker 1 is blocked on ADR-0006 (Proposed, PR #3) |
+
+[exit code 0]

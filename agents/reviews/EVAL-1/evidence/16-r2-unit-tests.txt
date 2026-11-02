@@ -1,0 +1,45 @@
+$ python3 -m pytest -v tests/test_evals_data.py
+============================= test session starts ==============================
+platform linux -- Python 3.13.18, pytest-9.1.1, pluggy-1.6.0 -- /usr/local/bin/python3
+cachedir: .pytest_cache
+rootdir: /home/claude/arxivlens/.claude/worktrees/agent-a1e1021689a810876
+plugins: platformdirs-4.13.3, anyio-4.15.1
+collecting ... collected 33 items
+
+tests/test_evals_data.py::test_corpus_ids_valid_and_unique PASSED        [  3%]
+tests/test_evals_data.py::test_dataset_schema_size_and_corpus_membership[answer.jsonl] PASSED [  6%]
+tests/test_evals_data.py::test_dataset_schema_size_and_corpus_membership[refusal.jsonl] PASSED [  9%]
+tests/test_evals_data.py::test_dataset_schema_size_and_corpus_membership[retrieval.jsonl] PASSED [ 12%]
+tests/test_evals_data.py::test_case_ids_unique_across_sets PASSED        [ 15%]
+tests/test_evals_data.py::test_retrieval_script_has_no_hardcoded_queries PASSED [ 18%]
+tests/test_evals_data.py::test_thresholds_match_prd_section_8 PASSED     [ 21%]
+tests/test_evals_data.py::test_gate_passes_when_all_targets_met PASSED   [ 24%]
+tests/test_evals_data.py::test_gate_fails_below_any_threshold[override0] PASSED [ 27%]
+tests/test_evals_data.py::test_gate_fails_below_any_threshold[override1] PASSED [ 30%]
+tests/test_evals_data.py::test_gate_fails_below_any_threshold[override2] PASSED [ 33%]
+tests/test_evals_data.py::test_gate_fails_below_any_threshold[override3] PASSED [ 36%]
+tests/test_evals_data.py::test_gate_fails_below_any_threshold[override4] PASSED [ 39%]
+tests/test_evals_data.py::test_gate_fails_when_hybrid_does_not_beat_baselines PASSED [ 42%]
+tests/test_evals_data.py::test_gate_fails_on_partial_run PASSED          [ 45%]
+tests/test_evals_data.py::test_gate_fails_when_rerank_not_from_production_path PASSED [ 48%]
+tests/test_evals_data.py::test_gated_mode_calls_production_rerank_endpoint PASSED [ 51%]
+tests/test_evals_data.py::test_retrieval_script_has_no_local_bi_encoder_rerank PASSED [ 54%]
+tests/test_evals_data.py::test_production_rerank_bad_response_raises[payload0] PASSED [ 57%]
+tests/test_evals_data.py::test_production_rerank_bad_response_raises[payload1] PASSED [ 60%]
+tests/test_evals_data.py::test_production_rerank_bad_response_raises[payload2] PASSED [ 63%]
+tests/test_evals_data.py::test_production_rerank_http_error_raises PASSED [ 66%]
+tests/test_evals_data.py::test_require_cross_encoder_rejects_bi_encoder_fallback[health0-True] PASSED [ 69%]
+tests/test_evals_data.py::test_require_cross_encoder_rejects_bi_encoder_fallback[health1-False] PASSED [ 72%]
+tests/test_evals_data.py::test_require_cross_encoder_rejects_bi_encoder_fallback[health2-False] PASSED [ 75%]
+tests/test_evals_data.py::test_coverage_two_paper_case_with_one_indexed_reports_missing_id PASSED [ 78%]
+tests/test_evals_data.py::test_relevant_chunks_for_two_paper_case_with_one_indexed_is_fail_closed PASSED [ 81%]
+tests/test_evals_data.py::test_gate_fails_when_a_two_paper_case_is_partially_indexed PASSED [ 84%]
+tests/test_evals_data.py::test_answer_metrics_with_stub_ask PASSED       [ 87%]
+tests/test_evals_data.py::test_failed_requests_count_in_latency_and_not_as_refusals PASSED [ 90%]
+tests/test_evals_data.py::test_gate_fails_when_some_answer_requests_fail_even_if_refusals_perfect PASSED [ 93%]
+tests/test_evals_data.py::test_http_ask_records_timeout_at_least_timeout PASSED [ 96%]
+tests/test_evals_data.py::test_percentile_nearest_rank PASSED            [100%]
+
+============================== 33 passed in 0.05s ==============================
+
+[exit code 0]

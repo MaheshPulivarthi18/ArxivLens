@@ -87,3 +87,66 @@ PASS → pm-lead final review, with these conditions: (a) confirm or create the 
 2. Then **#3 (PM-1)**. Its PRD §8 text says "pending EVAL-1", and pm-lead flips that line and the AGENTS.md §5 gotcha right after.
 3. **OPS-H4** starts only after #2 is on `main`, because it edits the Makefile to run a test file that #2 adds. Until OPS-H4 merges, nothing in CI protects the eval data, so OPS-H4 is the next backend pick.
 4. Record the baseline after ADR-0006 is decided (or record both definitions if you defer the decision).
+
+---
+
+# QA report — EVAL-1 · PR #2 · round 2
+
+**Verdict:** FAIL
+**Reviewed commit:** `f750bb909141f3e67b7c2d1930158a3b3c11bb7d` · **Date:** 2026-11-02
+**Ticket:** `agents/tasks/EVAL-1.md` · **PRD:** Product PRD §8 Success metrics (Quality rows and the `/v1/ask` p95 row)
+**Trigger:** the human owner left a "Needs work" review on `5001cce` with Blocker 1, Blocker 2 and Major 3. Commit `f750bb9` is the developer's response.
+
+**Why FAIL:** Blocker 1 from the human review is not resolved. The gate still uses chunk-level Recall@5 (which acts like precision@5) as the PRD §8 Recall@5. This can only be fixed after ADR-0006 is Accepted, and only the human can accept it. The developer was right not to work around it. Blocker 2 is fixed in the way the human asked: the gate now calls the production `/internal/rerank` endpoint, and a test proves it. However, `/v1/ask` does not reorder results by rerank score. So the gated Recall@5 still does not measure what `/v1/ask` returns, which was the human's concern. Major 3 is resolved. CI is green.
+
+## Test results
+| Check | Source | Result |
+|---|---|---|
+| Go (vet, gofmt, test, build) | CI | ✅ success ([15](evidence/15-r2-ci-checks.png)) |
+| Python M0 unit tests | CI | ✅ success ([15](evidence/15-r2-ci-checks.png)). It still runs only `tests/test_m0.py`, so CI does not run `tests/test_evals_data.py` (OPS-H4) |
+| Frontend (lint, test, build) | CI | ✅ success ([15](evidence/15-r2-ci-checks.png)) |
+| Agent guardrails | CI + local | ✅ success. Local run: role=ai OK, with a size warning ([23](evidence/23-r2-guardrails.png)) |
+| `pytest tests/test_evals_data.py` | local | ✅ 33 passed in 0.05 s ([16](evidence/16-r2-unit-tests.png)). Round 1 had 20 tests |
+| Mutation checks on round-2 code | local, temp copy | 7 of 9 caught. The 2 survivors are listed below ([21](evidence/21-r2-mutations.png)) |
+| `python scripts/eval_gate.py --help` / no-stack run | local | ✅ exit 0 / exit 2 "could not run" ([24](evidence/24-r2-acs-at-head.png)) |
+| `make test-unit`, `make lint` | not run locally | No Go 1.25 or npm in the sandbox. CI's Go and Frontend jobs cover them |
+| `make eval` | not run locally | No Docker, Postgres or Hugging Face in the sandbox. There is no baseline yet, so there are no before/after numbers |
+
+## Human review items (`5001cce` "Needs work")
+| Item | Status at `f750bb9` | Evidence |
+|---|---|---|
+| **Blocker 1**: the gated Recall@5 is chunk-level `hits / min(\|relevant chunks\|, 5)`, which acts like precision@5. The definition needs an Accepted ADR | ❌ **Not resolved. Blocked on ADR-0006, which is a human decision.** `compute_recall_at_k` is unchanged, the caller still expands each paper to all of its chunks, and `eval_gate.py:67` still gates this value as `recall@5`. ADR-0006 is `Status: Proposed`, exists only on the unmerged `agent/pm/PM-1` branch (PR #3), and is not on `main`. The ticket Status says it is blocked on ADR-0006. There are no multi-chunk or multi-paper tests that tell recall and precision apart: changing the denominator to `len(relevant)` passes all 33 tests | [17](evidence/17-r2-blocker1-recall-definition.png), [21](evidence/21-r2-mutations.png) |
+| **Blocker 2**: the gated rerank is a BGE bi-encoder dot product, not the production cross-encoder | ⚠ **The requested fix is done. The underlying concern is only partly resolved.** Mode 4 now sends `POST <embedder>/internal/rerank`, the same endpoint as Go `EmbedClient.Rerank` (`client.go:93`). The local `np.dot` rerank is gone. `/healthz` must report `"reranker": true`, so the API's bi-encoder fallback (`api.py:106-109`) is refused. HTTP errors and score-count mismatches raise. The gate ignores the mode unless `rerank_path` is the production value. Tests mock the HTTP call and check URL, method, body, timeout and the reordering, and 6 related mutations are caught. **What remains:** `/v1/ask` asks `HybridSearch` for only `maxCitations` (5) RRF hits, and `search.go:127-139` attaches rerank scores but **never sorts by them**. `rag.go` uses the score only to drop hits. The eval instead reorders the RRF **top-10** by rerank score, with a per-arm pool of 20 and no `ce.model` filter, while production uses 50 and filters on `ce.model`. The gated Recall@5 can therefore still pass or fail independently of what `/v1/ask` returns. The developer disclosed this in the ticket Notes. See finding 2 | [18](evidence/18-r2-blocker2-rerank-endpoint.png), [19](evidence/19-r2-blocker2-prod-ordering.png), [21](evidence/21-r2-mutations.png) |
+| **Major 3**: coverage counted a case as covered if any one of its relevant papers was indexed | ✅ **Resolved.** `relevant_chunks_for_case` and `missing_arxiv_ids` check coverage per arXiv ID. A case is skipped unless every relevant ID has chunks. Missing IDs are printed and saved under `missing_arxiv_ids`, and coverage below 1.0 fails the gate. Three tests cover the case where only one of two papers is indexed, and both related mutations are caught | [20](evidence/20-r2-major3-coverage.png), [21](evidence/21-r2-mutations.png) |
+| Should-fix: no "Fixes #N" / "Closes #N" in the PR description | ⚠ Not addressed. The project tracks work in Jira (KAN-8 is linked in the PR body), not in GitHub issues. See finding 6 | n/a (PR body) |
+
+## Acceptance criteria (re-checked at `f750bb9`)
+| AC | Met? | Evidence |
+|---|---|---|
+| AC1: no hardcoded queries in `evaluate_retrieval.py` | ✅ | [24](evidence/24-r2-acs-at-head.png): the AC1/AC2 tests pass, including `test_retrieval_script_has_no_hardcoded_queries`. The refactor did not add any queries back ([16](evidence/16-r2-unit-tests.png)) |
+| AC2: dataset sizes and corpus membership | ✅ | [24](evidence/24-r2-acs-at-head.png): retrieval 34, answer 22, refusal 22. The data files are unchanged in `f750bb9` ([22](evidence/22-r2-scope-diffstat.png)) |
+| AC3: `--help` works without infra; with a stack, prints all metrics and exits 0/1 | ⚠ partly verified (same as round 1) | [24](evidence/24-r2-acs-at-head.png): `--help` exits 0 and shows the new `--embedder-url`. With no stack it exits 2. Threshold and production-rerank logic are unit-tested ([16](evidence/16-r2-unit-tests.png)). Not run against a live stack |
+| AC4: baseline recorded, or "not run" plus the commands | ✅ | [24](evidence/24-r2-acs-at-head.png): `evals/BASELINE.md` says "not run: infra unavailable" |
+| AC5: `evals/results/` git-ignored, or requested in Notes | ⚠ requested, not delivered (same as round 1) | [24](evidence/24-r2-acs-at-head.png): `evals/results/x.json` is not ignored. This is assigned to OPS-H4 (KAN-16) |
+
+## PRD fit
+The PRD §8 Quality target "Recall@5 ≥ 0.80" is still gated with a chunk-level number that is not paper-level recall. Until ADR-0006 is decided and implemented, a PASS or FAIL from `make eval` on that row does not show whether the PRD target is met. The rest of the round-2 changes make the gate measure the production reranker model, and coverage is now honestly fail-closed.
+
+## Findings
+1. [blocking] **Human Blocker 1 is unresolved and needs a human decision on ADR-0006** (Proposed, PR #3). `scripts/evaluate_retrieval.py:111-116` still divides by `min(|relevant chunks|, 5)`, and `eval_gate.py:67` gates that value as PRD Recall@5 ([17](evidence/17-r2-blocker1-recall-definition.png)). The developer cannot fix this without pre-empting the ADR. **Next step: Mahesh accepts or rejects ADR-0006. The ai-engineer then implements the accepted definition** (normally: dedupe the ranked chunks to arXiv IDs and compute recall against `relevant_arxiv_ids`, with chunk precision@5 reported separately) **and adds multi-chunk and multi-paper tests that tell recall and precision apart**. Today a denominator mutation passes all tests ([21](evidence/21-r2-mutations.png)).
+2. [blocking] **The gated mode still does not match what `/v1/ask` returns** (the remaining part of human Blocker 2). The eval reorders the RRF top-10 by cross-encoder score. `/v1/ask` (`rag.go:66`) takes the RRF top-5, attaches rerank scores without sorting (`search.go:127-139`), and uses them only as a filter (`rag.go:75,80`). The pools also differ: 20 per arm with no `ce.model` filter in the eval, and 50 per arm with the filter in production ([19](evidence/19-r2-blocker2-prod-ordering.png)). The human's fix option ("call the same rerank client/endpoint") is implemented, but the comparison is still not of the production retrieval path. **Owner decision needed (pm-lead, then human):** either (a) production sorts by `RerankScore` over a larger RRF pool before truncating (backend-engineer owns `search.go`; ai-engineer owns `rag.go`), or (b) the gated mode is redefined to match `/v1/ask` exactly, for example RRF top-5 with the 50-per-arm pool and `ce.model` filter, plus the `rag.go` filter. The developer suggests putting (b) in an ADR together with ADR-0006. If the human considers the endpoint fix enough for this PR, pm-lead should record that and open the follow-up ticket.
+3. [nit] **The gate's `rerank via production /internal/rerank` check is self-reported.** `run_retrieval_evaluation` always writes `rerank_path = PRODUCTION_RERANK_PATH` (`evaluate_retrieval.py:265`). The real protection is the `/healthz` and HTTP calls before that line, and nothing tests that `run_retrieval_evaluation` calls them. Deleting the `require_cross_encoder(...)` call passes all 33 tests ([21](evidence/21-r2-mutations.png)). Add a test that stubs `psycopg` and the embedder and asserts the health check is called and that a failed health check means no results are returned.
+4. [nit] **Coverage is checked against `paper_chunks`, not `chunk_embeddings`** (`COVERAGE_SQL`, `evaluate_retrieval.py:130`). A paper that has been chunked but not embedded, or embedded with a different `ce.model`, counts as covered even though dense and RRF search cannot return it. This could confuse the first live run.
+5. [nit] Size: `f750bb9` alone has 481 changed lines (355+, 126−), and the whole PR has about 1,250 non-evidence lines ([22](evidence/22-r2-scope-diffstat.png)). That is over the 400-line target. Most of it is review rework the human asked for, so I do not recommend a split.
+6. [nit] **The PR description is out of date.** It still says the gated mode "uses a BGE bi-encoder … EVAL-2 fixes it" and links that to EVAL-2. The description should be updated for round 2, and the "Fixes #N" should-fix should be answered (KAN-8 is in Jira, and there is no GitHub issue).
+7. [spec] **EVAL-2 (KAN-12) overlap.** Round 2 has already done EVAL-2's "move the rerank mode to `/internal/rerank`" item. pm-lead should update EVAL-2's scope so the work is not done twice. The production-ordering question in finding 2 should get its own ticket or ADR.
+8. [spec] Not changed since round 1: AC5 and running `tests/test_evals_data.py` in CI are still OPS-H4 (KAN-16). The new tests have the same CI gap: CI ran 4 checks and none of them ran the 33 eval tests ([15](evidence/15-r2-ci-checks.png)).
+
+## Missing tests
+- Recall@5 on a paper-level labelled case where one relevant paper has at least 5 chunks, plus a two-paper case. This is needed to tell recall from precision (Blocker 1, after ADR-0006).
+- `run_retrieval_evaluation` with `psycopg`, the embedder and `urlopen` stubbed. It should assert the `/healthz` check runs before any rerank call, that a failed health check gives no summary, and that `missing_arxiv_ids` ends up in the summary for a partially indexed case.
+- `rerank_candidates` with tied scores (the docstring says ties keep RRF order, but no test checks it) and with an empty candidate list (no HTTP call).
+- Still open from round 1, assigned to EVAL-2: the exact-threshold `>=` boundary, `main()` end to end, malformed JSONL, and an HTTP 500 from `/v1/ask`.
+
+## Hand-off
+FAIL → back to ai-engineer. Finding 1 cannot be worked until **Mahesh decides ADR-0006** (PR #3), so the task stays `Blocked (needs ADR-0006)`. For finding 2, pm-lead needs to decide, with the human, between "production sorts by rerank" (a backend and ai change) and "gate what `/v1/ask` actually does" (an ADR), or record that the endpoint fix is enough for this PR. Major 3 is done.
