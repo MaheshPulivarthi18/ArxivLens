@@ -28,7 +28,7 @@ Format:
 - Blockers / follow-ups: Mahesh decides ADR-0006 and the rerank-ordering question. EVAL-2 needs re-scoping. Commits f750bb9/4f888fb (and PM-1 830fe69/b5c733f) carry a stale Claude-Session trailer (cosmetic).
 
 ## 2026-11-02 — board-2026-11-01 record (PR #4) — superseded
-- Agent: orchestrator · Its commit is carried into this cycle's record branch; PR #4 closed as superseded.
+- Agent: orchestrator · Its commit is carried into this cycle's record branch; PR #4 is superseded by #7; Mahesh can close it without merging (the agent was not allowed to close PRs).
 
 ## 2026-11-01 — PM-1 — in review
 - Agent: pm-lead · Attempts: 1 · Review rounds: 2 (CHANGES → APPROVE) · PR: https://github.com/MaheshPulivarthi18/ArxivLens/pull/3
