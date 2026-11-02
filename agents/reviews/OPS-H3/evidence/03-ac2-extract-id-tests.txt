@@ -1,0 +1,31 @@
+$ bash -c git show af0461d:internal/query/ingester_test.go | grep -n "{name:"; echo; echo "case count: $(git show af0461d:internal/query/ingester_test.go | grep -c "{name:")"; echo "invalid (wantErr: true) count: $(git show af0461d:internal/query/ingester_test.go | grep -c "wantErr: true")"; echo; git show af0461d:internal/query/ingester.go | grep -n -A9 "^func ExtractCleanArxivID"
+14:		{name: "bare 5-digit suffix", input: "2307.08691", want: "2307.08691"},
+15:		{name: "bare 4-digit suffix", input: "1706.0376", want: "1706.0376"},
+16:		{name: "versioned v2", input: "2307.08691v2", want: "2307.08691"},
+17:		{name: "versioned v12", input: "2401.12345v12", want: "2401.12345"},
+18:		{name: "abs URL", input: "https://arxiv.org/abs/2307.08691", want: "2307.08691"},
+19:		{name: "abs URL versioned", input: "http://arxiv.org/abs/2307.08691v3", want: "2307.08691"},
+20:		{name: "pdf URL", input: "https://arxiv.org/pdf/2307.08691", want: "2307.08691"},
+21:		{name: "pdf URL with .pdf suffix", input: "https://arxiv.org/pdf/2307.08691v2.pdf", want: "2307.08691"},
+22:		{name: ".pdf suffix", input: "2307.08691.pdf", want: "2307.08691"},
+23:		{name: "surrounding whitespace", input: "  \t2307.08691\n ", want: "2307.08691"},
+24:		{name: "empty string", input: "", wantErr: true},
+25:		{name: "whitespace only", input: "   ", wantErr: true},
+26:		{name: "free text", input: "attention is all you need", wantErr: true},
+27:		{name: "old-style ID unsupported", input: "cs/0601001", wantErr: true},
+
+case count: 14
+invalid (wantErr: true) count: 4
+
+58:func ExtractCleanArxivID(input string) (string, error) {
+59-	input = strings.TrimSpace(input)
+60-	re := regexp.MustCompile(`(\d{4}\.\d{4,5})`)
+61-	match := re.FindString(input)
+62-	if match != "" {
+63-		return match, nil
+64-	}
+65-	return "", fmt.Errorf("could not extract valid arXiv ID from: %s", input)
+66-}
+67-
+
+[exit code 0]

@@ -1,0 +1,9 @@
+$ bash -c go version; echo "--- gofmt -l \$(git ls-files *.go):"; gofmt -l $(git ls-files "*.go"); echo "gofmt exit: $?"; echo "--- GOTOOLCHAIN=local go test ./internal/crawler/ ./internal/kafka/ ./internal/query/:"; GOTOOLCHAIN=local GOFLAGS=-mod=mod timeout 60 go test ./internal/crawler/ ./internal/kafka/ ./internal/query/ 2>&1 | head -5; true
+--- gofmt -l $(git ls-files *.go):
+gofmt exit: 0
+--- GOTOOLCHAIN=local go test ./internal/crawler/ ./internal/kafka/ ./internal/query/:
+go: go.mod requires go >= 1.25.0 (running go 1.24.7; GOTOOLCHAIN=local)
+go: downloading go1.25.0 (linux/amd64)
+go: download go1.25.0: golang.org/toolchain@v0.0.1-go1.25.0.linux-amd64: Get "https://proxy.golang.org/golang.org/toolchain/@v/v0.0.1-go1.25.0.linux-amd64.zip": dial tcp: lookup proxy.golang.org on 8.8.8.8:53: no such host
+
+[exit code 0]

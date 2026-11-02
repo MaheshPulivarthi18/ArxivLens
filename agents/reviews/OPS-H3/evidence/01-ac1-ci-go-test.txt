@@ -1,0 +1,21 @@
+$ gh api repos/MaheshPulivarthi18/ArxivLens/actions/jobs/125035567407/logs | grep -nE 'Run make|go vet|go test|go build|ok|no test files'
+34:2026-11-02T00:48:32.5021068Z Complete job name: Go (vet, gofmt, test, build)
+202:2026-11-02T00:48:44.0595862Z GOVERSION='go1.25.0'
+207:2026-11-02T00:48:44.0822509Z ##[group]Run make lint-go
+211:2026-11-02T00:48:44.0965720Z go vet ./...
+212:2026-11-02T00:48:45.0188266Z ##[group]Run make test-go
+216:2026-11-02T00:48:45.0282079Z go test ./...
+217:2026-11-02T00:48:45.4557468Z ?   	arxivlens/cmd/arxivlens	[no test files]
+218:2026-11-02T00:48:45.4627393Z ?   	arxivlens/internal/config	[no test files]
+219:2026-11-02T00:48:46.6148538Z ok  	arxivlens/internal/crawler	0.005s
+220:2026-11-02T00:48:46.6177862Z ?   	arxivlens/internal/db	[no test files]
+221:2026-11-02T00:48:46.6207136Z ?   	arxivlens/internal/dlq	[no test files]
+222:2026-11-02T00:48:46.6218544Z ?   	arxivlens/internal/downloader	[no test files]
+223:2026-11-02T00:48:46.9647660Z ok  	arxivlens/internal/kafka	0.004s
+224:2026-11-02T00:48:47.1369807Z ok  	arxivlens/internal/query	0.005s
+225:2026-11-02T00:48:47.1370236Z ?   	arxivlens/internal/storage	[no test files]
+226:2026-11-02T00:48:47.1370591Z ?   	arxivlens/internal/telemetry	[no test files]
+227:2026-11-02T00:48:47.1371016Z ?   	arxivlens/shared/events	[no test files]
+228:2026-11-02T00:48:47.1566221Z ##[group]Run make build-go
+232:2026-11-02T00:48:47.1663387Z go build -o bin/arxivlens ./cmd/arxivlens
+

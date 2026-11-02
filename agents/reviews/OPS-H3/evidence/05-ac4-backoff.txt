@@ -1,0 +1,48 @@
+$ bash -c git show af0461d:internal/kafka/consumer_test.go | sed -n "8,21p"; echo; git diff origin/main...af0461d -- internal/kafka/consumer.go; echo; git show af0461d:internal/kafka/consumer.go | grep -n "for attempt\|attempt < c.maxRetries\|maxRetries *[:=]\|maxRetries: "
+func TestRetryBackoff(t *testing.T) {
+	tests := []struct {
+		attempt int
+		want    time.Duration
+	}{
+		{attempt: 1, want: 200 * time.Millisecond},
+		{attempt: 2, want: 400 * time.Millisecond},
+	}
+
+	for _, tt := range tests {
+		if got := retryBackoff(tt.attempt); got != tt.want {
+			t.Errorf("retryBackoff(%d) = %v, want %v", tt.attempt, got, tt.want)
+		}
+	}
+
+diff --git a/internal/kafka/consumer.go b/internal/kafka/consumer.go
+index 4b81394..5cee8e5 100644
+--- a/internal/kafka/consumer.go
++++ b/internal/kafka/consumer.go
+@@ -50,6 +50,11 @@ func (c *Consumer) Close() {
+ 	}
+ }
+ 
++// retryBackoff returns the in-process retry delay after a failed attempt: 100ms × 2^attempt.
++func retryBackoff(attempt int) time.Duration {
++	return time.Duration(100*(1<<attempt)) * time.Millisecond
++}
++
+ // Start consuming loop.
+ func (c *Consumer) Start(ctx context.Context, handler RecordHandler) error {
+ 	log.Printf("[Kafka Consumer] Starting group=%s topics=%v", c.group, c.topics)
+@@ -94,8 +99,7 @@ func (c *Consumer) Start(ctx context.Context, handler RecordHandler) error {
+ 					record.Topic, record.Partition, record.Offset, attempt, c.maxRetries, handleErr)
+ 
+ 				if attempt < c.maxRetries {
+-					backoff := time.Duration(100*(1<<attempt)) * time.Millisecond
+-					time.Sleep(backoff)
++					time.Sleep(retryBackoff(attempt))
+ 				}
+ 			}
+ 
+
+43:		maxRetries: 3,
+92:			for attempt := 1; attempt <= c.maxRetries; attempt++ {
+101:				if attempt < c.maxRetries {
+
+[exit code 0]
