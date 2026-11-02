@@ -84,7 +84,8 @@ def _mode(r, m, n):
 
 def _results(recall=0.85, supported=0.95, refusal=1.0, p95=1200.0, evaluated=34):
     return {
-        "retrieval": {"cases_total": 34, "cases_evaluated": evaluated, "modes": {
+        "retrieval": {"cases_total": 34, "cases_evaluated": evaluated,
+                      "rerank_path": evaluate_retrieval.PRODUCTION_RERANK_PATH, "modes": {
             "BM25 Keyword": _mode(0.5, 0.5, 0.5),
             "Dense Vector": _mode(0.6, 0.6, 0.6),
             "Hybrid RRF": _mode(0.7, 0.7, 0.7),
@@ -119,6 +120,148 @@ def test_gate_fails_on_partial_run():
     res = _results()
     res["answers"] = None
     assert not all(c["passed"] for c in eval_gate.check_thresholds(res, eval_gate.load_thresholds()))
+
+
+def test_gate_fails_when_rerank_not_from_production_path():
+    for bad in (None, "local bi-encoder dot product"):
+        res = _results()
+        if bad is None:
+            del res["retrieval"]["rerank_path"]
+        else:
+            res["retrieval"]["rerank_path"] = bad
+        checks = {c["metric"]: c for c in eval_gate.check_thresholds(res, eval_gate.load_thresholds())}
+        assert not checks["rerank via production /internal/rerank"]["passed"]
+        assert checks[f"recall@5 ({eval_gate.GATED_MODE})"]["value"] is None  # not gated on untrusted numbers
+        assert not all(c["passed"] for c in checks.values())
+
+
+# --- BLOCKER 2: the gated mode goes through the production rerank endpoint (no infra; HTTP mocked) ---
+
+class _FakeResp:
+    def __init__(self, payload):
+        self._body = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self):
+        return self._body
+
+
+class _FakeCursor:
+    """Answers the three mode queries of run_modes_for_case by matching the SQL text."""
+
+    def __init__(self, rrf_rows):
+        self.rrf_rows = rrf_rows
+        self._last = None
+
+    def execute(self, sql, params):
+        self._last = sql
+
+    def fetchall(self):
+        if self._last == evaluate_retrieval.BM25_SQL:
+            return [(1,), (2,)]
+        if self._last == evaluate_retrieval.DENSE_SQL:
+            return [(2,), (1,)]
+        if self._last == evaluate_retrieval.RRF_SQL:
+            return self.rrf_rows
+        raise AssertionError(f"unexpected SQL: {self._last}")
+
+
+def test_gated_mode_calls_production_rerank_endpoint(monkeypatch):
+    calls = []
+
+    def fake_urlopen(req, timeout=None):
+        calls.append((req.full_url, req.get_method(), json.loads(req.data.decode("utf-8")), timeout))
+        return _FakeResp({"scores": [0.1, 0.9, 0.5]})
+
+    monkeypatch.setattr(evaluate_retrieval.urllib.request, "urlopen", fake_urlopen)
+    rerank = evaluate_retrieval.make_http_rerank("http://embedder:8081/", timeout_s=7.0)
+    rrf_rows = [(10, "chunk ten", 0.03), (20, "chunk twenty", 0.02), (30, "chunk thirty", 0.01)]
+    out = evaluate_retrieval.run_modes_for_case(_FakeCursor(rrf_rows), "what is attention?", "[0.1]", rerank)
+
+    assert eval_gate.GATED_MODE == evaluate_retrieval.RERANK_MODE
+    assert calls == [("http://embedder:8081/internal/rerank", "POST",
+                      {"query": "what is attention?", "passages": ["chunk ten", "chunk twenty", "chunk thirty"]},
+                      7.0)]
+    assert out["Hybrid RRF"][0] == [10, 20, 30]
+    assert out[eval_gate.GATED_MODE][0] == [20, 30, 10]  # ordered by the endpoint's scores
+
+
+def test_retrieval_script_has_no_local_bi_encoder_rerank():
+    with open(evaluate_retrieval.__file__, encoding="utf-8") as f:
+        src = f.read()
+    assert "np.dot" not in src and "cand_vecs" not in src
+
+
+@pytest.mark.parametrize("payload", [{"scores": [0.5]}, {"detail": "boom"}, ["not", "a", "dict"]])
+def test_production_rerank_bad_response_raises(monkeypatch, payload):
+    monkeypatch.setattr(evaluate_retrieval.urllib.request, "urlopen", lambda req, timeout=None: _FakeResp(payload))
+    rerank = evaluate_retrieval.make_http_rerank("http://embedder:8081")
+    with pytest.raises(evaluate_retrieval.RerankError):
+        rerank("q", ["a", "b"])
+
+
+def test_production_rerank_http_error_raises(monkeypatch):
+    def boom(req, timeout=None):
+        raise evaluate_retrieval.urllib.error.URLError("connection refused")
+    monkeypatch.setattr(evaluate_retrieval.urllib.request, "urlopen", boom)
+    with pytest.raises(evaluate_retrieval.RerankError):
+        evaluate_retrieval.make_http_rerank("http://embedder:8081")("q", ["a"])
+
+
+@pytest.mark.parametrize("health,ok", [({"status": "ok", "reranker": True}, True),
+                                       ({"status": "ok", "reranker": False}, False),
+                                       ({"status": "ok"}, False)])
+def test_require_cross_encoder_rejects_bi_encoder_fallback(monkeypatch, health, ok):
+    seen = []
+
+    def fake_urlopen(url, timeout=None):
+        seen.append(url)
+        return _FakeResp(health)
+
+    monkeypatch.setattr(evaluate_retrieval.urllib.request, "urlopen", fake_urlopen)
+    if ok:
+        evaluate_retrieval.require_cross_encoder("http://embedder:8081")
+    else:
+        with pytest.raises(evaluate_retrieval.RerankError):
+            evaluate_retrieval.require_cross_encoder("http://embedder:8081")
+    assert seen == ["http://embedder:8081/healthz"]
+
+
+# --- MAJOR 3: coverage is per arXiv ID ---
+
+def test_coverage_two_paper_case_with_one_indexed_reports_missing_id():
+    rows = [("1706.03762", 1), ("1706.03762", 2)]
+    assert evaluate_retrieval.missing_arxiv_ids(["1706.03762", "1810.04805"], rows) == ["1810.04805"]
+    assert evaluate_retrieval.missing_arxiv_ids(["1706.03762"], rows) == []
+    assert evaluate_retrieval.missing_arxiv_ids(["1810.04805", "1512.03385"], []) == ["1810.04805", "1512.03385"]
+
+
+def test_relevant_chunks_for_two_paper_case_with_one_indexed_is_fail_closed():
+    class Cur:
+        def execute(self, sql, params):
+            assert sql == evaluate_retrieval.COVERAGE_SQL
+            self.ids = params[0]
+
+        def fetchall(self):
+            return [(a, cid) for a, cid in [("1706.03762", 1), ("1706.03762", 2)] if a in self.ids]
+
+    chunks, missing = evaluate_retrieval.relevant_chunks_for_case(Cur(), ["1706.03762", "1810.04805"])
+    assert (chunks, missing) == ([], ["1810.04805"])
+    chunks, missing = evaluate_retrieval.relevant_chunks_for_case(Cur(), ["1706.03762"])
+    assert (chunks, missing) == ([1, 2], [])
+
+
+def test_gate_fails_when_a_two_paper_case_is_partially_indexed():
+    # One skipped case (missing one of its two papers) means coverage 33/34, which must fail the gate.
+    res = _results(evaluated=33)
+    res["retrieval"]["missing_arxiv_ids"] = {"r010": ["1810.04805"]}
+    checks = {c["metric"]: c for c in eval_gate.check_thresholds(res, eval_gate.load_thresholds())}
+    assert not checks["retrieval_coverage"]["passed"]
 
 
 def test_answer_metrics_with_stub_ask():

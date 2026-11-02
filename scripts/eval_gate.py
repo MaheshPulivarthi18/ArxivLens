@@ -20,7 +20,14 @@ from typing import Any, Dict, List, Optional
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EVALS_DIR = os.path.join(REPO_ROOT, "evals")
-GATED_MODE = "Hybrid RRF + Rerank"  # the configuration /v1/ask actually uses
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+from scripts import evaluate_retrieval as er  # noqa: E402  (stdlib-only at import time)
+
+# Hybrid RRF top-10 reordered by the production cross-encoder (embedder API /internal/rerank, the endpoint
+# /v1/ask calls via EmbedClient.Rerank). Note: /v1/ask itself does not reorder by rerank score; it uses
+# the score to filter (rag.go). See agents/tasks/EVAL-1.md Notes.
+GATED_MODE = er.RERANK_MODE
 BASELINE_MODES = ("BM25 Keyword", "Dense Vector")
 
 
@@ -50,7 +57,11 @@ def check_thresholds(results: Dict[str, Any], thresholds: Dict[str, Any]) -> Lis
     answers = results.get("answers")
 
     modes = (retrieval or {}).get("modes", {})
-    gated = modes.get(GATED_MODE)
+    # Only trust the gated mode's numbers if they came from the production rerank path.
+    production_rerank = None if retrieval is None else \
+        float(retrieval.get("rerank_path") == er.PRODUCTION_RERANK_PATH)
+    checks.append(_check("rerank via production /internal/rerank", production_rerank, "==", 1.0))
+    gated = modes.get(GATED_MODE) if production_rerank else None
     checks.append(_check("retrieval_coverage", None if retrieval is None else
                          retrieval["cases_evaluated"] / max(1, retrieval["cases_total"]), "==", 1.0))
     checks.append(_check(f"recall@5 ({GATED_MODE})", None if gated is None else gated["recall@5"],
@@ -92,22 +103,24 @@ def main(argv=None) -> int:
                                      "(Product PRD §8). Needs Postgres with evals/corpus.txt indexed and the "
                                      "query service running.")
     parser.add_argument("--api-url", default=os.getenv("ARXIVLENS_API_URL", "http://localhost:8080"))
+    parser.add_argument("--embedder-url", default=er.DEFAULT_EMBEDDER_URL,
+                        help="Embedder API base URL for the production /internal/rerank "
+                        "(env ARXIVLENS_EMBEDDER_URL, default http://localhost:8081)")
     parser.add_argument("--thresholds", default=os.path.join(EVALS_DIR, "thresholds.json"))
     parser.add_argument("--results-dir", default=os.path.join(EVALS_DIR, "results"))
-    parser.add_argument("--timeout", type=float, default=30.0, help="Per /v1/ask request timeout (s)")
+    parser.add_argument("--timeout", type=float, default=30.0,
+                        help="Per request timeout for /v1/ask and the embedder API (s)")
     parser.add_argument("--skip-retrieval", action="store_true", help="Measure answers only (gate will fail)")
     parser.add_argument("--skip-answers", action="store_true", help="Measure retrieval only (gate will fail)")
     args = parser.parse_args(argv)
 
-    if REPO_ROOT not in sys.path:
-        sys.path.insert(0, REPO_ROOT)
     thresholds = load_thresholds(args.thresholds)
     results: Dict[str, Any] = {"retrieval": None, "answers": None}
 
     try:
         if not args.skip_retrieval:
-            from scripts.evaluate_retrieval import run_retrieval_evaluation
-            results["retrieval"] = run_retrieval_evaluation()
+            results["retrieval"] = er.run_retrieval_evaluation(embedder_url=args.embedder_url,
+                                                               timeout_s=args.timeout)
         if not args.skip_answers:
             from scripts import evaluate_answers as ea
             results["answers"] = ea.evaluate(ea.load_cases(os.path.join(EVALS_DIR, "answer.jsonl")),

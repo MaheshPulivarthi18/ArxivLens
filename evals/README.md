@@ -17,11 +17,16 @@ case to make a run pass**; a wrong threshold needs an Accepted ADR.
 make infra-up && make migrate            # Postgres+pgvector, Kafka, MinIO
 # start the embedder API (:8081) and the query service (:8080), then seed the corpus (below)
 make eval                                # = python3 scripts/eval_gate.py; exit 0 pass, 1 fail, 2 could not run
-python3 scripts/evaluate_retrieval.py    # retrieval only (needs DATABASE_URL)
+python3 scripts/evaluate_retrieval.py    # retrieval only (DATABASE_URL + ARXIVLENS_EMBEDDER_URL, default http://localhost:8081)
 python3 scripts/evaluate_answers.py      # /v1/ask only (ARXIVLENS_API_URL, default http://localhost:8080)
 ```
-The gate fails if any `retrieval.jsonl` case is skipped because its paper is not indexed (coverage must be 1.0),
-and a partial run (`--skip-retrieval` / `--skip-answers`) never passes.
+The gated retrieval mode, "Hybrid RRF + Rerank", reorders the Hybrid RRF top-10 by the production cross-encoder:
+`POST /internal/rerank` on the embedder API, which is the same endpoint `/v1/ask` calls. The retrieval eval refuses to
+run if the embedder API's `/healthz` reports `"reranker": false`, because in that state the endpoint falls back to
+bi-encoder scores. The gate also fails unless the results record that production rerank path.
+Coverage is checked per arXiv ID. A case is skipped unless every one of its `relevant_arxiv_ids` has indexed chunks,
+and the missing IDs are printed and saved under `missing_arxiv_ids`. The gate fails if any case is skipped (coverage
+must be 1.0), and a partial run (`--skip-retrieval` / `--skip-answers`) never passes.
 Every failed `/v1/ask` call (HTTP error, timeout, bad JSON) fails the gate via the `ask_errors == 0` check. It is
 also recorded in the p50/p95 latency at its elapsed time (a timeout counts as at least `--timeout`), and never counts
 as a refusal, hit, or supported citation. If every call fails, the gate exits 2 (could not run).
