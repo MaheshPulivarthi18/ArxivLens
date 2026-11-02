@@ -103,3 +103,69 @@ Yes. The status columns now match the code, including the fail-open path in QA-4
 
 ## Hand-off
 PASS → pm-lead final review, then a human merges, after PR #2. The new findings are non-blocking, and finding 2 is a spec suggestion for pm-lead.
+
+---
+
+# PM decision — PM-1 · PR #3
+
+**Verdict:** APPROVE (ready for human merge, **after PR #2**)
+**Reviewer:** pm-lead · **Reviewed head:** `830fe69b30772c1b7777ef7d753318251d383d94` · **Date:** 2026-11-02
+
+**Conflict of interest:** pm-lead wrote PM-1, so this is a self-review. It comes after an independent QA FAIL → PASS, and I judged it to the same bar as any engineer's PR. I approve only because each AC has evidence that QA produced independently, I re-ran it, and I read the PRD text myself. A human merge is still required.
+
+**Head vs reviewed commit:** QA round 2 reviewed `f4cd9ab`. Head `830fe69` adds only `agents/reviews/PM-1/**` (23 files, +442, no other path; `git diff --name-only f4cd9ab 830fe69`). CI on `830fe69`: Go, Python M0, Frontend and Agent guardrails all `completed / success`.
+
+## Acceptance criteria
+| AC | Verdict | Why |
+|---|---|---|
+| AC1 — every ⏳ row has acceptance or a task | Met | 6 non-✅ rows (ING-6, QA-4 ◐, QA-8, QA-9, UI-5 ◐, OPS-6), and the number missing acceptance is 0 ([16](evidence/16-r2-ac1-pending-rows.png)). All linked specs exist. QA-9, OPS-6 and saved questions are labelled *Proposed acceptance (needs human approval)*, which is right because they are not in the PRD yet. |
+| AC2 — every open question links an ADR | Met | 10/10 links resolve, titles match, all `Proposed`. ADRs 0006–0009 have a blank Decision section, and no ADR is Accepted ([17](evidence/17-r2-ac2-open-questions-adrs.png); re-checked with `grep -rn 'Status: Accepted' docs/adr/` → none). |
+| AC3 — docs/ and agents/ only | Met | [19](evidence/19-r2-ac3-changed-files.png), [18](evidence/18-r2-ac3-guardrails.png), CI guardrails ([13](evidence/13-r2-ci-guardrails-log.png)). |
+
+## Product fit (read directly, not only via QA)
+- §6 statuses now tell the truth about the code, including QA-4's fail-open path. That is the core purpose of this ticket, and the round-1 blocking defect was exactly a status that wasn't true.
+- §8: each metric names a dataset, a command and a gate key, or says plainly "not automated / not gated yet". The keys match PR #2's `thresholds.json` ([09](evidence/09-eval-keys-vs-pr2.png)).
+- Technical PRD §9 reference hardware is clearly a *Proposed* pm-lead choice. The text says existing gates apply unchanged until Mahesh decides. No requirement was invented without that label.
+- AI-2 (fail closed) is `Ready` without an ADR. I accept that: QA-4 already requires every citation to be *verified*, so "unverified ⇒ not supported" enforces an existing requirement rather than making a new product choice. Adding a third state is explicitly out of scope and routed to ADR-0003.
+- Scope: 514 PM-authored lines, over the 400 target. About 325 of them are new specs and ADRs, which this ticket asked for. I don't think a split would help. No scope creep beyond the ticket's Scope list.
+
+## Evidence files checked (all opened: .png with the image viewer, .txt read in full)
+| File | What I checked |
+|---|---|
+| 00 ci-checks | Round-1 head `c697b29`: 4/4 checks success. |
+| 01 scope-guardrails | 12 files, all docs/ or agents/tasks/. 514 lines. Guardrails OK, role=pm. |
+| 02 ci-guardrails-log | The CI job log agrees with the local run (warning at 514 lines, OK). |
+| 03 ac3-no-source-code | `grep -vE '^(docs/|agents/)'` on the round-1 diff is empty. |
+| 04 ac1-pending-rows | Round 1: 5 non-✅ rows OK. QA-4 is still ✅, which is what made round 1 fail. |
+| 05 ac2-open-questions-adrs | Round 1: 10 links → Proposed ADRs. |
+| 06 status-claims-vs-code | Every ✅ row has grep hits in the right files. UI-5's per-citation BibTeX is found. The ⏳ features are absent. |
+| 07 qa4-fallback | `rag.go:151-153` sets `supported = true` and `score = 0.75` in the else branch. This confirms the round-1 blocking finding was real. |
+| 08 prd-links-dangling | Round 1: 7 paths exist only on PR #2. |
+| 09 eval-keys-vs-pr2 | All 5 gate keys and `GATED_MODE` match PR #2. The Makefile fallback matches what the §8 prose claims. |
+| 10 new-spec-structure | 5 new specs have every template field, 4–5 ACs each, and dependencies that resolve. |
+| 11 new-spec-claims | The HNSW index is absent from migrations, `migrate` runs a single file, the M5/M6 test exists, the rag.go line refs are right, the eval rerank is a bi-encoder, and file ownership matches AGENTS.md §1. |
+| 12 r2-ci-checks | Round-2 head `f4cd9ab`: 4/4 success. |
+| 13 r2-ci-guardrails-log | OK for role=pm. The 1125-line count includes the QA pack. |
+| 14 r2-fix-commit | 5 files, +5/−3: QA-4 → ◐ with AI-2, §7.2 "Known gap", AI-3 AC4, AI-2 Notes. Small and focused. |
+| 15 r2-qa4 | The QA-4 row now matches `rag.go`, and AI-2 is linked from §6, §8 and Technical §7.2. |
+| 16 r2-ac1-pending-rows | 6 non-✅ rows, 0 missing acceptance. |
+| 17 r2-ac2-open-questions-adrs | Same as round 1. Still no Accepted ADR. |
+| 18 r2-ac3-guardrails | Local guardrails pass for role=pm. |
+| 19 r2-ac3-changed-files | Every path is under docs/ or agents/. |
+| 20 r2-status-claims-vs-code | The re-run is the same as 06. Only QA-4's status changed. |
+| 21 r2-ai3-ac4 | AC4 can now be done: the §11 header is `Priority \| Item \| Notes \| Task`. |
+| 22 r2-prd-links | The 7 PR #2 paths are still absent → merge order #2 before #3. |
+
+Evidence-tooling nit (not a PR defect): in the PNGs, ✅ and ⏳ render as empty boxes because the font is missing (04, 06, 07, 14, 16, 20). The .txt files print the Unicode names, so nothing is ambiguous. `render_evidence.py` should use a font that has these glyphs.
+
+## Non-blocking follow-ups (next PM docs pass; not fixed here to avoid another QA cycle)
+1. `agents/tasks/PM-1.md` AC1 evidence prose: add QA-4 (◐ → AI-2) to the list of non-✅ rows. (QA r2 finding 1)
+2. `agents/tasks/AI-2.md`: add AC5, "In the same PR, Product PRD QA-4 returns to ✅ and the Technical PRD §7.2 'Known gap' note is removed". It must land before AI-2 starts, and AI-2 cannot start until AI-1 merges. Until then, AGENTS.md DoD item 4 covers it. (QA r2 finding 2)
+3. Product PRD §6 legend says "verified against the code 2026-11-01". QA-4 was re-verified on 2026-11-02. Update the date in the same pass.
+4. After PR #2 merges: remove the AGENTS.md §5 "hardcoded eval queries" gotcha, the matching ai-engineer lesson, and the "pending EVAL-1" notes in Product §8 and Technical §10. (Already in the PM-1 Notes.)
+
+## For Mahesh (human decisions; none block the merge)
+- Decide ADR-0006 (Recall@5 definition; ideally before the first EVAL-1 baseline), ADR-0007, ADR-0008 and ADR-0009.
+- Approve or replace the Technical PRD §9 *Proposed* reference hardware, and confirm your dev machine matches the primary profile.
+- Approve or replace the *Proposed acceptance* statements for QA-9, OPS-6 and saved questions in UI-5.
+- **Merge order: #2 (EVAL-1) before #3.** Merge the board-update branch after #3.
