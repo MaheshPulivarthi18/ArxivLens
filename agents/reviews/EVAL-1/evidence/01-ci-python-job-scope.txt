@@ -1,6 +1,0 @@
-$ gh api repos/MaheshPulivarthi18/ArxivLens/actions/jobs/124897289616/logs | grep -E 'make test-py|pytest -q|passed in|failed in|test_evals' (ANSI stripped)
-##[group]Run make test-py
-make test-py
-python3 -m pytest -q tests/test_m0.py
-3 passed in 5.19s
-

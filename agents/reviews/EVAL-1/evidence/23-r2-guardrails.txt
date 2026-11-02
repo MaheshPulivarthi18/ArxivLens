@@ -1,5 +1,0 @@
-$ bash scripts/agent_guardrails.sh origin/main agent/ai/EVAL-1
-::warning::1584 changed lines (> 400). Consider splitting the task.
-Guardrails OK for role=ai (1584 changed lines)
-
-[exit code 0]
