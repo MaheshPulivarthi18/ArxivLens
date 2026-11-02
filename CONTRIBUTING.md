@@ -1,8 +1,8 @@
 # Contributing to ArxivLens
 
 This repo contains only the runnable application: Go services and CLI, Python ML services, the React UI, SQL
-migrations, tests, eval datasets and CI. Planning, tickets and design docs are kept elsewhere; PR descriptions link
-to them.
+migrations, tests, eval datasets and CI. Planning, tickets, design docs and QA evidence live in
+[arxivlens-agents](https://github.com/MaheshPulivarthi18/arxivlens-agents); PR descriptions link to them.
 
 ## Setup
 

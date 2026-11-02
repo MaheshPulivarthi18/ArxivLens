@@ -5,6 +5,7 @@
 ArxivLens crawls arXiv, downloads paper PDFs, parses them into section-aware chunks, embeds them with `BAAI/bge-base-en-v1.5`, and serves hybrid (vector + BM25) search and a citation-validated Q&A endpoint behind a React UI.
 
 - 🧑‍💻 [CONTRIBUTING.md](CONTRIBUTING.md): setup, commands, code layout and rules for contributors
+- 📘 [Product PRD](https://github.com/MaheshPulivarthi18/arxivlens-agents/blob/main/docs/PRD-Product.md) · [Technical PRD](https://github.com/MaheshPulivarthi18/arxivlens-agents/blob/main/docs/PRD-Technical.md) · [ADRs](https://github.com/MaheshPulivarthi18/arxivlens-agents/tree/main/docs/adr) (in arxivlens-agents)
 
 ---
 
@@ -214,8 +215,9 @@ python scripts/benchmark_hnsw.py           # pgvector HNSW ef_search sweep (p50/
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Product requirements, design decisions and planning are kept outside this repo;
-it contains only the runnable application, its tests and its CI.
+See [CONTRIBUTING.md](CONTRIBUTING.md). This repo contains only the runnable application, its tests and its CI.
+Product requirements, design decisions (ADRs), tickets and QA evidence live in
+[arxivlens-agents](https://github.com/MaheshPulivarthi18/arxivlens-agents), the workspace of the AI agent team that builds ArxivLens.
 
 ---
 
