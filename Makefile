@@ -67,9 +67,10 @@ STACK_WORKERS := arxivlens-embedder-api arxivlens-processor arxivlens-embedder-w
 stack-up: ## Infra + processor, embedder worker, embedder API (:8081); waits until healthy
 	docker compose --profile workers up -d --build
 	@end=$$(( $$(date +%s) + $(STACK_TIMEOUT) )); for c in $(STACK_WORKERS); do \
-	  until [ "$$(docker inspect -f '{{.State.Health.Status}}' $$c 2>/dev/null)" = healthy ]; do \
-	    if [ $$(date +%s) -ge $$end ]; then echo "stack-up: $$c not healthy after $(STACK_TIMEOUT)s"; \
-	      docker compose --profile workers ps -a; docker logs --tail 50 $c 2>&1; exit 1; fi; \
+	  until s=$$(docker inspect -f '{{.State.Health.Status}}' $$c 2>/dev/null); [ "$$s" = healthy ]; do \
+	    if [ "$$s" = unhealthy ] || [ $$(date +%s) -ge $$end ]; then echo "stack-up: $$c is '$$s' (limit $(STACK_TIMEOUT)s)"; \
+	      docker compose --profile workers ps -a; docker logs --tail 50 $$c 2>&1; \
+	      docker inspect -f '{{json .State.Health}}' $$c; exit 1; fi; \
 	    sleep 5; \
 	  done; echo "stack-up: $$c healthy"; done
 	docker compose --profile workers ps

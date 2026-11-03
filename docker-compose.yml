@@ -17,14 +17,19 @@ x-worker: &worker
 x-worker-build-args: &worker_build_args
   TORCH_INDEX_URL: ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
 
-# Worker healthcheck: the consumer group (argv[1]) is STABLE with >= 1 member. Workers load their model before they
-# subscribe, so a member means "model loaded and consuming". Per group, not per container: a host-run worker in the
-# same group also satisfies it.
-x-group-check: &group_check >-
-  import os, sys;
-  from confluent_kafka.admin import AdminClient;
-  g = AdminClient({"bootstrap.servers": os.environ["KAFKA_BROKERS"]}).describe_consumer_groups([sys.argv[1]])[sys.argv[1]].result(timeout=10);
-  sys.exit(0 if g.state.name == "STABLE" and len(g.members) > 0 else 1)
+# Worker healthcheck: consumer group argv[1] is STABLE and one of its members connects from THIS container's IP
+# (Kafka records each member's client host), so a host-run worker or another replica in the group can't satisfy it.
+# Workers load their model before they subscribe, so membership also means "model loaded". Prints what it saw.
+x-group-check: &group_check |
+  import os, socket, sys
+  from confluent_kafka.admin import AdminClient
+  group = sys.argv[1]
+  mine = set(socket.gethostbyname_ex(socket.gethostname())[2])
+  d = AdminClient({"bootstrap.servers": os.environ["KAFKA_BROKERS"]}).describe_consumer_groups([group])[group].result(timeout=10)
+  hosts = [m.host.lstrip("/") for m in d.members]
+  ok = str(d.state).endswith("STABLE") and bool(mine.intersection(hosts))
+  print(f"group={group} state={d.state} member_hosts={hosts} this_container={sorted(mine)} ok={ok}")
+  sys.exit(0 if ok else 1)
 
 services:
   postgres:

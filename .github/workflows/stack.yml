@@ -8,6 +8,11 @@ on:
     paths:
       - docker-compose.yml
       - services/*/Dockerfile
+      - services/processor/**
+      - services/embedder/**
+      - services/common/**
+      - shared/**
+      - migrations/**
       - requirements*.txt
       - Makefile
       - .github/workflows/stack.yml
@@ -80,6 +85,12 @@ jobs:
           echo "config --services: $(docker compose config --services | wc -l); with --profile workers: $(docker compose --profile workers config --services | wc -l)"
           { echo "### AC1 plain \`docker compose up -d\`"; echo '```'; docker compose ps -a --services | sort; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           [ "$got" = "$want" ] || { echo "::error::expected only infra services: $want"; exit 1; }
+          # Resolved image evidence for the S3 services (references come from the compose file, not from this workflow).
+          docker compose images minio minio-init
+          for c in arxivlens-minio arxivlens-minio-init; do
+            img="$(docker inspect --format '{{.Config.Image}}' "$c")"
+            echo "$c: $img $(docker image inspect --format '{{json .RepoDigests}}' "$img")"
+          done
 
       - name: "AC2: make stack-up"
         timeout-minutes: 25
@@ -87,12 +98,42 @@ jobs:
           make stack-up
           docker compose --profile workers ps -a
           { echo "### AC2 \`docker compose --profile workers ps -a\`"; echo '```'; docker compose --profile workers ps -a; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-          # Resolved image evidence for the S3 services (references come from the compose file, not from this workflow).
-          docker compose images minio minio-init
-          for c in arxivlens-minio arxivlens-minio-init; do
-            img="$(docker inspect --format '{{.Config.Image}}' "$c")"
-            echo "$c: $img $(docker image inspect --format '{{json .RepoDigests}}' "$img")"
-          done
+          for c in arxivlens-processor arxivlens-embedder-worker; do echo "== $c health log"; docker inspect -f '{{range .State.Health.Log}}{{.Output}}{{end}}' "$c"; done
+
+      # Before the crawl, so the extra consumer never sees a message (it never commits either).
+      - name: "Worker health follows this container, not the group"
+        timeout-minutes: 8
+        run: |
+          probe="$(docker inspect -f '{{json .Config.Healthcheck.Test}}' arxivlens-processor | jq -r '.[3]')"
+          img="$(docker inspect -f '{{.Config.Image}}' arxivlens-processor)"
+          net="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.NetworkID}}{{end}}' arxivlens-processor)"
+          dc() { docker compose --profile workers "$@"; }
+          members() { python -c 'from confluent_kafka.admin import AdminClient as A; print(len(A({"bootstrap.servers": "localhost:29092"}).describe_consumer_groups(["processor-v1"])["processor-v1"].result(timeout=10).members))'; }
+          wait_members() { for _ in $(seq 60); do [ "$(members)" = "$1" ] && return 0; sleep 2; done; echo "::error::processor-v1 never had $1 members"; return 1; }
+          python - <<'EOF' > other-consumer.log 2>&1 &
+          import os, time
+          from confluent_kafka import Consumer
+          c = Consumer({"bootstrap.servers": "localhost:29092", "group.id": "processor-v1", "enable.auto.commit": False})
+          c.subscribe(["papers.downloaded"])
+          end = time.time() + 400
+          while time.time() < end and not os.path.exists("stop-other"):
+              c.poll(1.0)
+          c.close()
+          EOF
+          wait_members 2
+          ok=0; for _ in $(seq 10); do dc exec -T processor python -c "$probe" processor-v1 && { ok=1; break; }; sleep 3; done
+          [ "$ok" = 1 ] || { echo "::error::probe failed in the running processor with 2 members"; exit 1; }
+          dc stop processor
+          wait_members 1   # the killed worker leaves after the 45 s session timeout; the host consumer stays
+          # Same image, network and env as the processor, but no worker inside: the old group-level probe passed here.
+          if docker run --rm --network "$net" -e KAFKA_BROKERS=kafka:9092 "$img" python -c "$probe" processor-v1; then
+            echo "::error::probe passed in a container that is not the group member"; exit 1
+          fi
+          echo "OK: probe fails in a processor container that isn't the member, while another consumer stays in processor-v1"
+          touch stop-other; wait; cat other-consumer.log
+          dc start processor
+          for _ in $(seq 60); do [ "$(docker inspect -f '{{.State.Health.Status}}' arxivlens-processor)" = healthy ] && exit 0; sleep 5; done
+          echo "::error::processor not healthy again after restart"; exit 1
 
       - name: Migrate
         timeout-minutes: 2
