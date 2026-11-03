@@ -198,7 +198,9 @@ All services read the same environment variables (defaults target the local Dock
 ```bash
 pytest tests/test_m0.py                    # Unit: chunker, embedder, citation validator (no infra)
 pytest tests/                              # Full suite: needs docker stack + services running
-python scripts/evaluate_retrieval.py       # Recall@5 / MRR / NDCG@5 across BM25, vector, RRF, RRF+rerank
+make eval                                  # Quality gate vs Product PRD §8 (scripts/eval_gate.py); see evals/README.md
+python scripts/evaluate_retrieval.py       # paper-level Recall@5 / MRR / NDCG@5 (+ chunk precision@5) across BM25, vector, RRF, RRF+rerank
+python scripts/evaluate_answers.py         # /v1/ask: supported citations, refusals, p50/p95 latency
 python scripts/benchmark_hnsw.py           # pgvector HNSW ef_search sweep (p50/p95/p99, QPS)
 ```
 
