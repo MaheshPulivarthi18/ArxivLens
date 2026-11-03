@@ -8,6 +8,7 @@ import (
 	"log"
 	"math"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -607,5 +608,49 @@ func TestAskBatchFailClosed(t *testing.T) {
 				t.Errorf("log = %q, want one line containing %q", buf.String(), tc.wantLog)
 			}
 		})
+	}
+}
+
+// AI-4 AC1: when reranking falls back during Ask, the fallback log line carries the TraceID
+// returned to the caller (trace_id_source=ctx), and Ask still answers from the RRF order.
+func TestAskRerankFallbackLogsResponseTraceID(t *testing.T) {
+	var buf bytes.Buffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+
+	rr := &fakeReranker{err: errors.New("reranker down")}
+	engine := &SearchEngine{rr: rr, fetch: func(_ context.Context, _ string, _ []string, n int) ([]SearchHit, error) {
+		return []SearchHit{ragHit(1, "Method", 0), ragHit(2, "Results", 0)}[:min(n, 2)], nil
+	}}
+	r := &RAGService{searchEngine: engine, embedClient: simEmbedder(constSim(0.8))}
+	resp, err := r.Ask(context.Background(), "q", nil, 5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rr.calls != 1 {
+		t.Fatalf("Rerank called %d times, want 1", rr.calls)
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(resp.TraceID) {
+		t.Fatalf("TraceID = %q, want 32 hex chars", resp.TraceID)
+	}
+	if got := markers(resp.Citations); !reflect.DeepEqual(got, []int{1, 2}) || resp.Citations[0].ChunkID != 1 {
+		t.Errorf("citations %+v, want markers [1 2] in RRF order", resp.Citations)
+	}
+
+	var fallback []string
+	for _, l := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if strings.Contains(l, "rerank fallback") {
+			fallback = append(fallback, l)
+		}
+	}
+	if len(fallback) != 1 {
+		t.Fatalf("log = %q, want exactly one rerank fallback line", buf.String())
+	}
+	for _, want := range []string{"trace_id=" + resp.TraceID + " ", "trace_id_source=ctx"} {
+		if !strings.Contains(fallback[0], want) {
+			t.Errorf("fallback log %q missing %q", fallback[0], want)
+		}
 	}
 }

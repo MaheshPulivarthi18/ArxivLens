@@ -72,6 +72,7 @@ func (r *RAGService) Ask(
 		maxCitations = 5
 	}
 	traceID := generateTraceID()
+	ctx = withTraceID(ctx, traceID)
 
 	// 1. Retrieve top-K chunks via Hybrid Search
 	hits, err := r.searchEngine.HybridSearch(ctx, question, categories, maxCitations, true)
