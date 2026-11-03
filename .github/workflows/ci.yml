@@ -20,6 +20,8 @@ jobs:
           go-version-file: go.mod
       - run: make lint-go
       - run: make test-go
+      - name: Kafka consumer tests (verbose, race, coverage)
+        run: go test -race -count=1 -v -coverprofile=c.out ./internal/kafka/ && go tool cover -func=c.out | grep consumer.go
       - run: make build-go
 
   python:
