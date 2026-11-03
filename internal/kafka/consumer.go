@@ -149,8 +149,8 @@ func (c *Consumer) Start(ctx context.Context, handler RecordHandler) error {
 				log.Printf("[Kafka Consumer] Error processing record (topic=%s, partition=%d, offset=%d, attempt=%d/%d): %v",
 					record.Topic, record.Partition, record.Offset, attempt, c.maxRetries, handleErr)
 
-				if attempt < c.maxRetries {
-					time.Sleep(c.backoff(attempt)) // mutation(AC10b): time.Sleep instead of c.wait
+				if attempt < c.maxRetries && c.wait(ctx, c.backoff(attempt)) != nil {
+					break records
 				}
 			}
 
