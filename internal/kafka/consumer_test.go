@@ -266,6 +266,21 @@ func TestConsumerCancelDuringBackoffReturnsPromptly(t *testing.T) {
 	}
 }
 
+// AC6b: ctx cancelled while the handler runs its last attempt → no DLQ write, no commit (fake.PublishDLQ ignores ctx).
+func TestConsumerCancelInsideHandlerNoDLQ(t *testing.T) {
+	f, c := newFake(t, nil, fetchOf(part(0, 5)))
+	calls := 0
+	err := c.Start(f.ctx, func(context.Context, *kgo.Record) error {
+		if calls++; calls == 3 {
+			f.cancel()
+		}
+		return errBoom
+	})
+	if err != nil || calls != 3 || f.payloads != nil || f.grep("commit") != nil {
+		t.Errorf("Start = %v, handler calls = %d, log = %v; want nil, 3, no DLQ write, no commit", err, calls, f.log)
+	}
+}
+
 func TestConsumerAllowRebalanceAfterEachPoll(t *testing.T) {
 	f, c := newFake(t, nil, fetchOf(part(0, 1), part(1, 1)), fetchOf(part(0, 2), part(1, 2)),
 		fetchOf(kgo.FetchPartition{Partition: 1, Err: errBoom}))
