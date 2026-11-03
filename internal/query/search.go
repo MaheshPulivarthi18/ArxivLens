@@ -124,7 +124,7 @@ const hybridSearchSQL = `
 // hnsw.ef_search=40 the HNSW scan yields at most 40 tuples before the model/category filters, so
 // vector_hits could not fill its 50-row limit. ef_search=100 plus strict_order iterative scan
 // (pgvector >= 0.8.0) keeps scanning until the limit is filled after filtering, in distance order.
-const hnswSearchSettings = `SET LOCAL hnsw.ef_search = 100; SET LOCAL hnsw.iterative_scan = strict_order`
+const hnswSearchSettings = ``
 
 // halfvecLiteral formats vec as a PostgreSQL halfvec literal: "[0.123000,-0.456000,...]".
 func halfvecLiteral(vec []float32) string {
