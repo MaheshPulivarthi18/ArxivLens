@@ -87,6 +87,12 @@ jobs:
           make stack-up
           docker compose --profile workers ps -a
           { echo "### AC2 \`docker compose --profile workers ps -a\`"; echo '```'; docker compose --profile workers ps -a; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          # Pinned image evidence for the S3 services (references come from the compose file, not from this workflow).
+          docker compose images minio minio-init
+          for c in arxivlens-minio arxivlens-minio-init; do
+            img="$(docker inspect --format '{{.Config.Image}}' "$c")"
+            echo "$c: $img $(docker image inspect --format '{{json .RepoDigests}}' "$img")"
+          done
 
       - name: Migrate
         timeout-minutes: 2
