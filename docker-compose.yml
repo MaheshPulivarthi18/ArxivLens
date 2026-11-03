@@ -10,6 +10,9 @@ x-worker: &worker
     KAFKA_BROKERS: kafka:9092
     MINIO_ENDPOINT: minio:9000
     HF_HOME: /root/.cache/huggingface
+    WORKER_HEARTBEAT_FILE: /run/arxivlens/heartbeat
+  tmpfs:
+    - /run/arxivlens # empty again on every container (re)start, so an old heartbeat never survives a restart
   volumes:
     # Named volume by default (models download once); set ARXIVLENS_HF_CACHE to an absolute host path to bind-mount it.
     - ${ARXIVLENS_HF_CACHE:-hf_cache}:/root/.cache/huggingface
@@ -17,19 +20,16 @@ x-worker: &worker
 x-worker-build-args: &worker_build_args
   TORCH_INDEX_URL: ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
 
-# Worker healthcheck: consumer group argv[1] is STABLE and one of its members connects from THIS container's IP
-# (Kafka records each member's client host), so a host-run worker or another replica in the group can't satisfy it.
-# Workers load their model before they subscribe, so membership also means "model loaded". Prints what it saw.
-x-group-check: &group_check |
-  import os, socket, sys
-  from confluent_kafka.admin import AdminClient
-  group = sys.argv[1]
-  mine = set(socket.gethostbyname_ex(socket.gethostname())[2])
-  d = AdminClient({"bootstrap.servers": os.environ["KAFKA_BROKERS"]}).describe_consumer_groups([group])[group].result(timeout=10)
-  hosts = [m.host.lstrip("/") for m in d.members]
-  ok = str(d.state).endswith("STABLE") and bool(mine.intersection(hosts))
-  print(f"group={group} state={d.state} member_hosts={hosts} this_container={sorted(mine)} ok={ok}")
-  sys.exit(0 if ok else 1)
+# Worker healthcheck: the worker in THIS container touches $WORKER_HEARTBEAT_FILE after every poll while its consumer
+# holds partitions (services/common/kafka_client.py), so a host-run worker or another replica in the same group can't
+# make it pass. Fresh = younger than max.poll.interval.ms (300 s), after which Kafka evicts the member anyway.
+# (A Kafka-side membership check was tried: describe_consumer_groups never returns against this broker, 10 s timeout.)
+x-heartbeat-check: &heartbeat_check |
+  import os, sys, time
+  f = os.environ["WORKER_HEARTBEAT_FILE"]
+  age = time.time() - os.path.getmtime(f) if os.path.exists(f) else None
+  print(f"heartbeat={f} age_s={age}")
+  sys.exit(0 if age is not None and age < 300 else 1)
 
 services:
   postgres:
@@ -117,7 +117,7 @@ services:
     restart: "no"
 
   minio:
-    image: cgr.dev/chainguard/minio:latest
+    image: cgr.dev/chainguard/minio:latest@sha256:3c60a2a8c4d33409a9bc7a623a7fcbfb4605adc3d89422d2f53b3f673a6e5597
     container_name: arxivlens-minio
     ports:
       - "9000:9000"
@@ -138,7 +138,7 @@ services:
       retries: 5
 
   minio-init:
-    image: cgr.dev/chainguard/minio-client:latest-dev
+    image: cgr.dev/chainguard/minio-client:latest-dev@sha256:39768db4c3fa811bc8f2e2a3e0add8ea391648b1c980de179985e1c353dc1805
     container_name: arxivlens-minio-init
     depends_on:
       minio:
@@ -195,7 +195,7 @@ services:
       embedder-api:
         condition: service_healthy # models are in the HF cache before the workers load them
     healthcheck:
-      test: ["CMD", "python", "-c", *group_check, "processor-v1"]
+      test: ["CMD", "python", "-c", *heartbeat_check]
       interval: 10s
       timeout: 15s
       retries: 6
@@ -212,7 +212,7 @@ services:
       embedder-api:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", *group_check, "embedder-v1"]
+      test: ["CMD", "python", "-c", *heartbeat_check]
       interval: 10s
       timeout: 15s
       retries: 6

@@ -102,13 +102,14 @@ jobs:
 
       # Before the crawl, so the extra consumer never sees a message (it never commits either).
       - name: "Worker health follows this container, not the group"
-        timeout-minutes: 8
+        timeout-minutes: 12
         run: |
           probe="$(docker inspect -f '{{json .Config.Healthcheck.Test}}' arxivlens-processor | jq -r '.[3]')"
           img="$(docker inspect -f '{{.Config.Image}}' arxivlens-processor)"
           net="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.NetworkID}}{{end}}' arxivlens-processor)"
           dc() { docker compose --profile workers "$@"; }
-          members() { python -c 'from confluent_kafka.admin import AdminClient as A; print(len(A({"bootstrap.servers": "localhost:29092"}).describe_consumer_groups(["processor-v1"])["processor-v1"].result(timeout=10).members))'; }
+          groups() { dc exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group processor-v1 --members 2>/dev/null; }
+          members() { groups | grep -c '^processor-v1 ' || true; }
           wait_members() { for _ in $(seq 60); do [ "$(members)" = "$1" ] && return 0; sleep 2; done; echo "::error::processor-v1 never had $1 members"; return 1; }
           python - <<'EOF' > other-consumer.log 2>&1 &
           import os, time
@@ -120,13 +121,13 @@ jobs:
               c.poll(1.0)
           c.close()
           EOF
-          wait_members 2
-          ok=0; for _ in $(seq 10); do dc exec -T processor python -c "$probe" processor-v1 && { ok=1; break; }; sleep 3; done
+          wait_members 2; groups
+          ok=0; for _ in $(seq 10); do dc exec -T processor python -c "$probe" && { ok=1; break; }; sleep 3; done
           [ "$ok" = 1 ] || { echo "::error::probe failed in the running processor with 2 members"; exit 1; }
           dc stop processor
-          wait_members 1   # the killed worker leaves after the 45 s session timeout; the host consumer stays
+          wait_members 1; groups   # the killed worker leaves after the 45 s session timeout; the host consumer stays
           # Same image, network and env as the processor, but no worker inside: the old group-level probe passed here.
-          if docker run --rm --network "$net" -e KAFKA_BROKERS=kafka:9092 "$img" python -c "$probe" processor-v1; then
+          if docker run --rm --network "$net" -e WORKER_HEARTBEAT_FILE=/run/arxivlens/heartbeat "$img" python -c "$probe"; then
             echo "::error::probe passed in a container that is not the group member"; exit 1
           fi
           echo "OK: probe fails in a processor container that isn't the member, while another consumer stays in processor-v1"

@@ -20,7 +20,7 @@ make setup-fe                              # frontend deps (npm ci)
 | Command | What | Needs infra? |
 |---|---|---|
 | `make help` | List targets | — |
-| `make test-unit` | Go tests + `pytest tests/test_m0.py tests/test_evals_data.py` | No |
+| `make test-unit` | Go tests + `pytest tests/test_m0.py tests/test_evals_data.py tests/test_worker_heartbeat.py` | No |
 | `make lint` | `go vet`, `gofmt` check, frontend `oxlint` | No |
 | `make build` | Go binary + frontend build | No |
 | `make infra-up` / `make infra-down` | Postgres+pgvector, Kafka, MinIO | Docker |
