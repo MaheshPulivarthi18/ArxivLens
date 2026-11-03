@@ -39,13 +39,13 @@ lint-fe: ## oxlint on the frontend
 	cd frontend && npm run lint
 
 # --- tests -------------------------------------------------------------------
-test-unit: test-go test-py ## Fast tests, no infra (Go + M0). Frontend tests: make test-fe
+test-unit: test-go test-py ## Fast tests, no infra (Go + M0 + eval data). Frontend tests: make test-fe
 
 test-go: ## Go unit tests
 	go test ./...
 
-test-py: ## M0 Python unit tests (downloads BGE model on first run)
-	$(PYTEST) -q tests/test_m0.py
+test-py: ## Python unit tests: M0 + eval data (M0 downloads BGE model on first run)
+	$(PYTEST) -q tests/test_m0.py tests/test_evals_data.py
 
 test-fe: ## Frontend tests (available after FE-1)
 	@cd frontend && if npm run | grep -q " test"; then npm test; else echo "no frontend tests yet (FE-1)"; fi
