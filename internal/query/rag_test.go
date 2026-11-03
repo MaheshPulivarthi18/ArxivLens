@@ -1,9 +1,11 @@
 package query
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"math"
 	"reflect"
 	"sort"
@@ -25,16 +27,23 @@ func (f *fakeSearcher) HybridSearch(_ context.Context, _ string, _ []string, lim
 }
 
 // fakeEmbedder maps each text to a vector via vec (nil = no vector returned) and records the texts.
+// err fails every call; failOn (optional) fails only calls containing a matching text.
 type fakeEmbedder struct {
-	vec   func(text string) []float32
-	err   error
-	texts []string
+	vec    func(text string) []float32
+	err    error
+	failOn func(text string) bool
+	texts  []string
 }
 
 func (f *fakeEmbedder) EmbedTexts(_ context.Context, texts []string, _ bool) ([][]float32, error) {
 	f.texts = append(f.texts, texts...)
 	if f.err != nil {
 		return nil, f.err
+	}
+	for _, t := range texts {
+		if f.failOn != nil && f.failOn(t) {
+			return nil, errors.New("embed failed")
+		}
 	}
 	var out [][]float32
 	for _, t := range texts {
@@ -240,22 +249,71 @@ func TestValidateCitationsSupportThreshold(t *testing.T) {
 	}
 }
 
-// Pins today's fail-open fallback (score 0.75, supported) when verification is impossible.
-// AI-2 changes this to fail closed; update these expectations there.
-func TestValidateCitationsFallbackWhenUnverifiable(t *testing.T) {
-	noChunkVec := &fakeEmbedder{vec: func(t string) []float32 {
-		if strings.HasPrefix(t, "chunk") {
-			return nil
+// AI-2 (QA-4): when support cannot be verified, the citation fails closed (Score 0, Supported false)
+// and the request logs exactly one line with counts only (no sentence or passage text).
+func TestValidateCitationsFailClosedWhenUnverifiable(t *testing.T) {
+	isChunk := func(t string) bool { return strings.HasPrefix(t, "chunk") }
+	// vecs builds a fake that returns chunkVec for chunks and sentVec for sentences (nil = no vector).
+	vecs := func(chunkVec, sentVec []float32) func(string) []float32 {
+		return func(t string) []float32 {
+			if isChunk(t) {
+				return chunkVec
+			}
+			return sentVec
 		}
-		return []float32{1, 0}
-	}}
-	for name, emb := range map[string]*fakeEmbedder{"embedder error": {err: errors.New("down")}, "chunk has no embedding": noChunkVec} {
-		t.Run(name, func(t *testing.T) {
-			got := (&RAGService{embedClient: emb}).validateCitations(context.Background(), "Claim [1].", []SearchHit{ragHit(1, "A", 0.9)})
-			if len(got) != 1 || got[0].Score != 0.75 || !got[0].Supported {
-				t.Errorf("got %+v, want current fallback score 0.75 supported", got)
+	}
+	ok := []float32{1, 0}
+	tests := []struct {
+		name string
+		emb  *fakeEmbedder
+	}{
+		{"embedder down for every call", &fakeEmbedder{err: errors.New("down")}},
+		{"sentence embed error", &fakeEmbedder{vec: vecs(ok, ok), failOn: func(t string) bool { return !isChunk(t) }}},
+		{"chunk embed error", &fakeEmbedder{vec: vecs(ok, ok), failOn: isChunk}},
+		{"sentence returns no vector", &fakeEmbedder{vec: vecs(ok, nil)}},
+		{"sentence returns empty vector", &fakeEmbedder{vec: vecs(ok, []float32{})}},
+		{"chunk returns no vector", &fakeEmbedder{vec: vecs(nil, ok)}},
+		{"chunk returns empty vector", &fakeEmbedder{vec: vecs([]float32{}, ok)}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prevOut, prevFlags := log.Writer(), log.Flags()
+			log.SetOutput(&buf)
+			log.SetFlags(0)
+			t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+
+			ctx := withTraceID(context.Background(), "t-ai2")
+			got := (&RAGService{embedClient: tc.emb}).validateCitations(ctx, "Claim one [1]. Claim two [1].", []SearchHit{ragHit(1, "A", 0.9)})
+			if len(got) != 2 {
+				t.Fatalf("got %d citations, want 2 (markers are kept, only support is withheld): %+v", len(got), got)
+			}
+			for _, c := range got {
+				if c.Score != 0 || c.Supported {
+					t.Errorf("marker %d score=%v supported=%v, want 0 false", c.Marker, c.Score, c.Supported)
+				}
+			}
+			lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+			if len(lines) != 1 || !strings.Contains(lines[0], "citation support unverified trace_id=t-ai2 ") ||
+				!strings.Contains(lines[0], "unverified=2 citations=2") {
+				t.Errorf("want exactly one unverified log line with counts, got %q", buf.String())
+			}
+			for _, secret := range []string{"Claim", "chunk A"} {
+				if strings.Contains(buf.String(), secret) {
+					t.Errorf("log leaks text %q: %q", secret, buf.String())
+				}
 			}
 		})
+	}
+
+	// Verified citations log nothing.
+	var buf bytes.Buffer
+	prevOut := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prevOut)
+	got := (&RAGService{embedClient: simEmbedder(constSim(0.9))}).validateCitations(context.Background(), "Claim [1].", []SearchHit{ragHit(1, "A", 0.9)})
+	if len(got) != 1 || !got[0].Supported || buf.Len() != 0 {
+		t.Errorf("verified path: got %+v log %q, want supported and no log", got, buf.String())
 	}
 }
 
