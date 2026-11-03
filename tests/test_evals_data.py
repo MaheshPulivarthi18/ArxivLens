@@ -161,9 +161,11 @@ class _FakeResp:
 class _FakeCursor:
     """Answers the coverage and mode queries of the retrieval eval by matching the SQL text."""
 
-    def __init__(self, pool, embedded=("1706.03762", "1810.04805")):
+    def __init__(self, pool, embedded=("1706.03762", "1810.04805"), chunks=None):
         self.pool = pool  # RRF pool rows: (chunk_id, arxiv_id, content, rrf_score)
         self.embedded = embedded  # arXiv IDs with embeddings for the current model
+        # {arxiv_id: (embedded_chunks, total_chunks)}; default: every embedded paper fully embedded (3/3)
+        self.chunks = chunks if chunks is not None else {a: (3, 3) for a in embedded}
         self.executed = []
 
     def execute(self, sql, params):
@@ -179,6 +181,8 @@ class _FakeCursor:
             return [(2, "1706.03762"), (1, "1810.04805")]
         if sql == evaluate_retrieval.RRF_POOL_SQL:
             return self.pool[:params["pool"]]
+        if sql == evaluate_retrieval.CHUNK_COUNTS_SQL:
+            return [(a, *self.chunks[a]) for a in params["ids"] if a in self.chunks]
         raise AssertionError(f"unexpected SQL: {sql}")
 
 
@@ -229,6 +233,32 @@ def test_rerank_pool_empty_makes_no_call():
     assert evaluate_retrieval.rerank_pool("q", [], lambda q, p: pytest.fail("rerank called")) == []
 
 
+def _norm_sql(sql):
+    return re.sub(r"\s+", " ", sql).strip()
+
+
+# Every allowed difference between search.go's HybridSearch SQL (after whitespace + placeholder normalisation) and
+# RRF_POOL_SQL, as (search.go fragment, eval fragment). Each search.go fragment must occur exactly once.
+_GO_TO_EVAL_SQL = [
+    # vector arm: no category filter in the eval, so no papers join
+    ("JOIN paper_chunks pc ON pc.id = ce.chunk_id JOIN papers p ON p.id = pc.paper_id WHERE ce.model = $2 "
+     "AND ($3::text[] IS NULL OR p.categories && $3) ORDER BY",
+     "JOIN paper_chunks pc ON pc.id = ce.chunk_id WHERE ce.model = $2 ORDER BY"),
+    # keyword arm: same, no category filter
+    ("FROM paper_chunks pc JOIN papers p ON p.id = pc.paper_id, websearch_to_tsquery('english', $4) q "
+     "WHERE pc.content_tsv @@ q AND ($3::text[] IS NULL OR p.categories && $3) ORDER BY",
+     "FROM paper_chunks pc, websearch_to_tsquery('english', $4) q WHERE pc.content_tsv @@ q ORDER BY"),
+    # outer SELECT: the eval needs only (id, arxiv_id, content); no titles, so no paper_sections join
+    ("SELECT c.id, c.content, p.arxiv_id, p.title, COALESCE(ps.title, '') AS section_title,",
+     "SELECT c.id, p.arxiv_id, c.content,"),
+    ("JOIN papers p ON p.id = c.paper_id LEFT JOIN paper_sections ps ON ps.id = c.section_id LEFT JOIN",
+     "JOIN papers p ON p.id = c.paper_id LEFT JOIN"),
+    # deterministic tiebreak for equal RRF scores (production leaves their order unspecified)
+    ("ORDER BY rrf_score DESC LIMIT $5;", "ORDER BY rrf_score DESC, c.id LIMIT $5;"),
+]
+_EVAL_PLACEHOLDERS = {"%(vec)s": "$1", "%(model)s": "$2", "%(query)s": "$4", "%(pool)s": "$5"}
+
+
 def test_rrf_pool_sql_mirrors_search_go():
     sql = evaluate_retrieval.RRF_POOL_SQL
     assert sql.count("LIMIT 50") == 2 and evaluate_retrieval.RRF_ARM_LIMIT == 50
@@ -238,12 +268,30 @@ def test_rrf_pool_sql_mirrors_search_go():
     assert "ORDER BY ts_rank_cd(pc.content_tsv, q) DESC" in sql
     assert "ce.model = %(model)s" in evaluate_retrieval.DENSE_SQL
     go = os.path.join(os.path.dirname(EVALS), "internal", "query", "search.go")
-    if os.path.exists(go):  # drift guard: production still uses the values mirrored above
-        with open(go, encoding="utf-8") as f:
-            src = f.read()
-        assert src.count("LIMIT 50") == 2
-        assert "WHERE ce.model = $2" in src
-        assert "1.0/(60 + v.rank)" in src and "1.0/(60 + k.rank)" in src
+    # drift guard: production still uses the values mirrored above. A missing search.go fails (no silent skip).
+    assert os.path.exists(go), f"{go} missing: the ADR-0010 parity guard cannot run"
+    with open(go, encoding="utf-8") as f:
+        src = f.read()
+    assert src.count("LIMIT 50") == 2
+    assert "WHERE ce.model = $2" in src
+    assert "1.0/(60 + v.rank)" in src and "1.0/(60 + k.rank)" in src
+
+    # (b) pool size: const RerankPool in search.go == RRF_POOL_SIZE
+    pool = re.findall(r"^const RerankPool = (\d+)\s*$", src, re.M)
+    assert pool == [str(evaluate_retrieval.RRF_POOL_SIZE)], pool
+
+    # (c) whole-query parity: normalised search.go SQL with only the listed differences == RRF_POOL_SQL
+    go_sql = re.findall(r"querySQL := `(.*?)`", src, re.S)
+    assert len(go_sql) == 1, "HybridSearch querySQL not found exactly once in search.go"
+    go_norm = _norm_sql(go_sql[0])
+    for go_frag, eval_frag in _GO_TO_EVAL_SQL:
+        assert go_norm.count(go_frag) == 1, f"allowed difference not found once in search.go: {go_frag!r}"
+        go_norm = go_norm.replace(go_frag, eval_frag)
+    eval_norm = _norm_sql(sql)
+    for name, n in _EVAL_PLACEHOLDERS.items():
+        eval_norm = eval_norm.replace(name, n)
+    assert "%(" not in eval_norm, eval_norm
+    assert eval_norm == go_norm
 
 
 # --- R3-1/R3-2/R3-3 (ADR-0006): paper-level recall vs chunk precision ---
@@ -540,3 +588,83 @@ def test_run_with_failed_healthz_yields_no_summary(monkeypatch, tmp_path, health
     with pytest.raises(evaluate_retrieval.RerankError):
         evaluate_retrieval.run_retrieval_evaluation(_two_cases(tmp_path), "http://embedder:8081", 5.0)
     assert events == ["healthz"]  # no DB, no embedder, no rerank call
+
+
+# --- EVAL-5 AC1: a rerank failure stops the run; no fallback to RRF order, no summary ---
+
+def _bad_rerank_raises(query, passages):
+    raise evaluate_retrieval.RerankError("POST /internal/rerank failed: 503")
+
+
+def _bad_rerank_short(query, passages):
+    return [1.0] * (len(passages) - 1)  # score-count mismatch
+
+
+def _bad_rerank_long(query, passages):
+    return [1.0] * (len(passages) + 1)
+
+
+@pytest.mark.parametrize("bad", [_bad_rerank_raises, _bad_rerank_short, _bad_rerank_long])
+def test_rerank_failure_in_run_modes_for_case_raises(bad):
+    with pytest.raises(evaluate_retrieval.RerankError):
+        evaluate_retrieval.run_modes_for_case(_FakeCursor(_pool()), "q", "[0.1]", "M", bad)
+
+
+@pytest.mark.parametrize("bad", [_bad_rerank_raises, _bad_rerank_short])
+def test_rerank_failure_stops_run_with_no_summary(monkeypatch, tmp_path, bad):
+    events = []
+    _stub_infra(monkeypatch, events, {"status": "ok", "reranker": True}, _FakeCursor(_pool()))
+    monkeypatch.setattr(evaluate_retrieval, "make_http_rerank", lambda url, timeout: bad)
+    out = tmp_path / "summary.json"
+    with pytest.raises(evaluate_retrieval.RerankError):
+        evaluate_retrieval.main(["--dataset", _two_cases(tmp_path), "--json-out", str(out),
+                                 "--embedder-url", "http://embedder:8081"])
+    assert not out.exists()  # no summary written
+    with pytest.raises(evaluate_retrieval.RerankError):
+        evaluate_retrieval.run_retrieval_evaluation(_two_cases(tmp_path), "http://embedder:8081", 5.0)
+
+
+# --- EVAL-5 AC2: partly embedded relevant papers are recorded and warned about (not gated) ---
+
+def test_partial_embedding_recorded_and_warned_without_failing(monkeypatch, tmp_path, capsys):
+    cur = _FakeCursor(_pool(), chunks={"1706.03762": (2, 5), "1512.03385": (0, 4)})
+    _stub_infra(monkeypatch, [], {"status": "ok", "reranker": True}, cur)
+    s = evaluate_retrieval.run_retrieval_evaluation(_two_cases(tmp_path), "http://embedder:8081", 5.0)
+    count_params = [p for sql, p in cur.executed if sql == evaluate_retrieval.CHUNK_COUNTS_SQL]
+    assert count_params == [{"model": "M", "ids": ["1706.03762"]},
+                            {"model": "M", "ids": ["1706.03762", "1512.03385"]}]
+    assert s["chunk_coverage"] == {"1706.03762": {"embedded_chunks": 2, "total_chunks": 5},
+                                   "1512.03385": {"embedded_chunks": 0, "total_chunks": 4}}
+    out = capsys.readouterr().out
+    assert "WARNING: 1706.03762 has only 2/5 chunks embedded for M" in out
+    assert "WARNING: 1512.03385 has only 0/4 chunks embedded for M" in out
+    # warning only: the partly embedded r1 is still evaluated (coverage rules unchanged)
+    assert s["cases_evaluated"] == 1 and s["skipped_case_ids"] == ["r2"]
+    assert json.loads(json.dumps(s))["chunk_coverage"] == s["chunk_coverage"]  # survives --json-out
+
+
+def test_chunk_counts_fully_embedded_and_unknown_papers():
+    cur = _FakeCursor(_pool(), chunks={"1706.03762": (3, 3)})
+    counts = evaluate_retrieval.chunk_counts_for_case(cur, ["1706.03762", "1810.04805"], "M")
+    assert counts == {"1706.03762": {"embedded_chunks": 3, "total_chunks": 3},
+                      "1810.04805": {"embedded_chunks": 0, "total_chunks": 0}}
+    assert evaluate_retrieval.partial_embedding_warnings(counts, "M") == []
+    sql = evaluate_retrieval.CHUNK_COUNTS_SQL
+    assert "LEFT JOIN chunk_embeddings ce ON ce.chunk_id = pc.id AND ce.model = %(model)s" in sql
+    assert "COUNT(ce.chunk_id) AS embedded_chunks" in sql and "COUNT(pc.id) AS total_chunks" in sql
+
+
+# --- EVAL-5 AC3: the model the eval uses vs the Go query service's --model default ---
+
+def test_model_mismatch_warning(monkeypatch, tmp_path, capsys):
+    assert evaluate_retrieval.GO_DEFAULT_MODEL == "BAAI/bge-base-en-v1.5"
+    assert evaluate_retrieval.model_mismatch_warning("BAAI/bge-base-en-v1.5") is None
+    assert "EMBEDDING_MODEL" in evaluate_retrieval.model_mismatch_warning("other/model")
+    _stub_infra(monkeypatch, [], {"status": "ok", "reranker": True}, _FakeCursor(_pool()))  # EMBEDDING_MODEL = "M"
+    s = evaluate_retrieval.run_retrieval_evaluation(_two_cases(tmp_path), "http://embedder:8081", 5.0)
+    assert s["embedding_model"] == "M"
+    assert "WARNING: eval embedding model 'M' (EMBEDDING_MODEL) differs" in capsys.readouterr().out
+    s = evaluate_retrieval.run_retrieval_evaluation(_two_cases(tmp_path), "http://embedder:8081", 5.0,
+                                                    model="BAAI/bge-base-en-v1.5")
+    assert s["embedding_model"] == "BAAI/bge-base-en-v1.5"
+    assert "differs" not in capsys.readouterr().out

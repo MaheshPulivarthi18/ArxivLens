@@ -50,6 +50,9 @@ RESULT_LIMIT = 5    # chunks each mode returns: /v1/ask maxCitations default (in
 RRF_POOL_SIZE = 20  # ADR-0010 rerank candidate pool
 RRF_ARM_LIMIT = 50  # per-arm LIMIT in internal/query/search.go
 RRF_K = 60          # RRF constant in internal/query/search.go
+# Default of the Go query service's --model flag (cmd/arxivlens/main.go). The eval reads EMBEDDING_MODEL
+# (services/common/config.py) instead; both must name the same model or the eval measures other vectors.
+GO_DEFAULT_MODEL = "BAAI/bge-base-en-v1.5"
 
 RerankFn = Callable[[str, List[str]], List[float]]
 Hit = Tuple[int, str]  # (chunk_id, arxiv_id)
@@ -106,6 +109,8 @@ def rerank_pool(query: str, pool: Sequence[Tuple[int, str, str]], rerank: Rerank
     if not pool:
         return []
     scores = rerank(query, [c[2] for c in pool])
+    if len(scores) != len(pool):
+        raise RerankError(f"rerank returned {len(scores)} scores for {len(pool)} passages")
     order = sorted(range(len(pool)), key=lambda i: -scores[i])  # sorted() is stable
     return [(pool[i][0], pool[i][1]) for i in order[:limit]]
 
@@ -240,6 +245,43 @@ RRF_POOL_SQL = f"""
 """
 
 
+# Per relevant paper: all chunks vs chunks embedded for the current model (a partly embedded paper still counts as
+# covered above, so this is reported as a warning; making it fail the gate needs an ADR).
+CHUNK_COUNTS_SQL = """
+    SELECT p.arxiv_id, COUNT(ce.chunk_id) AS embedded_chunks, COUNT(pc.id) AS total_chunks
+    FROM papers p
+    JOIN paper_chunks pc ON pc.paper_id = p.id
+    LEFT JOIN chunk_embeddings ce ON ce.chunk_id = pc.id AND ce.model = %(model)s
+    WHERE p.arxiv_id = ANY(%(ids)s)
+    GROUP BY p.arxiv_id;
+"""
+
+
+def chunk_counts_for_case(cur, relevant_arxiv_ids: List[str], model: str) -> Dict[str, Dict[str, int]]:
+    """{arxiv_id: {"embedded_chunks", "total_chunks"}} for every relevant ID (0/0 when it has no chunks)."""
+    cur.execute(CHUNK_COUNTS_SQL, dict(model=model, ids=list(relevant_arxiv_ids)))
+    rows = {normalize_arxiv_id(r[0]): (int(r[1]), int(r[2])) for r in cur.fetchall()}
+    out = {}
+    for a in map(normalize_arxiv_id, relevant_arxiv_ids):
+        embedded, total = rows.get(a, (0, 0))
+        out[a] = {"embedded_chunks": embedded, "total_chunks": total}
+    return out
+
+
+def partial_embedding_warnings(counts: Dict[str, Dict[str, int]], model: str) -> List[str]:
+    """One warning per paper with some chunks but fewer embedded for `model` than it has (warning only, not gated)."""
+    return [f"WARNING: {a} has only {c['embedded_chunks']}/{c['total_chunks']} chunks embedded for {model}"
+            for a, c in sorted(counts.items()) if 0 < c["total_chunks"] and c["embedded_chunks"] < c["total_chunks"]]
+
+
+def model_mismatch_warning(model: str) -> Optional[str]:
+    """Warning when the eval's model differs from the Go query service's --model default (warning only)."""
+    if model == GO_DEFAULT_MODEL:
+        return None
+    return (f"WARNING: eval embedding model {model!r} (EMBEDDING_MODEL) differs from the query service --model "
+            f"default {GO_DEFAULT_MODEL!r}; both must match or the eval does not measure production")
+
+
 def missing_for_case(cur, relevant_arxiv_ids: List[str], model: str) -> List[str]:
     """Relevant arXiv IDs with no chunk embedded for `model`. Non-empty -> the caller skips the case (fail-closed)."""
     cur.execute(COVERAGE_SQL, dict(model=model, ids=list(relevant_arxiv_ids)))
@@ -291,10 +333,13 @@ def run_retrieval_evaluation(dataset_path: str = DEFAULT_DATASET, embedder_url: 
     print("=" * 70)
     print("ArxivLens — Information Retrieval Evaluation Suite (§11)")
     print("=" * 70)
+    if model_mismatch_warning(model):
+        print(model_mismatch_warning(model))
 
     eval_queries = load_cases(dataset_path)
     skipped: List[str] = []
     missing_by_case: Dict[str, List[str]] = {}
+    chunk_coverage: Dict[str, Dict[str, int]] = {}
 
     # Before any DB work or rerank call: refuse to measure the bi-encoder fallback as the reranker.
     require_cross_encoder(embedder_url, timeout_s)
@@ -310,6 +355,7 @@ def run_retrieval_evaluation(dataset_path: str = DEFAULT_DATASET, embedder_url: 
             query = q_item["query"]
             relevant_arxiv_ids = list(q_item["relevant_arxiv_ids"])
 
+            chunk_coverage.update(chunk_counts_for_case(cur, relevant_arxiv_ids, model))
             missing = missing_for_case(cur, relevant_arxiv_ids, model)
             if missing:
                 # Skipped cases make coverage < 1.0, which fails the gate.
@@ -328,7 +374,7 @@ def run_retrieval_evaluation(dataset_path: str = DEFAULT_DATASET, embedder_url: 
     conn.close()
 
     summary: Dict[str, Any] = {"modes": {}, "cases_total": len(eval_queries), "skipped_case_ids": skipped,
-                               "missing_arxiv_ids": missing_by_case,
+                               "missing_arxiv_ids": missing_by_case, "chunk_coverage": chunk_coverage,
                                "rerank_path": PRODUCTION_RERANK_PATH, "embedder_url": embedder_url,
                                "embedding_model": model, "rerank_pool_size": RRF_POOL_SIZE,
                                "result_limit": RESULT_LIMIT,
@@ -353,6 +399,8 @@ def run_retrieval_evaluation(dataset_path: str = DEFAULT_DATASET, embedder_url: 
         print(f"WARNING: skipped cases (relevant paper(s) without {model} embeddings):")
         for cid in skipped:
             print(f"  {cid}: missing {', '.join(missing_by_case[cid])}")
+    for w in partial_embedding_warnings(chunk_coverage, model):
+        print(w)
     return summary
 
 
