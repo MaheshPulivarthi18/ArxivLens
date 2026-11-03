@@ -49,7 +49,9 @@ frontend/        React 19 + Vite UI
 **Contracts** (change only with an agreed design decision, and update both sides in one PR):
 - Event envelope and topics: `shared/events/events.go` and `shared/events/events.py`
 - HTTP API: routes in `internal/query/server.go` and the API table in `README.md`
-- DB schema: new numbered migrations may only *add* tables or indexes; never edit an applied migration
+- DB schema: new numbered migrations may only *add* tables or indexes; never edit an applied migration.
+  `arxivlens migrate` re-applies every `*.up.sql` on each run (no version table yet), so each migration must be
+  idempotent (`IF NOT EXISTS`) and safe to re-run
 - Embedding model + dimension: `BAAI/bge-base-en-v1.5`, 768-d `halfvec`
 - Quality gates: thresholds (`evals/thresholds.json` once EVAL-1 lands) are never lowered to make a change pass
 
@@ -74,6 +76,6 @@ frontend/        React 19 + Vite UI
 ## Pull requests
 
 - One branch per change; PRs start as drafts while CI runs. Never push to `main`; a maintainer merges.
-- CI must be green: Go (vet, gofmt, test, build), Python M0, frontend (lint, test, build).
+- CI must be green: Go (vet, gofmt, test, build), Python M0, frontend (lint, test, build), DB (migrations + HNSW query on real pgvector).
 - Branches named `agent/<role>/<task>` are produced by the project's AI agents. CI checks that each touches only its
   role's code area and adds no planning or review files (`.github/scripts/ownership-check.sh`).
