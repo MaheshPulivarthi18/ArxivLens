@@ -156,8 +156,9 @@ func TestHNSWVectorHits(t *testing.T) {
 				t.Logf("RESULT filter=%q config=%q plan_mode=%q mean_rows=%.1f min_rows=%d short_queries=%d/%d recall@5=%.3f recall@50=%.3f mean_ms=%.2f plans(generic=%d custom=%d) exact_mean_rows=%.1f",
 					f.name, c.name, m.name, float64(sumCount)/n, minCount, short, len(queries), sumR5/n, sumR50/n,
 					float64(dur.Microseconds())/1000/n, g1-g0, c1-c0, itMeanLen(base))
-				if c.settings == hnswSearchSettings && m.settings == "" && short > 0 {
-					t.Errorf("%s / query path / auto: %d queries returned fewer rows than the exact scan", f.name, short)
+				// Auto ends up generic (exact) here, so only the custom-plan check exercises hnswSearchSettings.
+				if c.settings == hnswSearchSettings && (m.settings == "" || m.name == modes[0].name) && short > 0 {
+					t.Errorf("%s / query path / %s: %d queries returned fewer rows than the exact scan", f.name, m.name, short)
 				}
 			}
 		}
