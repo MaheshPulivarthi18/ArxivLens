@@ -54,7 +54,10 @@ Decisions: [ADR-0006](https://github.com/MaheshPulivarthi18/arxivlens-agents/blo
   gate needs an ADR).
 - The SQL parity test in `tests/test_evals_data.py` compares the RRF pool query with `internal/query/search.go`
   (whole normalised query, explicit list of allowed differences, `RerankPool` = pool size) and fails if that file
-  is missing.
+  is missing. It rebuilds the production query from the Go string constants (`hybridSearchSQL` with
+  `vectorHitsSQL` spliced in), so comments are ignored. The eval also runs production's `hnswSearchSettings`
+  (`hnsw.ef_search = 100`, `iterative_scan = strict_order`, pgvector >= 0.8.0) right before the pool query and
+  resets them after it; the test checks the settings text matches too.
 
 Coverage is checked per arXiv ID. A paper counts as indexed only if it has chunks **with embeddings for the current
 model** (`chunk_embeddings.model`). A case is skipped unless every one of its `relevant_arxiv_ids` is indexed,

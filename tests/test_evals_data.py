@@ -168,7 +168,7 @@ class _FakeCursor:
         self.chunks = chunks if chunks is not None else {a: (3, 3) for a in embedded}
         self.executed = []
 
-    def execute(self, sql, params):
+    def execute(self, sql, params=None):
         self.executed.append((sql, params))
 
     def fetchall(self):
@@ -237,6 +237,29 @@ def _norm_sql(sql):
     return re.sub(r"\s+", " ", sql).strip()
 
 
+_GO_OPERAND = re.compile(r'`(?P<raw>[^`]*)`|"(?P<str>[^"\\\n]*)"|(?P<ident>[A-Za-z_]\w*)')
+
+
+def _go_string_const(src, name, _seen=()):
+    """Value of top-level `const <name> = <operand> {+ <operand>}` in Go source, where an operand is a raw string,
+    a plain "..." string or another such const (resolved recursively). Comments are not part of the value.
+    Fails unless the const is declared exactly once and every operand is understood."""
+    assert name not in _seen, f"const cycle: {_seen + (name,)}"
+    decl = [m.end() for m in re.finditer(rf"^const {name} = ", src, re.M)]
+    assert len(decl) == 1, f"const {name} not declared exactly once in search.go ({len(decl)})"
+    i, parts = decl[0], []
+    while True:
+        m = _GO_OPERAND.match(src, i)
+        assert m, f"const {name}: unsupported operand at {src[i:i + 40]!r}"
+        parts.append(_go_string_const(src, m["ident"], _seen + (name,)) if m["ident"] else m["raw"] or m["str"] or "")
+        i = re.compile(r"[ \t]*").match(src, m.end()).end()
+        if src.startswith("+", i):
+            i = re.compile(r"\s*").match(src, i + 1).end()
+            continue
+        assert src.startswith(("\n", "//"), i), f"const {name}: unexpected {src[i:i + 40]!r} after operand"
+        return "".join(parts)
+
+
 # Every allowed difference between search.go's HybridSearch SQL (after whitespace + placeholder normalisation) and
 # RRF_POOL_SQL, as (search.go fragment, eval fragment). Each search.go fragment must occur exactly once.
 _GO_TO_EVAL_SQL = [
@@ -280,10 +303,16 @@ def test_rrf_pool_sql_mirrors_search_go():
     pool = re.findall(r"^const RerankPool = (\d+)\s*$", src, re.M)
     assert pool == [str(evaluate_retrieval.RRF_POOL_SIZE)], pool
 
-    # (c) whole-query parity: normalised search.go SQL with only the listed differences == RRF_POOL_SQL
-    go_sql = re.findall(r"querySQL := `(.*?)`", src, re.S)
-    assert len(go_sql) == 1, "HybridSearch querySQL not found exactly once in search.go"
-    go_norm = _norm_sql(go_sql[0])
+    # (c) whole-query parity: normalised search.go SQL with only the listed differences == RRF_POOL_SQL.
+    # The query is rebuilt from the Go consts (hybridSearchSQL with vectorHitsSQL spliced in), and fetchCandidates
+    # must run exactly that const, after the HNSW settings, so an orphaned const or a new inline query fails here.
+    assert len(re.findall(r"\.Exec\(ctx, hnswSearchSettings\)", src)) == 1
+    assert len(re.findall(r"\.Query\(ctx, hybridSearchSQL,", src)) == 1
+    assert src.index("Exec(ctx, hnswSearchSettings)") < src.index("Query(ctx, hybridSearchSQL,")
+    go_sql = _go_string_const(src, "hybridSearchSQL")
+    assert go_sql.count("LIMIT 50") == 2 and "WHERE ce.model = $2" in go_sql
+    assert _go_string_const(src, "vectorHitsSQL") in go_sql
+    go_norm = _norm_sql(go_sql)
     for go_frag, eval_frag in _GO_TO_EVAL_SQL:
         assert go_norm.count(go_frag) == 1, f"allowed difference not found once in search.go: {go_frag!r}"
         go_norm = go_norm.replace(go_frag, eval_frag)
@@ -292,6 +321,21 @@ def test_rrf_pool_sql_mirrors_search_go():
         eval_norm = eval_norm.replace(name, n)
     assert "%(" not in eval_norm, eval_norm
     assert eval_norm == go_norm
+
+    # (d) HNSW settings (OPS-H5): the eval runs production's hnswSearchSettings text for the pool query
+    assert _norm_sql(evaluate_retrieval.RRF_HNSW_SETTINGS) == _norm_sql(_go_string_const(src, "hnswSearchSettings"))
+
+
+def test_rrf_pool_query_runs_with_production_hnsw_settings_then_resets():
+    cur = _FakeCursor(_pool())
+    evaluate_retrieval.run_modes_for_case(cur, "q", "[0.1]", "M", lambda q, p: [0.0] * len(p))
+    sqls = [sql for sql, _ in cur.executed]
+    i = sqls.index(evaluate_retrieval.RRF_POOL_SQL)
+    assert sqls[i - 1:i + 2] == [evaluate_retrieval.RRF_HNSW_SETTINGS, evaluate_retrieval.RRF_POOL_SQL,
+                                 evaluate_retrieval.RRF_HNSW_RESET]
+    assert sqls.count(evaluate_retrieval.RRF_HNSW_SETTINGS) == 1 and sqls[-1] == evaluate_retrieval.RRF_HNSW_RESET
+    # the BM25 and dense baselines run before the settings, with the server defaults
+    assert sqls.index(evaluate_retrieval.DENSE_SQL) < i - 1 and sqls.index(evaluate_retrieval.BM25_SQL) < i - 1
 
 
 # --- R3-1/R3-2/R3-3 (ADR-0006): paper-level recall vs chunk precision ---

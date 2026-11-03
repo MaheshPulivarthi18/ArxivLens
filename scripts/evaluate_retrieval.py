@@ -5,8 +5,8 @@ Evaluates and benchmarks retrieval performance across 4 configurations. Every mo
 RESULT_LIMIT (5) chunks it returns, i.e. what a /v1/ask request with the default maxCitations gets:
   1. Pure Keyword (BM25 Full-Text Search)
   2. Pure Vector (HNSW / Cosine Distance, current embedding model only)
-  3. Hybrid RRF: top 5 of the RRF candidate pool (same SQL as internal/query/search.go: 50 per arm,
-     ce.model filter, k=60)
+  3. Hybrid RRF: top 5 of the RRF candidate pool (same SQL and HNSW settings as internal/query/search.go:
+     50 per arm, ce.model filter, k=60, ef_search=100 + strict_order iterative scan)
   4. Hybrid RRF + Rerank (gated, ADR-0010): the RRF pool of 20 candidates, reranked in ONE call to the
      PRODUCTION reranker (POST <embedder>/internal/rerank, the BAAI/bge-reranker-base cross-encoder that
      internal/query/client.go EmbedClient.Rerank calls), stable-sorted by score (ties keep RRF order),
@@ -246,6 +246,11 @@ RRF_POOL_SQL = f"""
     ORDER BY rrf_score DESC, c.id
     LIMIT %(pool)s;
 """
+# Mirrors hnswSearchSettings in internal/query/search.go (OPS-H5): production runs these with SET LOCAL right before
+# the hybrid query, so the vector arm can fill its LIMIT after the model filter. The eval runs them right before
+# RRF_POOL_SQL and resets them right after, so the BM25/dense baselines keep the server defaults (not gated).
+RRF_HNSW_SETTINGS = "SET LOCAL hnsw.ef_search = 100; SET LOCAL hnsw.iterative_scan = strict_order"
+RRF_HNSW_RESET = "RESET hnsw.ef_search; RESET hnsw.iterative_scan"
 
 
 # Per relevant paper: all chunks vs chunks embedded for the current model (a partly embedded paper still counts as
@@ -320,9 +325,11 @@ def run_modes_for_case(cur, query: str, vec_literal: str, model: str,
     t_vec = (time.perf_counter() - t0) * 1000
 
     t0 = time.perf_counter()
+    cur.execute(RRF_HNSW_SETTINGS)
     cur.execute(RRF_POOL_SQL, dict(vec=vec_literal, model=model, query=query, pool=RRF_POOL_SIZE))
     pool = [(r[0], r[1], r[2]) for r in cur.fetchall()]
     t_rrf = (time.perf_counter() - t0) * 1000
+    cur.execute(RRF_HNSW_RESET)
 
     # Mode 4 (ADR-0010): the whole pool reranked by the production cross-encoder, then the top RESULT_LIMIT.
     # Latency = RRF retrieval + the rerank round-trip.
