@@ -166,7 +166,11 @@ services:
         condition: service_completed_successfully
     healthcheck:
       # /healthz answers once the startup hook has loaded BGE; also require the cross-encoder (M3 and evals need it).
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/healthz | grep -q '\\"reranker\\":true'"]
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS http://localhost:8081/healthz |
+          grep -q '"reranker":true'
       interval: 10s
       timeout: 5s
       retries: 6
