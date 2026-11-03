@@ -183,11 +183,14 @@ func (c *Consumer) Start(ctx context.Context, handler RecordHandler) error {
 					if c.dlq != nil {
 						dlqErr = c.dlq.PublishDLQ(ctx, dlqTopic, dlqPayload)
 					}
-					if dlqErr != nil {
-						log.Printf("[Kafka Consumer] CRITICAL: DLQ write failed (topic=%s partition=%d offset=%d dlq_topic=%s round=%d): %v",
-							record.Topic, record.Partition, record.Offset, dlqTopic, round, dlqErr)
+					if dlqErr == nil {
+						break
 					}
-					break // mutation(AC10a): fall through to CommitRecords after a failed PublishDLQ
+					log.Printf("[Kafka Consumer] CRITICAL: DLQ write failed (topic=%s partition=%d offset=%d dlq_topic=%s round=%d): %v",
+						record.Topic, record.Partition, record.Offset, dlqTopic, round, dlqErr)
+					if c.wait(ctx, c.dlqBackoff(round)) != nil {
+						break records
+					}
 				}
 			}
 
