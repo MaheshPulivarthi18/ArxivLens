@@ -33,9 +33,19 @@ type AskResponse struct {
 	TraceID   string     `json:"trace_id"`
 }
 
+// searcher is the part of *SearchEngine that Ask uses; tests substitute a fake.
+type searcher interface {
+	HybridSearch(ctx context.Context, queryString string, categories []string, limit int, rerank bool) ([]SearchHit, error)
+}
+
+// embedder is the part of *EmbedClient that citation validation uses; tests substitute a fake.
+type embedder interface {
+	EmbedTexts(ctx context.Context, texts []string, isQuery bool) ([][]float32, error)
+}
+
 type RAGService struct {
-	searchEngine *SearchEngine
-	embedClient  *EmbedClient
+	searchEngine searcher
+	embedClient  embedder
 }
 
 func NewRAGService(searchEngine *SearchEngine, embedClient *EmbedClient) *RAGService {
@@ -69,19 +79,7 @@ func (r *RAGService) Ask(
 	}
 
 	// 2. Strict Cross-Encoder Relevance & Section Filtering
-	var relevantHits []SearchHit
-	for _, h := range hits {
-		// Strict relevance cutoff: must be >= 0.45
-		if h.RerankScore > 0 && h.RerankScore < 0.45 {
-			continue
-		}
-		// Penalize incidental supplementary/hardware table mentions unless score is high (>= 0.70)
-		lowerSec := strings.ToLower(h.SectionTitle)
-		if (strings.Contains(lowerSec, "supplementary") || strings.Contains(lowerSec, "table") || strings.Contains(lowerSec, "appendix")) && h.RerankScore < 0.70 {
-			continue
-		}
-		relevantHits = append(relevantHits, h)
-	}
+	relevantHits := filterRelevantHits(hits)
 
 	// 3. Refuse Early: If no relevant hits remain, cleanly refuse without hallucination
 	if len(relevantHits) == 0 {
@@ -107,8 +105,41 @@ func (r *RAGService) Ask(
 		)
 	}
 
-	// 4. Citation Validation (§9): Extract [n] markers via regex
-	markerRegex := regexp.MustCompile(`\[(\d+)\]`)
+	// 4. Citation Validation (§9)
+	validatedCitations := r.validateCitations(ctx, answer, hits)
+
+	return &AskResponse{
+		Answer:    answer,
+		Citations: validatedCitations,
+		TraceID:   traceID,
+	}, nil
+}
+
+// filterRelevantHits applies the relevance cutoff (rerank < 0.45 dropped) and the
+// auxiliary-section cutoff (appendix/supplementary/table sections need rerank >= 0.70).
+func filterRelevantHits(hits []SearchHit) []SearchHit {
+	var relevantHits []SearchHit
+	for _, h := range hits {
+		// Strict relevance cutoff: must be >= 0.45
+		if h.RerankScore > 0 && h.RerankScore < 0.45 {
+			continue
+		}
+		// Penalize incidental supplementary/hardware table mentions unless score is high (>= 0.70)
+		lowerSec := strings.ToLower(h.SectionTitle)
+		if (strings.Contains(lowerSec, "supplementary") || strings.Contains(lowerSec, "table") || strings.Contains(lowerSec, "appendix")) && h.RerankScore < 0.70 {
+			continue
+		}
+		relevantHits = append(relevantHits, h)
+	}
+	return relevantHits
+}
+
+var markerRegex = regexp.MustCompile(`\[(\d+)\]`)
+
+// validateCitations extracts [n] markers from answer, discards markers outside 1..len(hits),
+// and labels each citation supported when sentence/chunk cosine similarity >= SupportThreshold.
+func (r *RAGService) validateCitations(ctx context.Context, answer string, hits []SearchHit) []Citation {
+	// Extract [n] markers via regex
 	sentences := splitIntoSentences(answer)
 
 	var validatedCitations []Citation
@@ -167,12 +198,7 @@ func (r *RAGService) Ask(
 			})
 		}
 	}
-
-	return &AskResponse{
-		Answer:    answer,
-		Citations: validatedCitations,
-		TraceID:   traceID,
-	}, nil
+	return validatedCitations
 }
 
 func splitIntoSentences(text string) []string {
@@ -181,7 +207,7 @@ func splitIntoSentences(text string) []string {
 	for i := 0; i < len(text); i++ {
 		ch := text[i]
 		current.WriteByte(ch)
-		if (ch == '.' || ch == '!' || ch == '?') && (i+1 == len(text) || text[i+1] == ' ') {
+		if (ch == '.' || ch == '!' || ch == '?') && (i+1 == len(text) || text[i+1] == ' ') && !endsWithAbbreviation(current.String()) {
 			s := strings.TrimSpace(current.String())
 			if s != "" {
 				sentences = append(sentences, s)
@@ -202,6 +228,23 @@ func splitIntoSentences(text string) []string {
 		sentences = append(sentences, strings.TrimSpace(text))
 	}
 	return sentences
+}
+
+// sentenceAbbreviations end with '.' but do not end a sentence (AI-1: "Smith et al. [1] show X."
+// used to split into "Smith et al." and "[1] show X.", so the marker lost its claim).
+var sentenceAbbreviations = []string{"e.g.", "i.e.", "et al.", "cf.", "vs.", "fig.", "eq."}
+
+func endsWithAbbreviation(s string) bool {
+	lower := strings.ToLower(s)
+	for _, abbr := range sentenceAbbreviations {
+		if strings.HasSuffix(lower, abbr) {
+			rest := lower[:len(lower)-len(abbr)]
+			if rest == "" || strings.HasSuffix(rest, " ") || strings.HasSuffix(rest, "(") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func cosineSimilarity(a, b []float32) float32 {
