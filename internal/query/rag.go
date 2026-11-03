@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"fmt"
+	"log"
 	"math"
 	"math/rand"
 	"regexp"
@@ -138,6 +139,7 @@ var markerRegex = regexp.MustCompile(`\[(\d+)\]`)
 
 // validateCitations extracts [n] markers from answer, discards markers outside 1..len(hits),
 // and labels each citation supported when sentence/chunk cosine similarity >= SupportThreshold.
+// A citation whose support cannot be computed (embed error or missing vector) is unsupported with score 0.
 func (r *RAGService) validateCitations(ctx context.Context, answer string, hits []SearchHit) []Citation {
 	// Extract [n] markers via regex
 	sentences := splitIntoSentences(answer)
@@ -147,12 +149,17 @@ func (r *RAGService) validateCitations(ctx context.Context, answer string, hits 
 
 	// Fetch embeddings for candidate chunks to verify support
 	chunkEmbeddings := make([][]float32, len(hits))
+	chunkMissing := 0
 	for i, h := range hits {
 		vecs, err := r.embedClient.EmbedTexts(ctx, []string{h.Content}, false)
 		if err == nil && len(vecs) > 0 {
 			chunkEmbeddings[i] = vecs[0]
 		}
+		if len(chunkEmbeddings[i]) == 0 {
+			chunkMissing++
+		}
 	}
+	unverified, sentenceErrs := 0, 0
 
 	for _, sent := range sentences {
 		matches := markerRegex.FindAllStringSubmatch(sent, -1)
@@ -170,18 +177,21 @@ func (r *RAGService) validateCitations(ctx context.Context, answer string, hits 
 			hit := hits[markerIdx-1]
 			cleanSent := strings.TrimSpace(markerRegex.ReplaceAllString(sent, ""))
 
-			// 5. Verify Support (§9): Embed sentence and compute cosine similarity with chunk
+			// 5. Verify Support (§9): Embed sentence and compute cosine similarity with chunk.
+			// Fail closed (QA-4, AI-2): if either vector is missing, the citation stays unsupported with score 0.
 			supported := false
 			score := 0.0
 
 			sentVecs, err := r.embedClient.EmbedTexts(ctx, []string{cleanSent}, false)
-			if err == nil && len(sentVecs) > 0 && len(chunkEmbeddings[markerIdx-1]) > 0 {
+			if err == nil && len(sentVecs) > 0 && len(sentVecs[0]) > 0 && len(chunkEmbeddings[markerIdx-1]) > 0 {
 				sim := cosineSimilarity(sentVecs[0], chunkEmbeddings[markerIdx-1])
 				score = math.Round(float64(sim)*10000) / 10000
 				supported = score >= SupportThreshold
 			} else {
-				score = 0.75 // Fallback if embedding service unavailable
-				supported = true
+				unverified++
+				if err != nil {
+					sentenceErrs++
+				}
 			}
 
 			pdfURL := fmt.Sprintf("https://arxiv.org/pdf/%s.pdf", hit.ArxivID)
@@ -197,6 +207,12 @@ func (r *RAGService) validateCitations(ctx context.Context, answer string, hits 
 				Supported: supported,
 			})
 		}
+	}
+	if unverified > 0 {
+		// One line per request; counts only, never passage or sentence text.
+		id, src := traceIDFrom(ctx)
+		log.Printf("[Query Service] citation support unverified trace_id=%s trace_id_source=%s unverified=%d citations=%d chunks_without_vector=%d/%d sentence_embed_errors=%d",
+			id, src, unverified, len(validatedCitations), chunkMissing, k, sentenceErrs)
 	}
 	return validatedCitations
 }
