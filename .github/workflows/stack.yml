@@ -174,7 +174,9 @@ jobs:
           for f in downloader.log query.log ingest.json; do
             if [ -f "$f" ]; then echo "== $f"; cat "$f"; cp "$f" stack-logs/; fi
           done
-          for t in papers.discovered.dlq papers.downloaded.dlq papers.chunked.dlq; do ./bin/arxivlens dlq list --topic "$t" || true; done | tee stack-logs/dlq.txt
+          for t in papers.discovered.dlq papers.downloaded.dlq papers.chunked.dlq; do
+            ./bin/arxivlens dlq list --topic "$t" || true
+          done | tee stack-logs/dlq.txt
 
       - name: Upload logs
         if: always()
