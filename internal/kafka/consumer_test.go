@@ -197,7 +197,7 @@ func TestConsumerDLQThenCommit(t *testing.T) {
 		p.ConsumerGroup != "downloader-v1" || p.Traceparent != "00-abc-def-01" || p.ErrorMessage != "boom" {
 		t.Errorf("payload = %+v", p)
 	}
-	if want := []string{"poll", "dlq 0@5 err=<nil>", "commit 0@5", "allow"}; !slices.Equal(f.log[:4], want) {
+	if want := []string{"poll", "dlq 0@5 err=<nil>", "commit 0@5", "allow"}; !slices.Equal(f.log[:min(4, len(f.log))], want) {
 		t.Errorf("log = %v, want prefix %v (publish before commit)", f.log, want)
 	}
 }
@@ -231,14 +231,14 @@ func TestConsumerDLQRecovers(t *testing.T) {
 	f, c := newFake(t, fail05, fetchOf(part(0, 5)))
 	f.dlqErrs = []error{errBoom, errBoom}
 	f.run(t, c)
-	if want := []string{"poll", "dlq 0@5 err=boom", "dlq 0@5 err=boom", "dlq 0@5 err=<nil>", "commit 0@5", "allow"}; !slices.Equal(f.log[:6], want) || len(f.grep("commit")) != 1 {
+	if want := []string{"poll", "dlq 0@5 err=boom", "dlq 0@5 err=boom", "dlq 0@5 err=<nil>", "commit 0@5", "allow"}; !slices.Equal(f.log[:min(6, len(f.log))], want) || len(f.grep("commit")) != 1 {
 		t.Errorf("log = %v, want prefix %v and one commit", f.log, want)
 	}
 	if want := []time.Duration{200 * ms, 400 * ms, 1 * sec, 2 * sec}; f.calls["0@5"] != 3 || !slices.Equal(f.waits, want) {
 		t.Errorf("handler calls = %d (want 3), waits = %v (want %v)", f.calls["0@5"], f.waits, want)
 	}
-	if f.payloads[0].FailedAt != f.payloads[2].FailedAt {
-		t.Errorf("FailedAt changed across rounds: %q vs %q", f.payloads[0].FailedAt, f.payloads[2].FailedAt)
+	if len(f.payloads) != 3 || f.payloads[0].FailedAt != f.payloads[2].FailedAt {
+		t.Errorf("want 3 DLQ writes with one FailedAt, got %+v", f.payloads)
 	}
 }
 
