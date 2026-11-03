@@ -164,7 +164,7 @@ jobs:
           exit "$rc"
 
       - name: Diagnostics
-        if: failure()
+        if: "failure()"
         timeout-minutes: 5
         run: |
           mkdir -p stack-logs
