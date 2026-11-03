@@ -106,6 +106,8 @@ func TestHNSWVectorHits(t *testing.T) {
 		{"ef_search=100", "SET LOCAL hnsw.ef_search = 100"},
 		{"ef_search=40 + iterative strict_order", "SET LOCAL hnsw.iterative_scan = strict_order"},
 		{"query path (hnswSearchSettings)", hnswSearchSettings},
+		{"ef_search=200 + iterative strict_order", "SET LOCAL hnsw.ef_search = 200; SET LOCAL hnsw.iterative_scan = strict_order"},
+		{"ef_search=400 + iterative strict_order", "SET LOCAL hnsw.ef_search = 400; SET LOCAL hnsw.iterative_scan = strict_order"},
 	}
 	filters := []struct {
 		name string
