@@ -142,9 +142,6 @@ func (c *Consumer) Start(ctx context.Context, handler RecordHandler) error {
 				if handleErr == nil {
 					break
 				}
-				if ctx.Err() != nil {
-					break records // shutdown is not a processing failure: no DLQ write, no commit
-				}
 
 				log.Printf("[Kafka Consumer] Error processing record (topic=%s, partition=%d, offset=%d, attempt=%d/%d): %v",
 					record.Topic, record.Partition, record.Offset, attempt, c.maxRetries, handleErr)
