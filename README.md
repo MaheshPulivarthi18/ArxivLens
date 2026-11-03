@@ -89,11 +89,18 @@ frontend/             React UI
 - Python 3.11+
 - Node.js 20+
 
-### 1. Start infrastructure
+### 1. Start the stack (one command)
 
 ```bash
-docker compose up -d          # Postgres+pgvector, Kafka (+ topics/DLQs), MinIO (+ bucket)
+make stack-up                 # infra + processor, embedder worker, embedder API (:8081) in Docker; waits until healthy
 ```
+
+`make stack-up` runs `docker compose --profile workers up -d --build` (CPU torch; models download once into the
+`hf_cache` volume). Plain `docker compose up -d` (`make infra-up`) still starts **only** Postgres+pgvector, Kafka
+(+ topics/DLQs) and MinIO (+ bucket). Stop everything with `make stack-down`.
+
+> There is no `.dockerignore` yet: run `make stack-up` from a clean checkout, or move `.venv/` and `node_modules/` out
+> of the repo root, or they are sent to Docker as build context.
 
 | Service | URL |
 |---|---|
@@ -108,20 +115,11 @@ go build -o bin/arxivlens ./cmd/arxivlens
 ./bin/arxivlens migrate
 ```
 
-### 3. Set up Python
-
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements-m0.txt minio ulid-py fastapi uvicorn
-export PYTHONPATH=$PWD
-```
-
-### 4. Run the pipeline (separate terminals)
+### 3. Run the Go services and crawl (host, separate terminals)
 
 ```bash
 ./bin/arxivlens download                      # Go downloader worker
-python services/processor/worker.py           # Python processor worker
-python services/embedder/worker.py            # Python embedder worker
+./bin/arxivlens query --port 8080             # Go query service on :8080 (uses the embedder API on :8081)
 ./bin/arxivlens crawl --query "cat:cs.LG" --limit 20   # kick off discovery
 ```
 
@@ -131,13 +129,27 @@ Check one paper:
 ./bin/arxivlens status --arxiv-id 2307.08691
 ```
 
-### 5. Run the query stack
+### 4. Run the UI
 
 ```bash
-python services/embedder/api.py               # Embed/rerank/ingest API on :8081
-./bin/arxivlens query --port 8080             # Go query service on :8080
 cd frontend && npm install && npm run dev     # UI on http://localhost:5173 (proxies /v1 → :8080)
 ```
+
+### Option: Python workers on the host (Apple-silicon MPS acceleration)
+
+Docker on macOS has no MPS, so for GPU-speed embedding on a Mac start infra only and run the three Python processes
+on the host instead of `make stack-up`:
+
+```bash
+make infra-up
+python3 -m venv .venv && source .venv/bin/activate && make setup-py && export PYTHONPATH=$PWD
+python services/processor/worker.py           # Python processor worker
+python services/embedder/worker.py            # Python embedder worker
+python services/embedder/api.py               # Embed/rerank/ingest API on :8081
+```
+
+CUDA in compose is untested: `TORCH_INDEX_URL=https://download.pytorch.org/whl/cu121 make stack-up` plus a
+`deploy.resources.reservations.devices` override for the GPU. CPU is the supported path.
 
 ---
 
@@ -198,7 +210,7 @@ All services read the same environment variables (defaults target the local Dock
 ```bash
 pytest tests/test_m0.py                    # Unit: chunker, embedder, citation validator (no infra)
 pytest tests/test_evals_data.py            # Unit: eval datasets — schema, sizes, corpus membership, unique IDs (no infra)
-pytest tests/                              # Full suite: needs docker stack + services running
+make test-full                             # Full suite M0–M6 (host venv, make setup-py): needs make stack-up, make migrate, download + query running
 make eval                                  # Quality gate vs Product PRD §8 (scripts/eval_gate.py); see evals/README.md
 python scripts/evaluate_retrieval.py       # paper-level Recall@5 / MRR / NDCG@5 (+ chunk precision@5) across BM25, vector, RRF, RRF+rerank
 python scripts/evaluate_answers.py         # /v1/ask: supported citations, refusals, p50/p95 latency
@@ -214,6 +226,11 @@ python scripts/benchmark_hnsw.py           # pgvector HNSW ef_search sweep (p50/
 | M4 | Chaos: duplicate-event idempotency, corrupt-PDF → DLQ with diagnostics |
 | M5/M6 | `traceparent` propagation, ranking metrics, HNSW index |
 
+The `Full stack` workflow (`.github/workflows/stack.yml`) does all of this on a GitHub runner: `make stack-up`,
+`make migrate`, starts `arxivlens download` and `arxivlens query` on the host, crawls 2 papers to `embedded`,
+ingests the `2608.20331` fixture and runs `make test-full`. It runs on PRs that touch compose, Dockerfiles,
+`requirements*.txt`, the Makefile or the workflow, and on demand (`workflow_dispatch`).
+
 ---
 
 ## Contributing
@@ -227,5 +244,5 @@ Product requirements, design decisions (ADRs), tickets and QA evidence live in
 ## Known limitations
 
 - `/v1/ask` builds its answer **from a template** over the top reranked chunks. It does not call an LLM yet, though the citation validation pipeline is in place for when one is added.
-- The processor and embedder workers are not in `docker-compose.yml` yet. Run them on the host (which gives them Apple-silicon MPS acceleration).
+- The Go downloader and query service are not in `docker-compose.yml`; run them on the host. The Python workers in compose run on CPU (run them on the host for Apple-silicon MPS).
 - Tracing propagates `traceparent` but does not export spans to a collector.

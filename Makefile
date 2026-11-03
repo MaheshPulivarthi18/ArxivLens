@@ -7,14 +7,14 @@ export PYTHONPATH := $(CURDIR)
 
 .DEFAULT_GOAL := help
 .PHONY: help setup-py setup-fe build build-go build-fe lint lint-go lint-fe \
-        test-unit test-go test-py test-fe test-full infra-up infra-down migrate eval
+        test-unit test-go test-py test-fe test-full infra-up infra-down stack-up stack-down migrate eval
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
 
 # --- setup -------------------------------------------------------------------
 setup-py: ## Install Python deps into the active environment
-	$(PY) -m pip install -r requirements-m0.txt minio ulid-py fastapi uvicorn
+	$(PY) -m pip install -r requirements-m0.txt minio ulid-py fastapi uvicorn opentelemetry-sdk
 
 setup-fe: ## Install frontend deps (exact lockfile)
 	cd frontend && npm ci
@@ -50,7 +50,7 @@ test-py: ## Python unit tests: M0 + eval data (M0 downloads BGE model on first r
 test-fe: ## Frontend tests (available after FE-1)
 	@cd frontend && if npm run | grep -q " test"; then npm test; else echo "no frontend tests yet (FE-1)"; fi
 
-test-full: ## All milestone suites M0-M6 (needs infra + workers + query service running)
+test-full: ## All suites M0-M6 (needs make stack-up, make migrate, arxivlens download + query on the host)
 	$(PYTEST) -q tests/
 
 # --- infra -------------------------------------------------------------------
@@ -59,6 +59,23 @@ infra-up: ## Start Postgres+pgvector, Kafka (+topics), MinIO
 
 infra-down: ## Stop infra (keeps volumes)
 	docker compose down
+
+# Seconds `make stack-up` waits for the three worker containers to become healthy.
+STACK_TIMEOUT ?= 900
+STACK_WORKERS := arxivlens-embedder-api arxivlens-processor arxivlens-embedder-worker
+
+stack-up: ## Infra + processor, embedder worker, embedder API (:8081); waits until healthy
+	docker compose --profile workers up -d --build
+	@end=$$(( $$(date +%s) + $(STACK_TIMEOUT) )); for c in $(STACK_WORKERS); do \
+	  until [ "$$(docker inspect -f '{{.State.Health.Status}}' $$c 2>/dev/null)" = healthy ]; do \
+	    if [ $$(date +%s) -ge $$end ]; then echo "stack-up: $$c not healthy after $(STACK_TIMEOUT)s"; \
+	      docker compose --profile workers ps -a; docker compose --profile workers logs --tail 50 $$c; exit 1; fi; \
+	    sleep 5; \
+	  done; echo "stack-up: $$c healthy"; done
+	docker compose --profile workers ps
+
+stack-down: ## Stop infra + workers (keeps volumes)
+	docker compose --profile workers down
 
 migrate: build-go ## Apply DB schema
 	./bin/arxivlens migrate

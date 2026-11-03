@@ -24,11 +24,13 @@ make setup-fe                              # frontend deps (npm ci)
 | `make lint` | `go vet`, `gofmt` check, frontend `oxlint` | No |
 | `make build` | Go binary + frontend build | No |
 | `make infra-up` / `make infra-down` | Postgres+pgvector, Kafka, MinIO | Docker |
-| `make test-full` | All milestone suites M0–M6 | Docker + workers running |
+| `make stack-up` / `make stack-down` | Infra + processor, embedder worker, embedder API (:8081) in compose; waits until healthy | Docker |
+| `make test-full` | All milestone suites M0–M6 | `make stack-up`, `make migrate`, `./bin/arxivlens download` + `query` on the host |
+| `.github/workflows/stack.yml` | CI: whole stack, crawl 2 papers, `make test-full` (PRs touching compose/Dockerfiles/requirements/Makefile, or manual) | GitHub runner |
 | `make eval` | Retrieval eval (quality gate over `evals/` once EVAL-1, PR #2, lands) | Docker + indexed corpus |
 
 Frontend (from `frontend/`): `npm run dev` (:5173, proxies `/v1` → :8080), `npm run lint`, `npm run build`.
-Python services: `python services/processor/worker.py`, `python services/embedder/worker.py`, `python services/embedder/api.py` (:8081).
+Python services run in compose via `make stack-up`; on the host (Apple-silicon MPS): `python services/processor/worker.py`, `python services/embedder/worker.py`, `python services/embedder/api.py` (:8081).
 
 ## Layout
 

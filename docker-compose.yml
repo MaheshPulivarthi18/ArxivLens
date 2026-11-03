@@ -1,5 +1,31 @@
 version: '3.8'
 
+# Python workers (profile "workers"): plain `docker compose up -d` starts infra only;
+# `make stack-up` (= `docker compose --profile workers up -d --build` + health wait) starts everything.
+x-worker: &worker
+  profiles: [workers]
+  restart: unless-stopped
+  environment:
+    DATABASE_URL: postgresql://postgres:postgres@postgres:5432/arxivlens
+    KAFKA_BROKERS: kafka:9092
+    MINIO_ENDPOINT: minio:9000
+    HF_HOME: /root/.cache/huggingface
+  volumes:
+    # Named volume by default (models download once); set ARXIVLENS_HF_CACHE to an absolute host path to bind-mount it.
+    - ${ARXIVLENS_HF_CACHE:-hf_cache}:/root/.cache/huggingface
+
+x-worker-build-args: &worker_build_args
+  TORCH_INDEX_URL: ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
+
+# Worker healthcheck: the consumer group (argv[1]) is STABLE with >= 1 member. Workers load their model before they
+# subscribe, so a member means "model loaded and consuming". Per group, not per container: a host-run worker in the
+# same group also satisfies it.
+x-group-check: &group_check >-
+  import os, sys;
+  from confluent_kafka.admin import AdminClient;
+  g = AdminClient({"bootstrap.servers": os.environ["KAFKA_BROKERS"]}).describe_consumer_groups([sys.argv[1]])[sys.argv[1]].result(timeout=10);
+  sys.exit(0 if g.state.name == "STABLE" and len(g.members) > 0 else 1)
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -108,7 +134,67 @@ services:
       exit 0;
       "
 
+  embedder-api:
+    <<: *worker
+    build:
+      context: .
+      dockerfile: services/embedder/Dockerfile
+      args: *worker_build_args
+    container_name: arxivlens-embedder-api
+    command: ["python", "services/embedder/api.py"]
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      # /healthz answers once the startup hook has loaded BGE; also require the cross-encoder (M3 and evals need it).
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/healthz | grep -q '\"reranker\":true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 600s # cold start downloads ~1.5 GB of models into the HF cache
+
+  processor:
+    <<: *worker
+    build:
+      context: .
+      dockerfile: services/processor/Dockerfile
+      args: *worker_build_args
+    container_name: arxivlens-processor
+    depends_on:
+      embedder-api:
+        condition: service_healthy # models are in the HF cache before the workers load them
+    healthcheck:
+      test: ["CMD", "python", "-c", *group_check, "processor-v1"]
+      interval: 10s
+      timeout: 15s
+      retries: 6
+      start_period: 300s
+
+  embedder-worker:
+    <<: *worker
+    build:
+      context: .
+      dockerfile: services/embedder/Dockerfile
+      args: *worker_build_args
+    container_name: arxivlens-embedder-worker
+    depends_on:
+      embedder-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", *group_check, "embedder-v1"]
+      interval: 10s
+      timeout: 15s
+      retries: 6
+      start_period: 300s
+
 volumes:
   postgres_data:
   kafka_data:
   minio_data:
+  hf_cache:

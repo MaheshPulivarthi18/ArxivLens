@@ -1,0 +1,192 @@
+name: Full stack
+
+# Brings up infra + Python workers in compose, runs the Go downloader and query service on the host,
+# crawls 2 papers to `embedded` and runs `make test-full`. No secrets. 5 arXiv requests per run.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - docker-compose.yml
+      - services/*/Dockerfile
+      - requirements*.txt
+      - Makefile
+      - .github/workflows/stack.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stack-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  stack:
+    name: Full stack (compose + make test-full)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      ARXIVLENS_HF_CACHE: /home/runner/.cache/huggingface
+      PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Lint the harness (actionlint, compose config)
+        timeout-minutes: 3
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color .github/workflows/stack.yml
+          docker compose config --quiet
+          docker compose config --profiles | grep -qx workers
+
+      - name: Cache Hugging Face models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-bge-base-en-v1.5-bge-reranker-base
+
+      - name: Host Python deps (make setup-py, CPU torch)
+        timeout-minutes: 10
+        run: make setup-py
+
+      - name: Pre-fetch models into the shared HF cache
+        timeout-minutes: 10
+        run: |
+          python - <<'EOF'
+          from transformers import AutoModel, AutoModelForSequenceClassification, AutoTokenizer
+          for name in ("BAAI/bge-base-en-v1.5", "BAAI/bge-reranker-base"):
+              AutoTokenizer.from_pretrained(name)
+          AutoModel.from_pretrained("BAAI/bge-base-en-v1.5")
+          AutoModelForSequenceClassification.from_pretrained("BAAI/bge-reranker-base")
+          EOF
+
+      - name: Build Go CLI
+        timeout-minutes: 5
+        run: make build-go
+
+      - name: "AC1: plain docker compose up -d starts infra only"
+        timeout-minutes: 5
+        run: |
+          docker compose up -d
+          got="$(docker compose ps -a --services | sort | tr '\n' ' ')"
+          want="kafka kafka-init minio minio-init postgres "
+          echo "docker compose ps -a --services: $got"
+          echo "config --services: $(docker compose config --services | wc -l); with --profile workers: $(docker compose --profile workers config --services | wc -l)"
+          { echo "### AC1 plain \`docker compose up -d\`"; echo '```'; docker compose ps -a --services | sort; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          [ "$got" = "$want" ] || { echo "::error::expected only infra services: $want"; exit 1; }
+
+      - name: "AC2: make stack-up"
+        timeout-minutes: 25
+        run: |
+          make stack-up
+          docker compose --profile workers ps -a
+          { echo "### AC2 \`docker compose --profile workers ps -a\`"; echo '```'; docker compose --profile workers ps -a; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Migrate
+        timeout-minutes: 2
+        run: make migrate
+
+      - name: "AC3: crawl 2 papers (before the downloader starts)"
+        timeout-minutes: 2
+        run: ./bin/arxivlens crawl --query "cat:cs.LG" --limit 2
+
+      - name: Start Go downloader and query service on the host
+        timeout-minutes: 2
+        run: |
+          nohup ./bin/arxivlens download > downloader.log 2>&1 &
+          echo $! > downloader.pid
+          nohup ./bin/arxivlens query --port 8080 > query.log 2>&1 &
+          echo $! > query.pid
+          for _ in $(seq 30); do curl -fsS localhost:8080/healthz && exit 0; sleep 2; done
+          echo "::error::query service not healthy after 60s"; exit 1
+
+      - name: "AC3: wait until both crawled papers are embedded"
+        timeout-minutes: 16
+        run: |
+          q() { docker compose exec -T postgres psql -U postgres -d arxivlens -tA -c "$1"; }
+          deadline=$((SECONDS + 900))
+          until [ "$(q "select count(*) from papers where status = 'embedded'")" = 2 ] \
+             && [ "$(q "select count(*) from papers")" = 2 ]; do
+            q "select arxiv_id, status from papers order by arxiv_id"
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::papers not embedded after 15 min"
+              for t in papers.discovered.dlq papers.downloaded.dlq papers.chunked.dlq; do ./bin/arxivlens dlq list --topic "$t"; done
+              exit 1
+            fi
+            sleep 10
+          done
+          { echo "### AC3 \`arxivlens status\`"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          for id in $(q "select arxiv_id from papers order by arxiv_id"); do
+            ./bin/arxivlens status --arxiv-id "$id" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          for t in papers.discovered.dlq papers.downloaded.dlq papers.chunked.dlq; do
+            ./bin/arxivlens dlq list --topic "$t"
+            end="$(docker compose exec -T kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic "$t" --time -1 \
+              | awk -F: '{s += $3} END {print s + 0}')"
+            [ "$end" = 0 ] || { echo "::error::$t holds $end records"; exit 1; }
+          done
+
+      - name: Seed the M3/M4 fixture (on-demand ingest of 2608.20331)
+        timeout-minutes: 6
+        run: |
+          sleep 3
+          code="$(curl -sS -m 300 -o ingest.json -w '%{http_code}' -X POST localhost:8080/v1/papers/ingest \
+            -H 'Content-Type: application/json' -d '{"arxiv_id":"2608.20331"}')"
+          cat ingest.json; echo
+          [ "$code" = 200 ] || { echo "::error::ingest returned HTTP $code"; exit 1; }
+          ./bin/arxivlens status --arxiv-id 2608.20331
+
+      - name: "AC4: make test-full"
+        timeout-minutes: 20
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" "$ARXIVLENS_HF_CACHE"
+          set +e
+          make test-full 2>&1 | tee test-full.log
+          rc=${PIPESTATUS[0]}
+          {
+            echo "### AC4 \`make test-full\` (exit $rc)"; echo '```'
+            if grep -q 'short test summary info' test-full.log; then sed -n '/short test summary info/,$p' test-full.log; else tail -n 1 test-full.log; fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - name: Diagnostics
+        if: failure()
+        timeout-minutes: 5
+        run: |
+          mkdir -p stack-logs
+          docker compose --profile workers ps -a | tee stack-logs/ps.txt
+          docker compose --profile workers logs --no-color --timestamps > stack-logs/compose.log 2>&1
+          cat stack-logs/compose.log
+          for f in downloader.log query.log ingest.json; do
+            if [ -f "$f" ]; then echo "== $f"; cat "$f"; cp "$f" stack-logs/; fi
+          done
+          for t in papers.discovered.dlq papers.downloaded.dlq papers.chunked.dlq; do ./bin/arxivlens dlq list --topic "$t" || true; done | tee stack-logs/dlq.txt
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stack-logs
+          path: |
+            stack-logs/
+            test-full.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Teardown
+        if: always()
+        timeout-minutes: 5
+        run: |
+          for p in downloader.pid query.pid; do
+            if [ -f "$p" ]; then kill "$(cat "$p")" 2>/dev/null || true; fi
+          done
+          docker compose --profile workers down -v
+          sudo chown -R "$(id -u):$(id -g)" "$ARXIVLENS_HF_CACHE" || true
