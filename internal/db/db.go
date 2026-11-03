@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -39,6 +42,33 @@ func (d *DB) Close() {
 	if d.Pool != nil {
 		d.Pool.Close()
 	}
+}
+
+// MigrationFiles returns the paths of every regular "*.up.sql" file directly
+// inside dir, sorted lexically by file name (000001_... before 000002_...).
+// Subdirectories and other files (e.g. "*.down.sql") are ignored. It returns
+// an error if dir cannot be read or holds no up migrations.
+func MigrationFiles(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read migrations dir %s: %w", dir, err)
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".up.sql") {
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	if len(names) == 0 {
+		return nil, fmt.Errorf("no *.up.sql migrations found in %s", dir)
+	}
+	sort.Strings(names)
+	paths := make([]string, len(names))
+	for i, n := range names {
+		paths[i] = filepath.Join(dir, n)
+	}
+	return paths, nil
 }
 
 func (d *DB) RunMigrations(ctx context.Context, migrationPath string) error {

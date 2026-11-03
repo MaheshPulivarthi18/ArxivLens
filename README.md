@@ -163,7 +163,7 @@ curl -s localhost:8080/v1/ask -H 'content-type: application/json' \
 ## CLI reference
 
 ```
-arxivlens migrate  [--file migrations/000001_init_schema.up.sql]
+arxivlens migrate  [--dir migrations] [--file <one .up.sql>]
 arxivlens crawl    [--query "cat:cs.AI OR cat:cs.LG"] [--limit 5] [--rate-limit 3s]
 arxivlens download [--group downloader-v1]
 arxivlens status   --arxiv-id <id>
