@@ -42,9 +42,12 @@ Decisions: [ADR-0006](https://github.com/MaheshPulivarthi18/arxivlens-agents/blo
   use embeddings for the current `EMBEDDING_MODEL`.
 - **Model name: two sources that must match.** The eval reads `EMBEDDING_MODEL` (`services/common/config.py`,
   default `BAAI/bge-base-en-v1.5`) and records it as `embedding_model` in the results JSON. The Go query service
-  takes its model from its `--model` flag (default `BAAI/bge-base-en-v1.5`). If they differ, the eval scores
-  different vectors than production serves. The eval prints a warning when `EMBEDDING_MODEL` is not
-  `BAAI/bge-base-en-v1.5`; the warning does not fail the gate.
+  takes its model from its `--model` flag. If they differ, the eval scores different vectors than production
+  serves. The eval compares `EMBEDDING_MODEL` with the query service's model: `--query-model` /
+  `ARXIVLENS_QUERY_MODEL` if you started the service with `--model`, otherwise the `--model` default read from
+  `cmd/arxivlens/main.go`. It records that value as `query_model` and prints a warning when the two differ; the
+  warning does not fail the gate. A unit test fails if the Go `--model` default and the `EMBEDDING_MODEL` default
+  in `config.py` drift apart.
 - **Partly embedded papers are reported, not gated.** For every relevant paper the results JSON records
   `chunk_coverage[arxiv_id] = {embedded_chunks, total_chunks}` for the current model, and the run prints a warning
   for each paper with `embedded_chunks < total_chunks`. Such a paper still counts as indexed (making it fail the

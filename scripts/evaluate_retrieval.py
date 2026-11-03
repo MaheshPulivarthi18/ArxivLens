@@ -50,9 +50,12 @@ RESULT_LIMIT = 5    # chunks each mode returns: /v1/ask maxCitations default (in
 RRF_POOL_SIZE = 20  # ADR-0010 rerank candidate pool
 RRF_ARM_LIMIT = 50  # per-arm LIMIT in internal/query/search.go
 RRF_K = 60          # RRF constant in internal/query/search.go
-# Default of the Go query service's --model flag (cmd/arxivlens/main.go). The eval reads EMBEDDING_MODEL
-# (services/common/config.py) instead; both must name the same model or the eval measures other vectors.
-GO_DEFAULT_MODEL = "BAAI/bge-base-en-v1.5"
+# The eval embeds with EMBEDDING_MODEL (services/common/config.py); the Go query service uses its --model flag.
+# Both must name the same model or the eval measures other vectors. The --model default is read from the Go source
+# (single source of truth); pass --query-model / ARXIVLENS_QUERY_MODEL when the service runs with an override.
+GO_MAIN_PATH = os.path.join(REPO_ROOT, "cmd", "arxivlens", "main.go")
+QUERY_MODEL_ENV = "ARXIVLENS_QUERY_MODEL"
+_GO_MODEL_FLAG_RE = re.compile(r'\.StringVar\(\s*&\w+\s*,\s*"model"\s*,\s*"([^"]+)"')
 
 RerankFn = Callable[[str, List[str]], List[float]]
 Hit = Tuple[int, str]  # (chunk_id, arxiv_id)
@@ -274,12 +277,27 @@ def partial_embedding_warnings(counts: Dict[str, Dict[str, int]], model: str) ->
             for a, c in sorted(counts.items()) if 0 < c["total_chunks"] and c["embedded_chunks"] < c["total_chunks"]]
 
 
-def model_mismatch_warning(model: str) -> Optional[str]:
-    """Warning when the eval's model differs from the Go query service's --model default (warning only)."""
-    if model == GO_DEFAULT_MODEL:
+def go_default_model(path: str = GO_MAIN_PATH) -> str:
+    """The query service's `--model` flag default, parsed from cmd/arxivlens/main.go. Raises unless exactly one."""
+    with open(path, encoding="utf-8") as f:
+        found = _GO_MODEL_FLAG_RE.findall(f.read())
+    if len(found) != 1:
+        raise ValueError(f"expected exactly one StringVar(..., \"model\", <default>, ...) in {path}, found {found}")
+    return found[0]
+
+
+def resolve_query_model(query_model: Optional[str] = None) -> str:
+    """Model the query service runs with: explicit value, else $ARXIVLENS_QUERY_MODEL, else the Go --model default."""
+    return query_model or os.getenv(QUERY_MODEL_ENV) or go_default_model()
+
+
+def model_mismatch_warning(model: str, query_model: str) -> Optional[str]:
+    """Warning when the eval's model differs from the query service's model (warning only, not gated)."""
+    if model == query_model:
         return None
-    return (f"WARNING: eval embedding model {model!r} (EMBEDDING_MODEL) differs from the query service --model "
-            f"default {GO_DEFAULT_MODEL!r}; both must match or the eval does not measure production")
+    return (f"WARNING: eval embedding model {model!r} (EMBEDDING_MODEL) differs from the query service model "
+            f"{query_model!r} (--query-model / {QUERY_MODEL_ENV}, default: Go --model default); both must match "
+            f"or the eval does not measure production")
 
 
 def missing_for_case(cur, relevant_arxiv_ids: List[str], model: str) -> List[str]:
@@ -321,7 +339,8 @@ def run_modes_for_case(cur, query: str, vec_literal: str, model: str,
 
 
 def run_retrieval_evaluation(dataset_path: str = DEFAULT_DATASET, embedder_url: str = DEFAULT_EMBEDDER_URL,
-                             timeout_s: float = 30.0, model: Optional[str] = None) -> Dict[str, Any]:
+                             timeout_s: float = 30.0, model: Optional[str] = None,
+                             query_model: Optional[str] = None) -> Dict[str, Any]:
     """Run all 4 modes over the dataset. Returns per-mode mean metrics plus coverage counts."""
     import numpy as np
     import psycopg
@@ -330,11 +349,13 @@ def run_retrieval_evaluation(dataset_path: str = DEFAULT_DATASET, embedder_url: 
     from services.common.config import config
 
     model = model or config.embedding_model
+    query_model = resolve_query_model(query_model)
     print("=" * 70)
     print("ArxivLens — Information Retrieval Evaluation Suite (§11)")
     print("=" * 70)
-    if model_mismatch_warning(model):
-        print(model_mismatch_warning(model))
+    mismatch = model_mismatch_warning(model, query_model)
+    if mismatch:
+        print(mismatch)
 
     eval_queries = load_cases(dataset_path)
     skipped: List[str] = []
@@ -376,7 +397,7 @@ def run_retrieval_evaluation(dataset_path: str = DEFAULT_DATASET, embedder_url: 
     summary: Dict[str, Any] = {"modes": {}, "cases_total": len(eval_queries), "skipped_case_ids": skipped,
                                "missing_arxiv_ids": missing_by_case, "chunk_coverage": chunk_coverage,
                                "rerank_path": PRODUCTION_RERANK_PATH, "embedder_url": embedder_url,
-                               "embedding_model": model, "rerank_pool_size": RRF_POOL_SIZE,
+                               "embedding_model": model, "query_model": query_model, "rerank_pool_size": RRF_POOL_SIZE,
                                "result_limit": RESULT_LIMIT,
                                "recall_definition": "paper-level (ADR-0006); chunk_precision@5 is not gated"}
     summary["cases_evaluated"] = len(eval_queries) - len(skipped)
@@ -415,8 +436,11 @@ def main(argv=None) -> int:
                         help="Embedder API base URL for the production /internal/rerank "
                         "(env ARXIVLENS_EMBEDDER_URL, default http://localhost:8081)")
     parser.add_argument("--timeout", type=float, default=30.0, help="Per embedder API request timeout (s)")
+    parser.add_argument("--query-model", default=None,
+                        help="Model the query service runs with, if started with --model "
+                        f"(env {QUERY_MODEL_ENV}; default: the --model default in cmd/arxivlens/main.go)")
     args = parser.parse_args(argv)
-    summary = run_retrieval_evaluation(args.dataset, args.embedder_url, args.timeout)
+    summary = run_retrieval_evaluation(args.dataset, args.embedder_url, args.timeout, query_model=args.query_model)
     if args.json_out:
         with open(args.json_out, "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2)

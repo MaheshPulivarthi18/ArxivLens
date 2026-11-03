@@ -654,17 +654,99 @@ def test_chunk_counts_fully_embedded_and_unknown_papers():
     assert "COUNT(ce.chunk_id) AS embedded_chunks" in sql and "COUNT(pc.id) AS total_chunks" in sql
 
 
-# --- EVAL-5 AC3: the model the eval uses vs the Go query service's --model default ---
+
+@pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="opt-in: needs DATABASE_URL with migrations/ applied")
+def test_chunk_counts_sql_against_real_postgres():
+    # H3: CHUNK_COUNTS_SQL on the real schema (pgvector halfvec): one paper with 0/2 chunks embedded, one with 1/2.
+    psycopg = pytest.importorskip("psycopg")
+    vec = "[" + ",".join(["0.1"] * 768) + "]"
+    conn = psycopg.connect(os.environ["DATABASE_URL"])
+    try:
+        cur = conn.cursor()
+        chunk_ids = {}
+        for arxiv_id in ("eval5.zero", "eval5.part"):
+            cur.execute("INSERT INTO papers (arxiv_id) VALUES (%s) RETURNING id", (arxiv_id,))
+            paper_id = cur.fetchone()[0]
+            for i in range(2):
+                cur.execute("INSERT INTO paper_chunks (paper_id, chunk_index, content, content_hash) "
+                            "VALUES (%s, %s, %s, %s) RETURNING id", (paper_id, i, f"text {i}", f"h{i}"))
+                chunk_ids.setdefault(arxiv_id, []).append(cur.fetchone()[0])
+        cur.execute("INSERT INTO chunk_embeddings (chunk_id, model, embedding) VALUES (%s, %s, %s::halfvec)",
+                    (chunk_ids["eval5.part"][0], "M", vec))
+        cur.execute("INSERT INTO chunk_embeddings (chunk_id, model, embedding) VALUES (%s, %s, %s::halfvec)",
+                    (chunk_ids["eval5.zero"][0], "other-model", vec))  # another model's vector doesn't count
+        counts = evaluate_retrieval.chunk_counts_for_case(cur, ["eval5.zero", "eval5.part", "eval5.none"], "M")
+        print(counts)
+        assert counts == {"eval5.zero": {"embedded_chunks": 0, "total_chunks": 2},
+                          "eval5.part": {"embedded_chunks": 1, "total_chunks": 2},
+                          "eval5.none": {"embedded_chunks": 0, "total_chunks": 0}}
+    finally:
+        conn.rollback()
+        conn.close()
+
+# --- EVAL-5 AC3 / H1-H2: the model the eval uses vs the model the Go query service runs with ---
+
+def _python_default_model():
+    src = open(os.path.join(evaluate_retrieval.REPO_ROOT, "services", "common", "config.py"), encoding="utf-8").read()
+    found = re.findall(r'os\.getenv\(\s*"EMBEDDING_MODEL"\s*,\s*"([^"]+)"\s*\)', src)
+    assert len(found) == 1, found
+    return found[0]
+
+
+def test_go_model_default_parsed_from_main_go_matches_python_default():
+    # H1: the Go --model default is read from cmd/arxivlens/main.go, not duplicated; it must equal the Python default.
+    assert not hasattr(evaluate_retrieval, "GO_DEFAULT_MODEL")
+    go_default = evaluate_retrieval.go_default_model()
+    assert go_default == _python_default_model(), (
+        f"cmd/arxivlens/main.go --model default {go_default!r} != services/common/config.py EMBEDDING_MODEL default "
+        f"{_python_default_model()!r}")
+
+
+def test_go_model_default_parser(tmp_path):
+    go = tmp_path / "main.go"
+    go.write_text('cmd.Flags().StringVar(&port, "port-name", "x", "")\n'
+                  'cmd.Flags().StringVar( &modelName ,\n\t\t"model", "org/m-1.5", "Embedding model name")\n')
+    assert evaluate_retrieval.go_default_model(str(go)) == "org/m-1.5"
+    for body in ['cmd.Flags().StringVar(&m, "models", "a", "")\n',  # no --model flag
+                 'f.StringVar(&a, "model", "a", "")\nf.StringVar(&b, "model", "b", "")\n']:  # ambiguous
+        go.write_text(body)
+        with pytest.raises(ValueError):
+            evaluate_retrieval.go_default_model(str(go))
+
 
 def test_model_mismatch_warning(monkeypatch, tmp_path, capsys):
-    assert evaluate_retrieval.GO_DEFAULT_MODEL == "BAAI/bge-base-en-v1.5"
-    assert evaluate_retrieval.model_mismatch_warning("BAAI/bge-base-en-v1.5") is None
-    assert "EMBEDDING_MODEL" in evaluate_retrieval.model_mismatch_warning("other/model")
+    monkeypatch.delenv(evaluate_retrieval.QUERY_MODEL_ENV, raising=False)
+    go_default = evaluate_retrieval.go_default_model()
+    assert evaluate_retrieval.resolve_query_model() == go_default
+    assert evaluate_retrieval.model_mismatch_warning(go_default, go_default) is None
+    assert "EMBEDDING_MODEL" in evaluate_retrieval.model_mismatch_warning("other/model", go_default)
     _stub_infra(monkeypatch, [], {"status": "ok", "reranker": True}, _FakeCursor(_pool()))  # EMBEDDING_MODEL = "M"
     s = evaluate_retrieval.run_retrieval_evaluation(_two_cases(tmp_path), "http://embedder:8081", 5.0)
-    assert s["embedding_model"] == "M"
-    assert "WARNING: eval embedding model 'M' (EMBEDDING_MODEL) differs" in capsys.readouterr().out
+    assert s["embedding_model"] == "M" and s["query_model"] == go_default
+    assert f"WARNING: eval embedding model 'M' (EMBEDDING_MODEL) differs from the query service model {go_default!r}" \
+        in capsys.readouterr().out
     s = evaluate_retrieval.run_retrieval_evaluation(_two_cases(tmp_path), "http://embedder:8081", 5.0,
-                                                    model="BAAI/bge-base-en-v1.5")
-    assert s["embedding_model"] == "BAAI/bge-base-en-v1.5"
+                                                    model=go_default)
+    assert s["embedding_model"] == go_default
     assert "differs" not in capsys.readouterr().out
+
+
+def test_model_mismatch_uses_explicit_query_model_override(monkeypatch, tmp_path, capsys):
+    # H2: the query service started with --model X -> compare against X, not the Go default.
+    monkeypatch.delenv(evaluate_retrieval.QUERY_MODEL_ENV, raising=False)
+    _stub_infra(monkeypatch, [], {"status": "ok", "reranker": True}, _FakeCursor(_pool()))  # EMBEDDING_MODEL = "M"
+    s = evaluate_retrieval.run_retrieval_evaluation(_two_cases(tmp_path), "http://embedder:8081", 5.0,
+                                                    query_model="M")
+    assert s["query_model"] == "M" and "differs" not in capsys.readouterr().out  # override matches -> no warning
+    s = evaluate_retrieval.run_retrieval_evaluation(_two_cases(tmp_path), "http://embedder:8081", 5.0,
+                                                    query_model="org/large")
+    assert s["query_model"] == "org/large"
+    assert "differs from the query service model 'org/large'" in capsys.readouterr().out  # override differs
+    monkeypatch.setenv(evaluate_retrieval.QUERY_MODEL_ENV, "M")  # env form of the override
+    assert evaluate_retrieval.resolve_query_model() == "M"
+    s = evaluate_retrieval.run_retrieval_evaluation(_two_cases(tmp_path), "http://embedder:8081", 5.0)
+    assert s["query_model"] == "M"
+    assert "differs" not in capsys.readouterr().out
+    seen = {}
+    monkeypatch.setattr(evaluate_retrieval, "run_retrieval_evaluation", lambda *a, **kw: seen.update(kw) or {})
+    assert evaluate_retrieval.main(["--query-model", "org/large"]) == 0 and seen["query_model"] == "org/large"
