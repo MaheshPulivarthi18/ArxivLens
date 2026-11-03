@@ -75,7 +75,7 @@ jobs:
         run: |
           docker compose up -d
           got="$(docker compose ps -a --services | sort | tr '\n' ' ')"
-          want="kafka kafka-init minio minio-init postgres "
+          want="kafka kafka-init minio minio-data-init minio-init postgres "
           echo "docker compose ps -a --services: $got"
           echo "config --services: $(docker compose config --services | wc -l); with --profile workers: $(docker compose --profile workers config --services | wc -l)"
           { echo "### AC1 plain \`docker compose up -d\`"; echo '```'; docker compose ps -a --services | sort; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
@@ -87,7 +87,7 @@ jobs:
           make stack-up
           docker compose --profile workers ps -a
           { echo "### AC2 \`docker compose --profile workers ps -a\`"; echo '```'; docker compose --profile workers ps -a; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-          # Pinned image evidence for the S3 services (references come from the compose file, not from this workflow).
+          # Resolved image evidence for the S3 services (references come from the compose file, not from this workflow).
           docker compose images minio minio-init
           for c in arxivlens-minio arxivlens-minio-init; do
             img="$(docker inspect --format '{{.Config.Image}}' "$c")"
