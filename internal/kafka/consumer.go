@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -13,21 +14,42 @@ import (
 
 type RecordHandler func(ctx context.Context, record *kgo.Record) error
 
+// consumerClient is the part of *kgo.Client the loop uses; dlqPublisher is satisfied by *Producer.
+type consumerClient interface {
+	PollFetches(ctx context.Context) kgo.Fetches
+	CommitRecords(ctx context.Context, rs ...*kgo.Record) error
+	AllowRebalance()
+	Close()
+}
+
+type dlqPublisher interface {
+	PublishDLQ(ctx context.Context, dlqTopic string, dlqPayload events.DLQPayload) error
+}
+
+var errNoDLQPublisher = errors.New("no DLQ publisher configured")
+
 type Consumer struct {
-	client     *kgo.Client
+	client     consumerClient
 	group      string
 	topics     []string
-	producer   *Producer
+	dlq        dlqPublisher
 	maxRetries int
+	backoff    func(attempt int) time.Duration
+	dlqBackoff func(round int) time.Duration
+	wait       func(ctx context.Context, d time.Duration) error // ctxWait
 }
 
 func NewConsumer(brokers []string, group string, topics []string, producer *Producer) (*Consumer, error) {
+	if producer == nil { // checked before wrapping in the interface, so a typed nil can't slip through
+		return nil, errors.New("kafka consumer needs a DLQ producer: a failed record must reach the DLQ before its offset is committed")
+	}
+
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(brokers...),
 		kgo.ConsumerGroup(group),
 		kgo.ConsumeTopics(topics...),
 		kgo.DisableAutoCommit(),
-		kgo.BlockRebalanceOnPoll(),
+		kgo.BlockRebalanceOnPoll(), // released by AllowRebalance after each poll in Start
 	}
 
 	client, err := kgo.NewClient(opts...)
@@ -39,8 +61,11 @@ func NewConsumer(brokers []string, group string, topics []string, producer *Prod
 		client:     client,
 		group:      group,
 		topics:     topics,
-		producer:   producer,
+		dlq:        producer,
 		maxRetries: 3,
+		backoff:    retryBackoff,
+		dlqBackoff: dlqRetryBackoff,
+		wait:       ctxWait,
 	}, nil
 }
 
@@ -55,7 +80,24 @@ func retryBackoff(attempt int) time.Duration {
 	return time.Duration(100*(1<<attempt)) * time.Millisecond
 }
 
-// Start consuming loop.
+// dlqRetryBackoff returns the wait after failed DLQ write round n (n >= 1): 1s, 2s, 4s, … capped at 30s.
+func dlqRetryBackoff(round int) time.Duration {
+	return min(time.Second<<min(round-1, 5), 30*time.Second)
+}
+
+// ctxWait waits for d and returns ctx.Err() if ctx ends first.
+func ctxWait(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// Start consuming loop. Returns nil when ctx ends, kgo.ErrClientClosed if the client is closed.
 func (c *Consumer) Start(ctx context.Context, handler RecordHandler) error {
 	log.Printf("[Kafka Consumer] Starting group=%s topics=%v", c.group, c.topics)
 
@@ -67,15 +109,21 @@ func (c *Consumer) Start(ctx context.Context, handler RecordHandler) error {
 		default:
 		}
 
+		// Partition errors come next to other partitions' records: log them, then still handle those records.
 		fetches := c.client.PollFetches(ctx)
-		if errs := fetches.Errors(); len(errs) > 0 {
-			for _, err := range errs {
-				log.Printf("[Kafka Consumer] Poll error: %v", err)
-			}
-			continue
+		closed := false
+		fetches.EachError(func(topic string, partition int32, err error) {
+			closed = closed || errors.Is(err, kgo.ErrClientClosed)
+			log.Printf("[Kafka Consumer] Poll error (topic=%s partition=%d): %v", topic, partition, err)
+		})
+		if closed {
+			return kgo.ErrClientClosed
 		}
 
+		// Records are resolved in order. If ctx ends before a record is handled or confirmed in the DLQ,
+		// `break records` skips its commit and every later one, so no cumulative commit can sweep it up (§4 L4).
 		iter := fetches.RecordIter()
+	records:
 		for !iter.Done() {
 			record := iter.Next()
 
@@ -94,16 +142,20 @@ func (c *Consumer) Start(ctx context.Context, handler RecordHandler) error {
 				if handleErr == nil {
 					break
 				}
+				if ctx.Err() != nil {
+					break records // shutdown is not a processing failure: no DLQ write, no commit
+				}
 
 				log.Printf("[Kafka Consumer] Error processing record (topic=%s, partition=%d, offset=%d, attempt=%d/%d): %v",
 					record.Topic, record.Partition, record.Offset, attempt, c.maxRetries, handleErr)
 
-				if attempt < c.maxRetries {
-					time.Sleep(retryBackoff(attempt))
+				if attempt < c.maxRetries && c.wait(ctx, c.backoff(attempt)) != nil {
+					break records
 				}
 			}
 
-			// If still failing after maxRetries -> route to DLQ (§6 Tier 2)
+			// If still failing after maxRetries -> route to DLQ (§6 Tier 2). The handler is not re-run; the DLQ
+			// write is retried in place until it lands or ctx ends. The payload is built once (one FailedAt).
 			if handleErr != nil {
 				dlqTopic := fmt.Sprintf("%s.dlq", record.Topic)
 				log.Printf("[Kafka Consumer] Routing failed record to DLQ topic=%s (key=%s)", dlqTopic, string(record.Key))
@@ -126,9 +178,18 @@ func (c *Consumer) Start(ctx context.Context, handler RecordHandler) error {
 					Traceparent:   traceparent,
 				}
 
-				if c.producer != nil {
-					if dlqErr := c.producer.PublishDLQ(ctx, dlqTopic, dlqPayload); dlqErr != nil {
-						log.Printf("[Kafka Consumer] CRITICAL: Failed to write to DLQ: %v", dlqErr)
+				for round := 1; ; round++ {
+					dlqErr := errNoDLQPublisher
+					if c.dlq != nil {
+						dlqErr = c.dlq.PublishDLQ(ctx, dlqTopic, dlqPayload)
+					}
+					if dlqErr == nil {
+						break
+					}
+					log.Printf("[Kafka Consumer] CRITICAL: DLQ write failed (topic=%s partition=%d offset=%d dlq_topic=%s round=%d): %v",
+						record.Topic, record.Partition, record.Offset, dlqTopic, round, dlqErr)
+					if c.wait(ctx, c.dlqBackoff(round)) != nil {
+						break records
 					}
 				}
 			}
@@ -138,5 +199,6 @@ func (c *Consumer) Start(ctx context.Context, handler RecordHandler) error {
 				log.Printf("[Kafka Consumer] Offset commit error: %v", err)
 			}
 		}
+		c.client.AllowRebalance() // after every poll, so revoking rebalances aren't blocked forever
 	}
 }

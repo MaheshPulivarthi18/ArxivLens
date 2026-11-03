@@ -8,7 +8,9 @@ import (
 	"log"
 	"math"
 	"reflect"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -392,5 +394,263 @@ func TestAskResponseShapeAndConstructor(t *testing.T) {
 	se, ec := &SearchEngine{}, &EmbedClient{}
 	if r := NewRAGService(se, ec); r.searchEngine != searcher(se) || r.embedClient != embedder(ec) {
 		t.Errorf("dependencies not wired: %+v", r)
+	}
+}
+
+// countingEmbedder wraps an embedder, records the texts of every EmbedTexts call, and can fail or
+// reshape a given call (1-based call number) to exercise AI-3's batch fail-closed paths.
+type countingEmbedder struct {
+	inner    embedder
+	calls    [][]string
+	failCall map[int]error
+	reshape  map[int]func([][]float32) [][]float32
+}
+
+func (c *countingEmbedder) EmbedTexts(ctx context.Context, texts []string, isQuery bool) ([][]float32, error) {
+	c.calls = append(c.calls, append([]string(nil), texts...))
+	n := len(c.calls)
+	if err := c.failCall[n]; err != nil {
+		return nil, err
+	}
+	vecs, err := c.inner.EmbedTexts(ctx, texts, isQuery)
+	if f := c.reshape[n]; f != nil && err == nil {
+		vecs = f(vecs)
+	}
+	return vecs, err
+}
+
+// batchHits are three relevant hits whose chunk vectors differ, so a batch result applied to the
+// wrong input index changes the scores.
+func batchHits() []SearchHit {
+	return []SearchHit{ragHit(1, "Method", 0.9), ragHit(2, "Results", 0.8), ragHit(3, "Discussion", 0.7)}
+}
+
+func batchVectors() *fakeEmbedder {
+	return &fakeEmbedder{vec: func(t string) []float32 {
+		switch {
+		case t == "chunk Method":
+			return []float32{1, 0}
+		case t == "chunk Results":
+			return []float32{0, 1}
+		case t == "chunk Discussion":
+			return []float32{0.6, 0.8}
+		case strings.HasPrefix(t, "Furthermore"):
+			return []float32{0.6, 0.8} // cos 0.8 with chunk Results
+		default:
+			return []float32{0.9, 0.1}
+		}
+	}}
+}
+
+// perItemCitations is the pre-AI-3 algorithm: one EmbedTexts call per chunk and per cited sentence.
+// It is the reference the batched implementation must match.
+func perItemCitations(t *testing.T, emb embedder, answer string, hits []SearchHit) []Citation {
+	t.Helper()
+	embedOne := func(text string) []float32 {
+		v, err := emb.EmbedTexts(context.Background(), []string{text}, false)
+		if err != nil || len(v) == 0 {
+			return nil
+		}
+		return v[0]
+	}
+	var out []Citation
+	for _, sent := range splitIntoSentences(answer) {
+		for _, m := range markerRegex.FindAllStringSubmatch(sent, -1) {
+			n, _ := strconv.Atoi(m[1])
+			if n < 1 || n > len(hits) {
+				continue
+			}
+			sv := embedOne(strings.TrimSpace(markerRegex.ReplaceAllString(sent, "")))
+			cv := embedOne(hits[n-1].Content)
+			score := 0.0
+			if len(sv) > 0 && len(cv) > 0 {
+				score = math.Round(float64(cosineSimilarity(sv, cv))*10000) / 10000
+			}
+			out = append(out, Citation{Marker: n, ChunkID: hits[n-1].ChunkID, Score: score, Supported: score >= SupportThreshold})
+		}
+	}
+	return out
+}
+
+type labelScore struct {
+	Marker    int
+	ChunkID   int64
+	Score     float64
+	Supported bool
+}
+
+func labelsAndScores(cs []Citation) []labelScore {
+	out := []labelScore{}
+	for _, c := range cs {
+		out = append(out, labelScore{c.Marker, c.ChunkID, c.Score, c.Supported})
+	}
+	return out
+}
+
+// AI-3 AC1/AC5: an answer over 3 hits with 2 cited sentences costs at most 2 EmbedTexts calls
+// (all chunks, then all sentences), and the labels/scores equal the one-call-per-item results.
+func TestAskBatchesEmbeddingCalls(t *testing.T) {
+	emb := &countingEmbedder{inner: batchVectors()}
+	r := &RAGService{searchEngine: &fakeSearcher{hits: batchHits()}, embedClient: emb}
+	resp, err := r.Ask(context.Background(), "q", nil, 3)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := markers(resp.Citations); !reflect.DeepEqual(got, []int{1, 2}) {
+		t.Fatalf("markers = %v, want [1 2] (answer %q)", got, resp.Answer)
+	}
+	if len(emb.calls) > 2 {
+		t.Fatalf("EmbedTexts called %d times, want <= 2 (one per batch): %q", len(emb.calls), emb.calls)
+	}
+	if len(emb.calls) != 2 || !reflect.DeepEqual(emb.calls[0], []string{"chunk Method", "chunk Results", "chunk Discussion"}) ||
+		len(emb.calls[1]) != 2 {
+		t.Errorf("calls = %q, want [all 3 chunks in hit order] then [2 sentences]", emb.calls)
+	}
+
+	want := perItemCitations(t, batchVectors(), resp.Answer, batchHits())
+	if got := labelsAndScores(resp.Citations); !reflect.DeepEqual(got, labelsAndScores(want)) {
+		t.Errorf("batched %+v, per-item %+v", got, labelsAndScores(want))
+	}
+	if c := resp.Citations[1]; c.Score != 0.8 || !c.Supported {
+		t.Errorf("citation 2 = %+v, want score 0.8 supported (chunk vectors kept in input order)", c)
+	}
+}
+
+// AI-3: batched validateCitations matches the per-item reference on the existing AI-1/AI-2 inputs,
+// deduplicates sentences, and never exceeds 2 calls.
+func TestValidateCitationsBatchMatchesPerItem(t *testing.T) {
+	hits := []SearchHit{ragHit(1, "A", 0.9), ragHit(2, "B", 0.9)}
+	perSentence := simEmbedder(func(s string) float64 {
+		if strings.HasPrefix(s, "Strong") {
+			return 0.9
+		}
+		return 0.2
+	})
+	tests := []struct {
+		name, answer string
+		inner        *fakeEmbedder
+		wantSentence []string // texts of the sentence batch; nil = no sentence call expected
+		wantCalls    int
+	}{
+		{"per-sentence support", "Strong claim [1]. Weak claim [1].", perSentence, []string{"Strong claim .", "Weak claim ."}, 2},
+		{"multiple markers one sentence embedded once", "X [2] and Y [7] and Z [1].", simEmbedder(constSim(0.9)), []string{"X  and Y  and Z ."}, 2},
+		{"repeated identical sentence embedded once", "Same [1]. Same [2]. Same [1].", perSentence, []string{"Same ."}, 2},
+		{"threshold edge", "Claim [1]. Other [2].", simEmbedder(constSim(0.4999)), []string{"Claim .", "Other ."}, 2},
+		{"no in-range marker makes no call", "Claim [0]. Other [3].", simEmbedder(constSim(0.9)), nil, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			emb := &countingEmbedder{inner: tc.inner}
+			got := (&RAGService{embedClient: emb}).validateCitations(context.Background(), tc.answer, hits)
+			want := perItemCitations(t, tc.inner, tc.answer, hits)
+			if !reflect.DeepEqual(labelsAndScores(got), labelsAndScores(want)) {
+				t.Errorf("batched %+v, per-item %+v", labelsAndScores(got), labelsAndScores(want))
+			}
+			if len(emb.calls) != tc.wantCalls {
+				t.Fatalf("calls = %d (%q), want %d", len(emb.calls), emb.calls, tc.wantCalls)
+			}
+			if tc.wantCalls == 2 && !reflect.DeepEqual(emb.calls[1], tc.wantSentence) {
+				t.Errorf("sentence batch = %q, want %q", emb.calls[1], tc.wantSentence)
+			}
+		})
+	}
+}
+
+// AI-3 AC4: a failed or mis-sized batch fails closed for every citation that depends on it,
+// never panics, still makes at most 2 calls, and keeps the AI-2 log counters' meaning.
+func TestAskBatchFailClosed(t *testing.T) {
+	drop := func(v [][]float32) [][]float32 { return v[:len(v)-1] }
+	extra := func(v [][]float32) [][]float32 { return append(v, []float32{1, 0}) }
+	tests := []struct {
+		name     string
+		failCall map[int]error
+		reshape  map[int]func([][]float32) [][]float32
+		wantLog  string
+	}{
+		{"(a) chunk batch errors", map[int]error{1: errors.New("down")}, nil,
+			"unverified=2 citations=2 chunks_without_vector=3/3 sentence_embed_errors=0"},
+		{"(b) sentence batch errors", map[int]error{2: errors.New("down")}, nil,
+			"unverified=2 citations=2 chunks_without_vector=0/3 sentence_embed_errors=2"},
+		{"(c) chunk batch returns fewer vectors", nil, map[int]func([][]float32) [][]float32{1: drop},
+			"unverified=2 citations=2 chunks_without_vector=3/3 sentence_embed_errors=0"},
+		{"(c) sentence batch returns fewer vectors", nil, map[int]func([][]float32) [][]float32{2: drop},
+			"unverified=2 citations=2 chunks_without_vector=0/3 sentence_embed_errors=0"},
+		{"chunk batch returns more vectors", nil, map[int]func([][]float32) [][]float32{1: extra},
+			"unverified=2 citations=2 chunks_without_vector=3/3 sentence_embed_errors=0"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prevOut, prevFlags := log.Writer(), log.Flags()
+			log.SetOutput(&buf)
+			log.SetFlags(0)
+			t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+
+			emb := &countingEmbedder{inner: batchVectors(), failCall: tc.failCall, reshape: tc.reshape}
+			r := &RAGService{searchEngine: &fakeSearcher{hits: batchHits()}, embedClient: emb}
+			resp, err := r.Ask(context.Background(), "q", nil, 3)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(resp.Citations) != 2 {
+				t.Fatalf("got %d citations, want 2 (markers kept, support withheld)", len(resp.Citations))
+			}
+			for _, c := range resp.Citations {
+				if c.Score != 0 || c.Supported {
+					t.Errorf("marker %d score=%v supported=%v, want 0 false", c.Marker, c.Score, c.Supported)
+				}
+			}
+			if len(emb.calls) != 2 {
+				t.Errorf("EmbedTexts called %d times, want 2", len(emb.calls))
+			}
+			lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+			if len(lines) != 1 || !strings.Contains(lines[0], tc.wantLog) {
+				t.Errorf("log = %q, want one line containing %q", buf.String(), tc.wantLog)
+			}
+		})
+	}
+}
+
+// AI-4 AC1: when reranking falls back during Ask, the fallback log line carries the TraceID
+// returned to the caller (trace_id_source=ctx), and Ask still answers from the RRF order.
+func TestAskRerankFallbackLogsResponseTraceID(t *testing.T) {
+	var buf bytes.Buffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+
+	rr := &fakeReranker{err: errors.New("reranker down")}
+	engine := &SearchEngine{rr: rr, fetch: func(_ context.Context, _ string, _ []string, n int) ([]SearchHit, error) {
+		return []SearchHit{ragHit(1, "Method", 0), ragHit(2, "Results", 0)}[:min(n, 2)], nil
+	}}
+	r := &RAGService{searchEngine: engine, embedClient: simEmbedder(constSim(0.8))}
+	resp, err := r.Ask(context.Background(), "q", nil, 5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rr.calls != 1 {
+		t.Fatalf("Rerank called %d times, want 1", rr.calls)
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(resp.TraceID) {
+		t.Fatalf("TraceID = %q, want 32 hex chars", resp.TraceID)
+	}
+	if got := markers(resp.Citations); !reflect.DeepEqual(got, []int{1, 2}) || resp.Citations[0].ChunkID != 1 {
+		t.Errorf("citations %+v, want markers [1 2] in RRF order", resp.Citations)
+	}
+
+	var fallback []string
+	for _, l := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if strings.Contains(l, "rerank fallback") {
+			fallback = append(fallback, l)
+		}
+	}
+	if len(fallback) != 1 {
+		t.Fatalf("log = %q, want exactly one rerank fallback line", buf.String())
+	}
+	for _, want := range []string{"trace_id=" + resp.TraceID + " ", "trace_id_source=ctx"} {
+		if !strings.Contains(fallback[0], want) {
+			t.Errorf("fallback log %q missing %q", fallback[0], want)
+		}
 	}
 }
