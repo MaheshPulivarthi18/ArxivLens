@@ -69,7 +69,7 @@ stack-up: ## Infra + processor, embedder worker, embedder API (:8081); waits unt
 	@end=$$(( $$(date +%s) + $(STACK_TIMEOUT) )); for c in $(STACK_WORKERS); do \
 	  until [ "$$(docker inspect -f '{{.State.Health.Status}}' $$c 2>/dev/null)" = healthy ]; do \
 	    if [ $$(date +%s) -ge $$end ]; then echo "stack-up: $$c not healthy after $(STACK_TIMEOUT)s"; \
-	      docker compose --profile workers ps -a; docker compose --profile workers logs --tail 50 $$c; exit 1; fi; \
+	      docker compose --profile workers ps -a; docker logs --tail 50 $c 2>&1; exit 1; fi; \
 	    sleep 5; \
 	  done; echo "stack-up: $$c healthy"; done
 	docker compose --profile workers ps
