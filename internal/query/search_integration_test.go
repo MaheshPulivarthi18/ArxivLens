@@ -127,7 +127,7 @@ func TestHNSWVectorHits(t *testing.T) {
 		discard()
 		base := make([][]int64, len(queries))
 		for i, q := range queries {
-			base[i], _ = itRun(t, ctx, conn, exact+"; "+modes[0].settings, vectorHitsSQL, q, f.cats)
+			base[i], _ = itRun(t, ctx, conn, exact+"; "+modes[0].settings, vectorHitsSQL, q, itModel, f.cats)
 		}
 		for _, c := range configs {
 			for _, m := range modes {
@@ -139,7 +139,7 @@ func TestHNSWVectorHits(t *testing.T) {
 				var dur time.Duration
 				minCount := 1 << 30
 				for i, q := range queries {
-					got, took := itRun(t, ctx, conn, settings, vectorHitsSQL, q, f.cats)
+					got, took := itRun(t, ctx, conn, settings, vectorHitsSQL, q, itModel, f.cats)
 					dur += took
 					sumCount += len(got)
 					minCount = min(minCount, len(got))
@@ -163,7 +163,7 @@ func TestHNSWVectorHits(t *testing.T) {
 		discard()
 		g0, c0 := plans(hybridSearchSQL)
 		for _, q := range queries {
-			itRun(t, ctx, conn, hnswSearchSettings, hybridSearchSQL, q, f.cats, "synthetic chunk", 20)
+			itRun(t, ctx, conn, hnswSearchSettings, hybridSearchSQL, q, itModel, f.cats, "synthetic chunk", 20)
 		}
 		g1, c1 := plans(hybridSearchSQL)
 		t.Logf("RESULT filter=%q hybridSearchSQL x%d (query path, auto): plans(generic=%d custom=%d)", f.name, len(queries), g1-g0, c1-c0)
