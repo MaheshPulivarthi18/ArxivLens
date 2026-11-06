@@ -1,0 +1,71 @@
+name: DB
+
+# Real PostgreSQL + pgvector checks (OPS-H5): migrations on a fresh DB are idempotent and create the
+# HNSW index; the vector arm of the hybrid query is planned and measured against an exact scan.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: db-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  db:
+    name: DB (migrate twice, HNSW plan + recall)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: arxivlens
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d arxivlens"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/arxivlens?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make build-go
+      - name: Schema snapshot query
+        run: |
+          echo "PSQL=docker exec -i ${{ job.services.postgres.id }} psql -U postgres -d arxivlens -v ON_ERROR_STOP=1" >> "$GITHUB_ENV"
+          PSQL="docker exec -i ${{ job.services.postgres.id }} psql -U postgres -d arxivlens -v ON_ERROR_STOP=1"
+          cat > /tmp/snapshot.sql <<'SQL'
+          SELECT 'extension', extname, extversion FROM pg_extension
+          UNION ALL SELECT 'column', table_name || '.' || column_name, data_type
+            FROM information_schema.columns WHERE table_schema = 'public'
+          UNION ALL SELECT 'index', indexname, indexdef FROM pg_indexes WHERE schemaname = 'public'
+          UNION ALL SELECT 'index_valid', indexrelid::regclass::text, indisvalid::text
+            FROM pg_index i JOIN pg_class c ON c.oid = i.indrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public'
+          ORDER BY 1, 2;
+          SQL
+          $PSQL -At < /tmp/snapshot.sql > /tmp/run0.txt
+          echo "Objects before migrate (fresh DB):"; cat /tmp/run0.txt
+          if grep -v '^extension|plpgsql|' /tmp/run0.txt; then echo "::error::DB is not fresh"; exit 1; fi
+      - name: Migrate run 1 (fresh DB)
+        run: |
+          ./bin/arxivlens migrate
+          $PSQL -At < /tmp/snapshot.sql > /tmp/run1.txt
+          $PSQL -c '\d chunk_embeddings'
+          $PSQL -c "SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'chunk_embeddings' ORDER BY 1;"
+          grep -E '^index\|chunk_embeddings_hnsw_idx\|.*USING hnsw \(embedding halfvec_cosine_ops\) WITH \(m=.?16.?, ef_construction=.?64.?\)' /tmp/run1.txt
+          grep -E '^index_valid\|chunk_embeddings_hnsw_idx\|true$' /tmp/run1.txt
+      - name: Migrate run 2 (idempotent, schema unchanged)
+        run: |
+          ./bin/arxivlens migrate
+          $PSQL -At < /tmp/snapshot.sql > /tmp/run2.txt
+          diff -u /tmp/run1.txt /tmp/run2.txt
+          echo "Schema identical after run 2: $(wc -l < /tmp/run2.txt) objects (extensions, columns, indexes)"
+      - name: HNSW plan + recall (real search.go SQL)
+        run: |
+          go vet -tags integration ./internal/query/
+          go test -tags integration -count=1 -v -timeout 20m -run TestHNSW ./internal/query/

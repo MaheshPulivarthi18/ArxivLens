@@ -175,7 +175,7 @@ curl -s localhost:8080/v1/ask -H 'content-type: application/json' \
 ## CLI reference
 
 ```
-arxivlens migrate  [--file migrations/000001_init_schema.up.sql]
+arxivlens migrate  [--dir migrations] [--file <one .up.sql>]
 arxivlens crawl    [--query "cat:cs.AI OR cat:cs.LG"] [--limit 5] [--rate-limit 3s]
 arxivlens download [--group downloader-v1]
 arxivlens status   --arxiv-id <id>
@@ -200,6 +200,7 @@ All services read the same environment variables (defaults target the local Dock
 | `MINIO_BUCKET` | `arxiv-papers` |
 | `MINIO_USE_SSL` (Go) / `MINIO_SECURE` (Python) | `false` |
 | `EMBEDDING_MODEL` | `BAAI/bge-base-en-v1.5` |
+| `INGEST_TIMEOUT` (Go query service) | `5m`: limit for the synchronous chunk + embed call of `POST /v1/papers/ingest` (Go duration) |
 
 > ⚠️ The default credentials are for local development only. Override them with your own values (e.g. a git-ignored `.env`) before deploying anywhere.
 
@@ -228,7 +229,8 @@ python scripts/benchmark_hnsw.py           # pgvector HNSW ef_search sweep (p50/
 
 The `Full stack` workflow (`.github/workflows/stack.yml`) does all of this on a GitHub runner: `make stack-up`,
 `make migrate`, starts `arxivlens download` and `arxivlens query` on the host, crawls 2 papers to `embedded`,
-ingests the `2608.20331` fixture and runs `make test-full`. It runs on PRs that touch compose, Dockerfiles,
+ingests the `2608.20331` fixture and runs `make test-full`. Known failure F1: the two M3 `/v1/ask` tests exceed their 10 s
+timeout on CPU runners, so they are deselected there and run in a separate, non-blocking step. It runs on PRs that touch compose, Dockerfiles,
 `requirements*.txt`, the Makefile or the workflow, and on demand (`workflow_dispatch`).
 
 ---

@@ -3,6 +3,7 @@
 
 PY      ?= python3
 PYTEST  ?= $(PY) -m pytest
+TESTS   ?= tests/
 export PYTHONPATH := $(CURDIR)
 
 .DEFAULT_GOAL := help
@@ -50,8 +51,8 @@ test-py: ## Python unit tests: M0 + eval data + worker heartbeat (M0 downloads B
 test-fe: ## Frontend tests (available after FE-1)
 	@cd frontend && if npm run | grep -q " test"; then npm test; else echo "no frontend tests yet (FE-1)"; fi
 
-test-full: ## All suites M0-M6 (needs make stack-up, make migrate, arxivlens download + query on the host)
-	$(PYTEST) -q tests/
+test-full: ## All suites M0-M6 (needs make stack-up, make migrate, arxivlens download + query on the host). TESTS=<paths/node IDs>, PYTEST_ARGS=<extra args>
+	$(PYTEST) -q $(TESTS) $(PYTEST_ARGS)
 
 # --- infra -------------------------------------------------------------------
 infra-up: ## Start Postgres+pgvector, Kafka (+topics), MinIO

@@ -48,12 +48,25 @@ func main() {
 }
 
 func newMigrateCmd() *cobra.Command {
-	var migrationFile string
+	var (
+		migrationDir  string
+		migrationFile string
+	)
 
 	cmd := &cobra.Command{
 		Use:   "migrate",
 		Short: "Apply database migrations to PostgreSQL",
+		Long: "Applies every *.up.sql in --dir in lexical order. With --file, applies only that file.\n" +
+			"Migrations must be idempotent (IF NOT EXISTS): there is no schema-version table.",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			files := []string{migrationFile}
+			if migrationFile == "" {
+				var err error
+				if files, err = db.MigrationFiles(migrationDir); err != nil {
+					return err
+				}
+			}
+
 			ctx := context.Background()
 			database, err := db.Connect(ctx, cfg.PostgresURL)
 			if err != nil {
@@ -61,17 +74,20 @@ func newMigrateCmd() *cobra.Command {
 			}
 			defer database.Close()
 
-			log.Printf("[Migration] Running migration file: %s", migrationFile)
-			if err := database.RunMigrations(ctx, migrationFile); err != nil {
-				return err
+			for _, f := range files {
+				log.Printf("[Migration] Running migration file: %s", f)
+				if err := database.RunMigrations(ctx, f); err != nil {
+					return fmt.Errorf("%s: %w", f, err)
+				}
 			}
 
-			log.Println("[Migration] Database schema migrated successfully!")
+			log.Printf("[Migration] Database schema migrated successfully (%d file(s))", len(files))
 			return nil
 		},
 	}
 
-	cmd.Flags().StringVar(&migrationFile, "file", "migrations/000001_init_schema.up.sql", "Path to migration SQL file")
+	cmd.Flags().StringVar(&migrationDir, "dir", "migrations", "Directory whose *.up.sql files are applied in lexical order")
+	cmd.Flags().StringVar(&migrationFile, "file", "", "Apply only this migration SQL file (overrides --dir)")
 	return cmd
 }
 
@@ -230,7 +246,7 @@ func newQueryCmd() *cobra.Command {
 
 			minioStorage, err := storage.NewStorage(cfg.MinioEndpoint, cfg.MinioAccessKey, cfg.MinioSecretKey, cfg.MinioBucket, cfg.MinioUseSSL)
 			if err == nil {
-				ingester := query.NewPaperIngester(database, minioStorage.Client, cfg.MinioBucket, embedderURL)
+				ingester := query.NewPaperIngester(database, minioStorage.Client, cfg.MinioBucket, embedderURL, cfg.IngestTimeout)
 				server.SetIngester(ingester)
 			} else {
 				log.Printf("[Query] Warning: MinIO storage init failed (%v), on-demand ingester disabled", err)

@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"arxivlens/internal/db"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // RerankPool is the number of RRF candidates reranked when rerank=true (ADR-0010).
@@ -78,33 +80,9 @@ func (s *SearchEngine) HybridSearch(
 	return rerankAndSort(ctx, s.rr, queryString, hits, limit), nil
 }
 
-// fetchCandidates embeds the query and returns the top n hybrid RRF hits in rrf_score order.
-func (s *SearchEngine) fetchCandidates(ctx context.Context, queryString string, categories []string, n int) ([]SearchHit, error) {
-	// 1. Generate query embedding vector
-	vectors, err := s.embedClient.EmbedTexts(ctx, []string{queryString}, true)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get query vector: %w", err)
-	}
-	if len(vectors) == 0 {
-		return nil, fmt.Errorf("no vector returned for query")
-	}
-
-	vec := vectors[0]
-	// Format as PostgreSQL halfvec literal string: "[0.123, -0.456, ...]"
-	var sb strings.Builder
-	sb.WriteString("[")
-	for i, f := range vec {
-		if i > 0 {
-			sb.WriteString(",")
-		}
-		sb.WriteString(fmt.Sprintf("%.6f", f))
-	}
-	sb.WriteString("]")
-	vecStr := sb.String()
-
-	// 2. Hybrid RRF Search SQL Query matching §8
-	querySQL := `
-		WITH vector_hits AS (
+// vectorHitsSQL is the vector arm of hybridSearchSQL ($1 query halfvec, $2 model, $3 categories or NULL).
+// It is a separate constant so the integration test (search_integration_test.go) measures this exact text.
+const vectorHitsSQL = `
 			SELECT pc.id AS chunk_id,
 			       ROW_NUMBER() OVER (ORDER BY ce.embedding <=> $1::halfvec) AS rank
 			FROM chunk_embeddings ce
@@ -114,7 +92,11 @@ func (s *SearchEngine) fetchCandidates(ctx context.Context, queryString string, 
 			  AND ($3::text[] IS NULL OR p.categories && $3)
 			ORDER BY ce.embedding <=> $1::halfvec
 			LIMIT 50
-		),
+`
+
+// hybridSearchSQL is the hybrid RRF query (Technical PRD §8); $4 is the keyword query, $5 the limit.
+const hybridSearchSQL = `
+		WITH vector_hits AS (` + vectorHitsSQL + `		),
 		keyword_hits AS (
 			SELECT pc.id AS chunk_id,
 			       ROW_NUMBER() OVER (ORDER BY ts_rank_cd(pc.content_tsv, q) DESC) AS rank
@@ -138,12 +120,55 @@ func (s *SearchEngine) fetchCandidates(ctx context.Context, queryString string, 
 		LIMIT $5;
 	`
 
+// hnswSearchSettings run with SET LOCAL before hybridSearchSQL (OPS-H5). With pgvector's default
+// hnsw.ef_search=40 the HNSW scan yields at most 40 tuples before the model/category filters, so
+// vector_hits could not fill its 50-row limit. ef_search=100 plus strict_order iterative scan
+// (pgvector >= 0.8.0) keeps scanning until the limit is filled after filtering, in distance order.
+const hnswSearchSettings = `SET LOCAL hnsw.ef_search = 100; SET LOCAL hnsw.iterative_scan = strict_order`
+
+// halfvecLiteral formats vec as a PostgreSQL halfvec literal: "[0.123000,-0.456000,...]".
+func halfvecLiteral(vec []float32) string {
+	var sb strings.Builder
+	sb.WriteString("[")
+	for i, f := range vec {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		sb.WriteString(fmt.Sprintf("%.6f", f))
+	}
+	sb.WriteString("]")
+	return sb.String()
+}
+
+// fetchCandidates embeds the query and returns the top n hybrid RRF hits in rrf_score order.
+func (s *SearchEngine) fetchCandidates(ctx context.Context, queryString string, categories []string, n int) ([]SearchHit, error) {
+	// 1. Generate query embedding vector
+	vectors, err := s.embedClient.EmbedTexts(ctx, []string{queryString}, true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get query vector: %w", err)
+	}
+	if len(vectors) == 0 {
+		return nil, fmt.Errorf("no vector returned for query")
+	}
+
+	vecStr := halfvecLiteral(vectors[0])
+
 	var catArray []string
 	if len(categories) > 0 {
 		catArray = categories
 	}
 
-	rows, err := s.database.Pool.Query(ctx, querySQL, vecStr, s.modelName, catArray, queryString, n)
+	// 2. Hybrid RRF search in a read-only transaction so the HNSW settings stay local to it.
+	tx, err := s.database.Pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, fmt.Errorf("hybrid search begin failed: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, hnswSearchSettings); err != nil {
+		return nil, fmt.Errorf("hybrid search settings failed: %w", err)
+	}
+
+	rows, err := tx.Query(ctx, hybridSearchSQL, vecStr, s.modelName, catArray, queryString, n)
 	if err != nil {
 		return nil, fmt.Errorf("hybrid search query failed: %w", err)
 	}
@@ -156,6 +181,9 @@ func (s *SearchEngine) fetchCandidates(ctx context.Context, queryString string, 
 			return nil, fmt.Errorf("failed to scan search hit: %w", err)
 		}
 		hits = append(hits, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("hybrid search rows failed: %w", err)
 	}
 
 	return hits, nil

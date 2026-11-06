@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"arxivlens/internal/config"
 	"arxivlens/internal/db"
 	"github.com/minio/minio-go/v7"
 )
@@ -37,11 +38,19 @@ type PaperIngester struct {
 	minioBucket string
 	embedderURL string
 	httpClient  *http.Client
+	// ingestClient is used only for the embedder's synchronous /internal/ingest (chunk + embed),
+	// which can take minutes on CPU; arXiv fetches keep httpClient's shorter timeout.
+	ingestClient *http.Client
 }
 
-func NewPaperIngester(database *db.DB, minioClient *minio.Client, minioBucket, embedderURL string) *PaperIngester {
+// NewPaperIngester builds an on-demand ingester. ingestTimeout bounds the /internal/ingest call;
+// zero or negative means config.DefaultIngestTimeout.
+func NewPaperIngester(database *db.DB, minioClient *minio.Client, minioBucket, embedderURL string, ingestTimeout time.Duration) *PaperIngester {
 	if embedderURL == "" {
 		embedderURL = "http://localhost:8081"
+	}
+	if ingestTimeout <= 0 {
+		ingestTimeout = config.DefaultIngestTimeout
 	}
 	return &PaperIngester{
 		database:    database,
@@ -51,6 +60,7 @@ func NewPaperIngester(database *db.DB, minioClient *minio.Client, minioBucket, e
 		httpClient: &http.Client{
 			Timeout: 45 * time.Second,
 		},
+		ingestClient: &http.Client{Timeout: ingestTimeout},
 	}
 }
 
@@ -226,7 +236,7 @@ func (ing *PaperIngester) IngestPaper(ctx context.Context, input string) (*Inges
 	}
 	payloadBytes, _ := json.Marshal(processReqPayload)
 
-	apiResp, err := ing.httpClient.Post(fmt.Sprintf("%s/internal/ingest", ing.embedderURL), "application/json", bytes.NewReader(payloadBytes))
+	apiResp, err := ing.ingestClient.Post(fmt.Sprintf("%s/internal/ingest", ing.embedderURL), "application/json", bytes.NewReader(payloadBytes))
 	if err != nil {
 		return nil, fmt.Errorf("embedder API call failed: %w", err)
 	}
