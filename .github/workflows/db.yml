@@ -65,6 +65,10 @@ jobs:
           $PSQL -At < /tmp/snapshot.sql > /tmp/run2.txt
           diff -u /tmp/run1.txt /tmp/run2.txt
           echo "Schema identical after run 2: $(wc -l < /tmp/run2.txt) objects (extensions, columns, indexes)"
+      - name: "Probe G1: EVAL-5 real-Postgres test (opt-in, needs DATABASE_URL)"
+        run: |
+          python3 -m pip install --quiet "psycopg[binary]" pytest
+          python3 -m pytest -v -rA tests/test_evals_data.py -k real_postgres
       - name: HNSW plan + recall (real search.go SQL)
         run: |
           go vet -tags integration ./internal/query/
