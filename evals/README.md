@@ -40,6 +40,24 @@ Decisions: [ADR-0006](https://github.com/MaheshPulivarthi18/arxivlens-agents/blo
   results record the production rerank path.
 - The baselines (BM25, dense, RRF without rerank) are scored the same way on their top 5 chunks. Dense and RRF only
   use embeddings for the current `EMBEDDING_MODEL`.
+- **Model name: two sources that must match.** The eval reads `EMBEDDING_MODEL` (`services/common/config.py`,
+  default `BAAI/bge-base-en-v1.5`) and records it as `embedding_model` in the results JSON. The Go query service
+  takes its model from its `--model` flag. If they differ, the eval scores different vectors than production
+  serves. The eval compares `EMBEDDING_MODEL` with the query service's model: `--query-model` /
+  `ARXIVLENS_QUERY_MODEL` if you started the service with `--model`, otherwise the `--model` default read from
+  `cmd/arxivlens/main.go`. It records that value as `query_model` and prints a warning when the two differ; the
+  warning does not fail the gate. A unit test fails if the Go `--model` default and the `EMBEDDING_MODEL` default
+  in `config.py` drift apart.
+- **Partly embedded papers are reported, not gated.** For every relevant paper the results JSON records
+  `chunk_coverage[arxiv_id] = {embedded_chunks, total_chunks}` for the current model, and the run prints a warning
+  for each paper with `embedded_chunks < total_chunks`. Such a paper still counts as indexed (making it fail the
+  gate needs an ADR).
+- The SQL parity test in `tests/test_evals_data.py` compares the RRF pool query with `internal/query/search.go`
+  (whole normalised query, explicit list of allowed differences, `RerankPool` = pool size) and fails if that file
+  is missing. It rebuilds the production query from the Go string constants (`hybridSearchSQL` with
+  `vectorHitsSQL` spliced in), so comments are ignored. The eval also runs production's `hnswSearchSettings`
+  (`hnsw.ef_search = 100`, `iterative_scan = strict_order`, pgvector >= 0.8.0) right before the pool query and
+  resets them after it; the test checks the settings text matches too.
 
 Coverage is checked per arXiv ID. A paper counts as indexed only if it has chunks **with embeddings for the current
 model** (`chunk_embeddings.model`). A case is skipped unless every one of its `relevant_arxiv_ids` is indexed,
