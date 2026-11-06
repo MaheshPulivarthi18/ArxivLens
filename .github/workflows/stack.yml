@@ -36,6 +36,7 @@ jobs:
       F1_TESTS: >-
         tests/test_m3_query.py::test_rag_ask_with_groundedness_support
         tests/test_m3_query.py::test_rag_early_refusal_on_unrelated_query
+        tests/test_m3_query.py::test_hybrid_search_with_rrf_and_rerank
       PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
     steps:
       - uses: actions/checkout@v4
