@@ -1,9 +1,15 @@
 package config
 
 import (
+	"log"
 	"os"
 	"strings"
+	"time"
 )
+
+// DefaultIngestTimeout bounds the synchronous chunk+embed call that on-demand ingest makes to the
+// embedder's /internal/ingest. On a CPU-only host a ~60-chunk paper takes ~50 s, so 45 s was too short.
+const DefaultIngestTimeout = 5 * time.Minute
 
 type Config struct {
 	PostgresURL    string
@@ -13,6 +19,7 @@ type Config struct {
 	MinioSecretKey string
 	MinioBucket    string
 	MinioUseSSL    bool
+	IngestTimeout  time.Duration
 }
 
 func LoadConfig() *Config {
@@ -34,6 +41,7 @@ func LoadConfig() *Config {
 		MinioSecretKey: minioSecretKey,
 		MinioBucket:    minioBucket,
 		MinioUseSSL:    minioUseSSL,
+		IngestTimeout:  parseDuration("INGEST_TIMEOUT", os.Getenv("INGEST_TIMEOUT"), DefaultIngestTimeout),
 	}
 }
 
@@ -42,4 +50,18 @@ func getEnv(key, defaultVal string) string {
 		return val
 	}
 	return defaultVal
+}
+
+// parseDuration parses a Go duration such as "5m" or "90s". Empty, invalid or non-positive values
+// fall back to def (invalid ones are logged so a typo doesn't go unnoticed).
+func parseDuration(key, val string, def time.Duration) time.Duration {
+	if val == "" {
+		return def
+	}
+	d, err := time.ParseDuration(val)
+	if err != nil || d <= 0 {
+		log.Printf("[Config] Ignoring %s=%q (want a positive Go duration such as 5m), using %s", key, val, def)
+		return def
+	}
+	return d
 }

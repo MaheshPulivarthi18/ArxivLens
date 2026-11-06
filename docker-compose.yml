@@ -1,5 +1,36 @@
 version: '3.8'
 
+# Python workers (profile "workers"): plain `docker compose up -d` starts infra only;
+# `make stack-up` (= `docker compose --profile workers up -d --build` + health wait) starts everything.
+x-worker: &worker
+  profiles: [workers]
+  restart: unless-stopped
+  environment:
+    DATABASE_URL: postgresql://postgres:postgres@postgres:5432/arxivlens
+    KAFKA_BROKERS: kafka:9092
+    MINIO_ENDPOINT: minio:9000
+    HF_HOME: /root/.cache/huggingface
+    WORKER_HEARTBEAT_FILE: /run/arxivlens/heartbeat
+  tmpfs:
+    - /run/arxivlens # empty again on every container (re)start, so an old heartbeat never survives a restart
+  volumes:
+    # Named volume by default (models download once); set ARXIVLENS_HF_CACHE to an absolute host path to bind-mount it.
+    - ${ARXIVLENS_HF_CACHE:-hf_cache}:/root/.cache/huggingface
+
+x-worker-build-args: &worker_build_args
+  TORCH_INDEX_URL: ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
+
+# Worker healthcheck: the worker in THIS container touches $WORKER_HEARTBEAT_FILE after every poll while its consumer
+# holds partitions (services/common/kafka_client.py), so a host-run worker or another replica in the same group can't
+# make it pass. Fresh = younger than max.poll.interval.ms (300 s), after which Kafka evicts the member anyway.
+# (A Kafka-side membership check was tried: describe_consumer_groups never returns against this broker, 10 s timeout.)
+x-heartbeat-check: &heartbeat_check |
+  import os, sys, time
+  f = os.environ["WORKER_HEARTBEAT_FILE"]
+  age = time.time() - os.path.getmtime(f) if os.path.exists(f) else None
+  print(f"heartbeat={f} age_s={age}")
+  sys.exit(0 if age is not None and age < 300 else 1)
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -60,7 +91,7 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
-    entrypoint: [ "/bin/sh", "-c" ]
+    entrypoint: ["/bin/sh", "-c"]
     command: |
       "
       echo 'Waiting for Kafka to be ready...'
@@ -75,8 +106,18 @@ services:
       /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
       "
 
+  # Chainguard's MinIO image runs as UID/GID 65532. Prepare the named data volume before starting the server.
+  minio-data-init:
+    image: busybox:1.37
+    container_name: arxivlens-minio-data-init
+    user: "0:0"
+    volumes:
+      - minio_data:/data
+    command: ["sh", "-c", "chown -R 65532:65532 /data"]
+    restart: "no"
+
   minio:
-    image: minio/minio:latest
+    image: cgr.dev/chainguard/minio:latest@sha256:3c60a2a8c4d33409a9bc7a623a7fcbfb4605adc3d89422d2f53b3f673a6e5597
     container_name: arxivlens-minio
     ports:
       - "9000:9000"
@@ -87,6 +128,9 @@ services:
     command: server /data --console-address ":9001"
     volumes:
       - minio_data:/data
+    depends_on:
+      minio-data-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
       interval: 5s
@@ -94,21 +138,88 @@ services:
       retries: 5
 
   minio-init:
-    image: minio/mc:latest
+    image: cgr.dev/chainguard/minio-client:latest-dev@sha256:39768db4c3fa811bc8f2e2a3e0add8ea391648b1c980de179985e1c353dc1805
     container_name: arxivlens-minio-init
     depends_on:
       minio:
         condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      /usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin;
-      /usr/bin/mc mb --ignore-existing myminio/arxiv-papers;
-      /usr/bin/mc anonymous set download myminio/arxiv-papers;
-      echo 'MinIO bucket arxiv-papers ready';
-      exit 0;
-      "
+    environment:
+      MC_CONFIG_DIR: /tmp/mc
+    # Override the image's default `mc` entrypoint and pass the script as one
+    # argument to sh -ec (the image's default entrypoint otherwise prints mc help).
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        mc alias set myminio http://minio:9000 minioadmin minioadmin
+        mc mb --ignore-existing myminio/arxiv-papers
+        mc anonymous set download myminio/arxiv-papers
+        echo "MinIO bucket arxiv-papers ready"
+
+  embedder-api:
+    <<: *worker
+    build:
+      context: .
+      dockerfile: services/embedder/Dockerfile
+      args: *worker_build_args
+    container_name: arxivlens-embedder-api
+    command: ["python", "services/embedder/api.py"]
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      # /healthz answers once the startup hook has loaded BGE; also require the cross-encoder (M3 and evals need it).
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS http://localhost:8081/healthz |
+          grep -q '"reranker":true'
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 600s # cold start downloads ~1.5 GB of models into the HF cache
+
+  processor:
+    <<: *worker
+    build:
+      context: .
+      dockerfile: services/processor/Dockerfile
+      args: *worker_build_args
+    container_name: arxivlens-processor
+    depends_on:
+      embedder-api:
+        condition: service_healthy # models are in the HF cache before the workers load them
+    healthcheck:
+      test: ["CMD", "python", "-c", *heartbeat_check]
+      interval: 10s
+      timeout: 15s
+      retries: 6
+      start_period: 300s
+
+  embedder-worker:
+    <<: *worker
+    build:
+      context: .
+      dockerfile: services/embedder/Dockerfile
+      args: *worker_build_args
+    container_name: arxivlens-embedder-worker
+    depends_on:
+      embedder-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", *heartbeat_check]
+      interval: 10s
+      timeout: 15s
+      retries: 6
+      start_period: 300s
 
 volumes:
   postgres_data:
   kafka_data:
   minio_data:
+  hf_cache:

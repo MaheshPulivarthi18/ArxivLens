@@ -246,7 +246,7 @@ func newQueryCmd() *cobra.Command {
 
 			minioStorage, err := storage.NewStorage(cfg.MinioEndpoint, cfg.MinioAccessKey, cfg.MinioSecretKey, cfg.MinioBucket, cfg.MinioUseSSL)
 			if err == nil {
-				ingester := query.NewPaperIngester(database, minioStorage.Client, cfg.MinioBucket, embedderURL)
+				ingester := query.NewPaperIngester(database, minioStorage.Client, cfg.MinioBucket, embedderURL, cfg.IngestTimeout)
 				server.SetIngester(ingester)
 			} else {
 				log.Printf("[Query] Warning: MinIO storage init failed (%v), on-demand ingester disabled", err)

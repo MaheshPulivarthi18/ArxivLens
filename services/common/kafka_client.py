@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import time
 import traceback
 from datetime import datetime, timezone
@@ -139,12 +140,26 @@ class ServiceKafkaConsumer:
             "max.poll.interval.ms": 300000,
         })
         self.consumer.subscribe(self.topics)
+        # Worker-local health signal (compose healthcheck): touched after every poll while this consumer holds
+        # partitions. A stale file left by an earlier run of this container is removed first. Unset: no file.
+        self.heartbeat_file = os.environ.get("WORKER_HEARTBEAT_FILE")
+        if self.heartbeat_file and os.path.exists(self.heartbeat_file):
+            os.remove(self.heartbeat_file)
+
+    def _heartbeat(self) -> None:
+        if self.heartbeat_file and self.consumer.assignment():
+            try:
+                with open(self.heartbeat_file, "a"):
+                    os.utime(self.heartbeat_file)
+            except OSError as e:  # never let the health signal stop consumption
+                logger.warning(f"heartbeat {self.heartbeat_file}: {e}")
 
     def start(self, handler: Callable[[EventEnvelope, Message], None]) -> None:
         logger.info(f"Starting consumer group={self.group_id} topics={self.topics}")
         try:
             while True:
                 msg = self.consumer.poll(timeout=1.0)
+                self._heartbeat()
                 if msg is None:
                     continue
                 if msg.error():
