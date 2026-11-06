@@ -203,7 +203,8 @@ jobs:
         run: |
           sudo chown -R "$(id -u):$(id -g)" "$ARXIVLENS_HF_CACHE"
           set +e
-          make test-full PYTEST_ARGS="$(printf -- '--deselect %s ' $F1_TESTS)" 2>&1 | tee test-full.log
+          read -ra f1 <<< "$F1_TESTS"
+          make test-full PYTEST_ARGS="$(printf -- '--deselect %s ' "${f1[@]}")" 2>&1 | tee test-full.log
           rc=${PIPESTATUS[0]}
           {
             echo "### AC4 \`make test-full\` (exit $rc; F1 deselected: $F1_TESTS)"; echo '```'
