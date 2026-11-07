@@ -48,6 +48,7 @@ func TestConfigFromEnv(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg, err := ConfigFromEnv(envOf(tt.env))
+			checkFromEnv(t, tt.env, tt.want, err)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("want error, got cfg=%v", cfg)
@@ -82,19 +83,52 @@ func TestConfigFromEnv(t *testing.T) {
 	}
 }
 
+// checkFromEnv asserts FromEnv agrees with ConfigFromEnv: the same error,
+// an untyped nil Provider when disabled, else a *Client with the same config.
+func checkFromEnv(t *testing.T, env map[string]string, want *Config, cfgErr error) {
+	t.Helper()
+	p, err := FromEnv(envOf(env))
+	switch {
+	case cfgErr != nil:
+		if err == nil || err.Error() != cfgErr.Error() || p != nil {
+			t.Fatalf("FromEnv = %v, %v; want nil and the ConfigFromEnv error %q", p, err, cfgErr)
+		}
+	case want == nil:
+		if err != nil || p != nil { // p != nil is also true for a typed nil *Client
+			t.Fatalf("FromEnv = %#v, %v; want untyped nil, nil", p, err)
+		}
+	default:
+		c, ok := p.(*Client)
+		if err != nil || !ok || c == nil {
+			t.Fatalf("FromEnv = %T %v, %v; want *Client", p, p, err)
+		}
+		if c.cfg.BaseURL != want.BaseURL || c.cfg.Model != want.Model || c.cfg.Timeout != want.Timeout || c.cfg.MaxTokens != want.MaxTokens {
+			t.Fatalf("FromEnv client config %v, want %v", c.cfg, want)
+		}
+		if c.endpoint != want.BaseURL+"/chat/completions" || c.Name() != "openai-compatible" {
+			t.Fatalf("endpoint %q name %q", c.endpoint, c.Name())
+		}
+	}
+}
+
 func TestConfigRedactsKey(t *testing.T) {
 	const key = "sk-SENTINEL-KEY-config"
 	cfg, err := ConfigFromEnv(envOf(map[string]string{"LLM_MODEL": "m", "LLM_API_KEY": key}))
 	if err != nil || cfg == nil {
 		t.Fatalf("ConfigFromEnv: %v %v", cfg, err)
 	}
+	client, err := New(*cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	type holder struct{ cfg Config } // unexported field: fmt can't call methods on it
+	type clientHolder struct{ c *Client }
 	js, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	outs := []string{string(js)}
-	for _, v := range []any{*cfg, cfg, holder{*cfg}, &holder{*cfg}, cfg.APIKey} {
+	for _, v := range []any{*cfg, cfg, holder{*cfg}, &holder{*cfg}, cfg.APIKey, client, *client, clientHolder{client}, &clientHolder{client}} {
 		for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
 			outs = append(outs, fmt.Sprintf(verb, v))
 		}
@@ -103,6 +137,9 @@ func TestConfigRedactsKey(t *testing.T) {
 		if strings.Contains(out, key) {
 			t.Fatalf("key leaked in %q", out)
 		}
+	}
+	if !strings.Contains(client.String(), "[REDACTED]") || client.cfg.APIKey.reveal() != key {
+		t.Fatalf("client String() = %q", client)
 	}
 	if !strings.Contains(cfg.String(), "[REDACTED]") || !strings.Contains(string(js), "[REDACTED]") {
 		t.Fatalf("want [REDACTED] marker, got %s / %s", cfg, js)
