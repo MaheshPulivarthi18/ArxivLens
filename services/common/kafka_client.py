@@ -227,17 +227,14 @@ class ServiceKafkaConsumer:
                 if not success and last_err:
                     # Route to DLQ (§6 Tier 2)
                     dlq_topic = f"{msg.topic()}.dlq"
-                    try:
-                        self.producer.publish_dlq(
-                            dlq_topic=dlq_topic,
-                            original_msg=msg,
-                            error=last_err,
-                            consumer_group=self.group_id,
-                            attempts=max_attempts,
-                            traceparent=traceparent,
-                        )
-                    except DeliveryError:
-                        pass
+                    self.producer.publish_dlq(
+                        dlq_topic=dlq_topic,
+                        original_msg=msg,
+                        error=last_err,
+                        consumer_group=self.group_id,
+                        attempts=max_attempts,
+                        traceparent=traceparent,
+                    )
 
                 # Commit offset only after DB transaction or DLQ routing succeeds (§4 Layer 4)
                 self.consumer.commit(message=msg, asynchronous=False)
