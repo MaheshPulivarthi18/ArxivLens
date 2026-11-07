@@ -79,8 +79,23 @@ def snapshot(sections: list, chunks: list) -> dict:
     }
 
 
-# Captured from unchanged production code (origin/main 2b71772) by this test's first CI run.
-EXPECTED_SNAPSHOT = None
+# Captured from unchanged production code (origin/main 2b71772) by this test's first CI run (PR #33, job 128531883258).
+EXPECTED_SNAPSHOT = {
+    "sections": [
+        ["Introduction", 1, 1, "227bcbef6f8d15f72844a640b25b9e2361e7a66b9ea6bad575c12bab42321594"],
+        ["Method", 1, 3, "8486fd03f7cf49792dea428aaecda90adda5a006eec30a405585f140222af85d"],
+    ],
+    "chunks": [
+        [0, 496, "251c278fd8c2b31e00bf9aa325a8e89d9b4afb5834586de24968c50fde4c148c",
+         "251c278fd8c2b31e00bf9aa325a8e89d9b4afb5834586de24968c50fde4c148c"],
+        [1, 496, "887aa4ea0b55e20f95309df70682b5d719ae09724ca2ba6f510213a520b95038",
+         "887aa4ea0b55e20f95309df70682b5d719ae09724ca2ba6f510213a520b95038"],
+        [2, 223, "117aad44689c7e7e194c9180e8e5038a6927aef911ecd63142f103550c54144e",
+         "117aad44689c7e7e194c9180e8e5038a6927aef911ecd63142f103550c54144e"],
+        [3, 105, "603d110ff9ca035b88e6d18b6d83f634ff69fabe69a97702926f4321ffae7983",
+         "603d110ff9ca035b88e6d18b6d83f634ff69fabe69a97702926f4321ffae7983"],
+    ],
+}
 
 
 @pytest.fixture(scope="module")
