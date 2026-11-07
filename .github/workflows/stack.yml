@@ -153,7 +153,8 @@ jobs:
 
       - name: "AC3: crawl 2 papers (before the downloader starts)"
         timeout-minutes: 2
-        run: ./bin/arxivlens crawl --query "cat:cs.LG" --limit 2
+        run: |
+          echo "::error::OPS-H10 AC3 scratch: forced failure before the host services start"; exit 1
 
       - name: Start Go downloader and query service on the host
         timeout-minutes: 2
