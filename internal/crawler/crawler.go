@@ -195,8 +195,9 @@ func parseAtomFeed(body []byte) ([]db.PaperRecord, error) {
 	for _, entry := range feed.Entries {
 		// Extract arXiv ID and version (e.g., from http://arxiv.org/abs/2401.12345v2)
 		arxivID, version, versioned := arxiv.SplitVersion(entry.ID)
-		// An entry without a version keeps the unversioned URL: the version is unknown, and the
-		// stored 1 is only a default.
+		// An entry without a version is stored as version 1, and the downloader fetches v1
+		// explicitly. Its source_url stays unversioned on purpose: the feed didn't say which
+		// version it listed, so the row stays visible to the suspect-rows query.
 		pdfURL := fmt.Sprintf("https://arxiv.org/pdf/%s.pdf", arxivID)
 		if versioned {
 			pdfURL = arxiv.PDFURL(arxivID, version)
