@@ -978,20 +978,20 @@ def test_print_table_shows_report_only_block(capsys):
 
 # --- EVAL-7: blind human review (synthetic fixtures only; agents never write real judgments) ---
 
+XC = {"arxiv_id": "1810.04805", "chunk_id": 21, "marker": 1, "supported": True, "score": 0.77}
+A1 = [{"arxiv_id": "1706.03762", "chunk_id": 11, "marker": 1, "supported": True, "score": 0.83},
+      {"arxiv_id": "1706.03762", "chunk_id": 12, "marker": 2, "supported": False, "score": 0.41}]
 REVIEW_RESULTS = {"timestamp": "run1", "answers": {"cases": [
-    {"id": "a001", "set": "answer", "outcome": "answered", "citations": [
-        {"arxiv_id": "1706.03762", "chunk_id": 11, "marker": 1, "supported": True, "score": 0.83},
-        {"arxiv_id": "1706.03762", "chunk_id": 12, "marker": 2, "supported": False, "score": 0.41}]},
+    {"id": "a001", "set": "answer", "outcome": "answered", "citations": A1},
     {"id": "a002", "set": "answer", "outcome": "refusal", "citations": []},
-    {"id": "x001", "set": "refusal", "outcome": "answered", "citations": [
-        {"arxiv_id": "1810.04805", "chunk_id": 21, "marker": 1, "supported": True, "score": 0.77}]}]}}
+] + [{"id": x, "set": "refusal", "outcome": "answered", "citations": [XC]} for x in ("x001", "x002", "x003", "x004")]}}
 REVIEW_RESP = {
     "a001": {"answer": "Alpha mixes heads [1]. Gamma holds [1][2][9]. Uncited line.", "citations": [
-        {"marker": 1, "chunk_id": 11, "arxiv_id": "1706.03762", "content": "PASSAGE-ONE body", "score": 0.83,
-         "supported": True, "status": "supported"},
-        {"marker": 2, "chunk_id": 12, "arxiv_id": "1706.03762", "content": "PASSAGE-TWO body", "score": 0.41,
-         "supported": False, "status": "unsupported"}]},
-    "x001": {"answer": "Drifted [1].", "citations": [{"marker": 1, "chunk_id": 99, "content": "other"}]},
+        dict(c, content=f"PASSAGE-{n} body", status="unsupported") for n, c in zip(("ONE", "TWO"), A1)]},
+    "x001": {"answer": "Drifted [1].", "citations": [dict(XC, chunk_id=99, content="other")]},
+    "x002": {"answer": "New text, same pair [1].", "citations": [dict(XC, score=0.22, content="p")]},
+    "x004": {"answer": "New text, same pair [1].", "citations": [dict(XC, supported=False, content="p")]},
+    "x003": {"answer": "Refused [1].", "refusal_reason": "all_citations_unsupported", "citations": [dict(XC)]},
 }
 
 
@@ -1008,10 +1008,10 @@ def _review_export(monkeypatch, tmp_path):
 
 def test_review_export_one_row_per_claim_citation_and_blind(monkeypatch, tmp_path, capsys):
     _, rows, sheet = _review_export(monkeypatch, tmp_path)
-    # a001: u0 cites [1]; u1 cites [1][2] ([9] is out of range); u2 is uncited. a002 refused; x001 drifted.
+    # a001: u0 [1]; u1 [1][2] ([9] out of range); u2 uncited. a002 not re-asked. x001-4 drift
     assert [r["row_id"] for r in rows] == ["a001:u0:m1", "a001:u1:m1", "a001:u1:m2"]
     assert [r["chunk_id"] for r in rows] == [11, 11, 12]
-    assert "x001" in capsys.readouterr().out
+    assert capsys.readouterr().out.endswith("drifted cases skipped: x001, x002, x003, x004\n")
     assert "PASSAGE-ONE body" in sheet and "PASSAGE-TWO body" in sheet and "Gamma holds" in sheet
     assert not [h for h in ("score", "supported", "status", "0.83", "0.41") if h in sheet.lower()]
     for r in rows:  # the file the reviewer fills: IDs + empty labels, no text, no system verdict
@@ -1056,7 +1056,9 @@ def test_review_score_known_numbers_and_unjudged_excluded():
     ({"supports": "maybe"}, False), ({"supports": "Yes"}, False), ({"claim_correct": "true"}, False),
     ({"claim": "Alpha mixes heads"}, False), ({"passage": "PASSAGE-ONE"}, False), ({"answer": "x"}, False),
     ({"notes": "fine"}, True), ({"reviewer": None}, False), ({"date": "07/11/2026"}, False),
-    ({"marker": True}, False), ({"case_id": "a" * 65}, False), ({"reviewer": "r" * 65}, False)])
+    ({"marker": True}, False), ({"case_id": "a" * 65}, False), ({"reviewer": "r" * 65}, False),
+    ({"arxiv_id": "attention is all you need"}, True), ({"run_id": "run 1"}, True), ({"row_id": "a001:u0:m1 x"}, True),
+    ({"row_id": "a001:u1:m1"}, True), ({"case_id": "a 1", "row_id": "a 1:u0:m1"}, True)])
 def test_review_validator_rejects_bad_labels_and_text_fields(change, committed):
     row = dict(REVIEW_ROWS[0], supports="yes", claim_correct="yes", reviewer="tester", date="2026-11-07")
     assert not answer_review.validate_judgment(row)
@@ -1092,6 +1094,8 @@ def test_review_round_trip_export_score_save(monkeypatch, tmp_path, capsys):
     assert m["confusion_matrix"]["yes"]["true"] == 1 and m["confusion_matrix"]["no"]["true"] == 1
     saved = answer_review.load_judgments(str(committed / "run1.jsonl"), committed=True)
     assert len(saved) == 3 and all("notes" not in s for s in saved)
+    argv = ["score", "--judgments", str(j), "--save", str(committed)]
+    assert answer_review.main(argv) == 2 and answer_review.main(argv + ["--force"]) == 0  # no silent overwrite
     assert "Citation precision" in capsys.readouterr().out
 
 
@@ -1101,6 +1105,5 @@ def test_review_committed_judgments_hold_ids_and_labels_only():
     for name in files:
         rows = answer_review.load_judgments(os.path.join(d, name), committed=True)  # raises on text keys
         assert {r["run_id"] for r in rows} == {name[:-len(".jsonl")]}, name
-        assert all(len(v) <= 64 for r in rows for v in r.values() if isinstance(v, str)), name
     other = [f for f in (os.listdir(d) if os.path.isdir(d) else []) if not f.endswith(".jsonl") and f != ".gitkeep"]
     assert not other, f"only <run-id>.jsonl judgments belong in evals/answer_judgments/: {other}"

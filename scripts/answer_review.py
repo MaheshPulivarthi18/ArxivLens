@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 """
 ArxivLens: blind human review of /v1/ask answers (EVAL-7). Report-only, never gated. Usage: evals/README.md.
-
-  export : one row per (claim or sentence, cited passage) for each answered case of an eval results JSON. Results
-           hold no text, so the question is re-asked for the claim text (cases whose (marker, chunk_id) pairs differ
-           are skipped as drift); passage text by chunk_id from that response or Postgres (--db-url). Writes a
-           Markdown sheet (no score/supported/status) and an IDs-only judgments JSONL for the reviewer to fill.
-  score  : citation precision, partial/contradiction rates, claim correctness, judged/unjudged counts and (with
-           --results) human `supports` x system `supported`. --save writes the committable IDs + labels copy.
-Labels are filled by a human, never by an agent. Stdlib only (psycopg only for --db-url).
+export: per answered case of a results JSON, one row per (claim, cited passage). Results hold no text, so each case is
+  re-asked; a case whose (marker, chunk_id, score, supported) fingerprint differs is skipped as drift. Writes a blind
+  Markdown sheet (no score/supported/status) and an IDs-only judgments JSONL. score: precision, rates, claim
+  correctness, judged counts, human x system matrix (--results); --save writes the committable copy. Humans label.
 """
 
 import argparse
@@ -21,14 +17,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts import evaluate_answers as ea  # noqa: E402
 
-RESULTS_DIR = os.path.join(ea.EVALS_DIR, "results")
 SUPPORTS = ("yes", "partial", "no", "contradicts")
 CLAIM_CORRECT = ("yes", "no", "unsure")
 ID_KEYS = ("run_id", "row_id", "case_id", "unit", "marker", "chunk_id", "arxiv_id")
 LABEL_KEYS = ("supports", "claim_correct", "reviewer", "date")
-COMMITTED_KEYS = set(ID_KEYS + LABEL_KEYS)
-LOCAL_KEYS = COMMITTED_KEYS | {"notes"}
-DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+COMMITTED_KEYS, LOCAL_KEYS = set(ID_KEYS + LABEL_KEYS), set(ID_KEYS + LABEL_KEYS + ("notes",))
+DATE, ARXIV, RUN_ID = re.compile(r"^\d{4}-\d{2}-\d{2}$"), re.compile(r"^\d{4}\.\d{4,5}$"), re.compile(r"^[\w.-]+$")
 CASE_FILES = ("answer.jsonl", "refusal.jsonl", "refusal_near_miss.jsonl")
 
 
@@ -59,13 +53,13 @@ def build_rows(run_id: str, results: Dict[str, Any], questions: Dict[str, str], 
             continue
         cid = case["id"]
         resp = ask(questions[cid])[0] if cid in questions else None  # unknown id: the case set changed
-        want = sorted((c["marker"], c["chunk_id"]) for c in case.get("citations") or [])
-        got = sorted((c.get("marker"), c.get("chunk_id")) for c in (resp or {}).get("citations") or [])
-        if ea.classify(resp) != "answered" or want != got:
+        want, got = [sorted((c.get("marker"), c.get("chunk_id"), round(c.get("score") or 0, 3), c.get("supported"))
+                            for c in cs or []) for cs in (case.get("citations"), (resp or {}).get("citations"))]
+        if ea.classify(resp) != "answered" or want != got:  # fingerprint: same pairs, scores and verdicts
             drift.append(cid)
             continue
         by_marker = {c["marker"]: c for c in resp["citations"]}
-        passages = (fetch_passages([c for _, c in want]) if fetch_passages
+        passages = (fetch_passages([c[1] for c in want]) if fetch_passages
                     else {c["chunk_id"]: c.get("content") or "" for c in resp["citations"]})
         for u, (text, marks) in enumerate(units(resp)):
             for m in marks:
@@ -75,10 +69,6 @@ def build_rows(run_id: str, results: Dict[str, Any], questions: Dict[str, str], 
                              "question": questions[cid], "claim": text,
                              "passage": passages.get(c["chunk_id"], "")})
     return rows, drift
-
-
-def blank_judgment(row: Dict[str, Any]) -> Dict[str, Any]:
-    return {**{k: row[k] for k in ID_KEYS}, **dict.fromkeys(LABEL_KEYS), "notes": ""}
 
 
 def write_sheet(rows: List[Dict[str, Any]], path: str) -> None:
@@ -108,6 +98,11 @@ def validate_judgment(row: Any, committed: bool = False) -> List[str]:
     for k in ("run_id", "row_id", "case_id", "arxiv_id"):
         if not isinstance(row.get(k), str) or len(row[k]) > 64:
             errs.append(f"{k} must be a short string")
+    if committed:  # IDs only: no free text hidden in an ID field
+        errs += [f"bad {k} shape" for k, ok in (("arxiv_id", ARXIV), ("run_id", RUN_ID), ("case_id", RUN_ID))
+                 if not isinstance(row.get(k), str) or not ok.match(row[k])]
+        if row.get("row_id") != f"{row.get('case_id')}:u{row.get('unit')}:m{row.get('marker')}":
+            errs.append("row_id must be <case_id>:u<unit>:m<marker>")
     for k in ("unit", "marker", "chunk_id"):
         if not isinstance(row.get(k), int) or isinstance(row.get(k), bool):
             errs.append(f"{k} must be an integer")
@@ -164,8 +159,7 @@ def score(judgments: List[Dict[str, Any]], results: Optional[Dict[str, Any]] = N
 
 
 def print_score(m: Dict[str, Any]) -> None:
-    def pct(v):
-        return "n/a" if v is None else f"{v:.2%}"
+    pct = lambda v: "n/a" if v is None else f"{v:.2%}"  # noqa: E731
     print(f"Rows judged / unjudged : {m['rows_judged']} / {m['rows_unjudged']}\n"
           f"Citation precision     : {pct(m['citation_precision'])}  (supports=yes / judged)\n"
           f"Partial / contradicts  : {pct(m['partial_rate'])} / {pct(m['contradiction_rate'])}\n"
@@ -194,14 +188,15 @@ def main(argv=None) -> int:
     e.add_argument("--results", required=True, help="evals/results/<run>.json (eval_gate or evaluate_answers)")
     e.add_argument("--api-url", default=ea.DEFAULT_API, help="Query service, re-asked for claim text")
     e.add_argument("--db-url", help="Fetch passage text by chunk_id from Postgres instead of the response")
-    e.add_argument("--out-dir", default=RESULTS_DIR)
+    e.add_argument("--out-dir", default=os.path.join(ea.EVALS_DIR, "results"))
     e.add_argument("--timeout", type=float, default=30.0)
-    e.add_argument("--force", action="store_true", help="Overwrite an existing judgments file")
     s = sub.add_parser("score", help="Score a judgments JSONL")
     s.add_argument("--judgments", required=True)
     s.add_argument("--results", help="Results JSON of the same run, for the confusion matrix")
     s.add_argument("--save", help="Write the committable copy (IDs + labels, no notes), e.g. evals/answer_judgments/")
     s.add_argument("--json-out")
+    for sp in (e, s):
+        sp.add_argument("--force", action="store_true", help="Overwrite an existing judgments file")
     args = p.parse_args(argv)
 
     if args.cmd == "export":
@@ -217,7 +212,7 @@ def main(argv=None) -> int:
         os.makedirs(args.out_dir, exist_ok=True)
         write_sheet(rows, os.path.join(args.out_dir, f"{run_id}.review.md"))
         with open(jpath, "w", encoding="utf-8") as f:
-            f.writelines(json.dumps(blank_judgment(r)) + "\n" for r in rows)
+            f.writelines(json.dumps(dict({k: r.get(k) for k in ID_KEYS + LABEL_KEYS}, notes="")) + "\n" for r in rows)
         print(f"{len(rows)} rows -> {jpath}; drifted cases skipped: {', '.join(drift) or 'none'}")
         return 0
 
@@ -229,6 +224,9 @@ def main(argv=None) -> int:
         if len(run_ids) != 1:
             raise ValueError(f"--save needs exactly one run_id, got {run_ids}")
         path = os.path.join(args.save, f"{run_ids[0]}.jsonl") if os.path.isdir(args.save) else args.save
+        if os.path.exists(path) and not args.force:
+            print(f"{path} exists (another reviewer's labels?); use --force to overwrite", file=sys.stderr)
+            return 2
         with open(path, "w", encoding="utf-8") as f:
             f.writelines(json.dumps({k: j.get(k) for k in ID_KEYS + LABEL_KEYS}) + "\n" for j in judgments)
         load_judgments(path, committed=True)
