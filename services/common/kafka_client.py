@@ -1,9 +1,7 @@
-import itertools
 import json
 import logging
 import os
-import signal
-import threading
+import time
 import traceback
 from datetime import datetime, timezone
 from typing import Callable, Dict, Any, List, Optional
@@ -101,10 +99,8 @@ class ServiceKafkaProducer:
             try:
                 orig_val = json.loads(original_msg.value().decode("utf-8"))
             except Exception:
-                orig_val = None
-            if not isinstance(orig_val, dict):  # DLQPayload.original_value is a dict
                 orig_val = {"raw_value": str(original_msg.value())}
-            key_str = original_msg.key().decode("utf-8", errors="replace") if original_msg.key() else "unknown"
+            key_str = original_msg.key().decode("utf-8") if original_msg.key() else "unknown"
             orig_topic = original_msg.topic()
             orig_partition = original_msg.partition()
             orig_offset = original_msg.offset()
@@ -160,11 +156,6 @@ class ServiceKafkaConsumer:
         self.topics = topics
         self.brokers = brokers or config.kafka_brokers
         self.producer = producer if producer is not None else ServiceKafkaProducer(self.brokers)
-        # Stop flag (OPS-H8): set by stop() or SIGTERM/SIGINT; every wait is interruptible through it.
-        self._stop = threading.Event()
-        self._wait = self._stop.wait  # returns True once stop is requested
-        self._handler_backoff = lambda attempt: 0.1 * 2**attempt  # 0.2 s, 0.4 s
-        self._dlq_backoff = lambda rnd: min(1 << (rnd - 1), 30)  # 1, 2, 4 ... 30 s
 
         # §6 Rebalance Trap Fix: max.poll.records=1, enable.auto.commit=False
         self.consumer = consumer if consumer is not None else Consumer({
@@ -189,23 +180,10 @@ class ServiceKafkaConsumer:
             except OSError as e:  # never let the health signal stop consumption
                 logger.warning(f"heartbeat {self.heartbeat_file}: {e}")
 
-    def stop(self) -> None:
-        self._stop.set()
-
-    def _on_signal(self, signum, frame) -> None:
-        if self._stop.is_set():
-            raise KeyboardInterrupt  # second signal: force stop (nothing in flight is committed)
-        logger.info(f"Signal {signum}: stopping after the current record")
-        self.stop()
-
     def start(self, handler: Callable[[EventEnvelope, Message], None]) -> None:
         logger.info(f"Starting consumer group={self.group_id} topics={self.topics}")
-        saved = {}
-        if threading.current_thread() is threading.main_thread():
-            for sig in (signal.SIGTERM, signal.SIGINT):
-                saved[sig] = signal.signal(sig, self._on_signal)
         try:
-            while not self._stop.is_set():
+            while True:
                 msg = self.consumer.poll(timeout=1.0)
                 self._heartbeat()
                 if msg is None:
@@ -223,21 +201,14 @@ class ServiceKafkaConsumer:
                         if k == "traceparent" and v:
                             traceparent = v.decode("utf-8")
 
-                try:
-                    envelope = EventEnvelope(**json.loads(msg.value().decode("utf-8")))
-                except Exception as e:  # poison record: decoding is deterministic, so one attempt (OPS-H8 design §5)
-                    logger.error(f"Undecodable record ({self._coords(msg)}): {type(e).__name__}")
-                    if not self._dead_letter(msg, e, 1, traceparent):
-                        break
-                    self._commit(msg)
-                    continue
+                envelope_dict = json.loads(msg.value().decode("utf-8"))
+                envelope = EventEnvelope(**envelope_dict)
                 if traceparent:
                     envelope.traceparent = traceparent
 
                 # Process message with bounded in-process retry (§6 Tier 1)
                 max_attempts = 3
                 success = False
-                stopped = False
                 last_err = None
 
                 for attempt in range(1, max_attempts + 1):
@@ -248,48 +219,27 @@ class ServiceKafkaConsumer:
                     except Exception as e:
                         last_err = e
                         logger.warning(
-                            f"Error in handler (attempt {attempt}/{max_attempts}) for key={envelope.paper_id}: {type(e).__name__}"
+                            f"Error in handler (attempt {attempt}/{max_attempts}) for key={envelope.paper_id}: {e}"
                         )
-                        # Stop requested (also: the handler failed because of it): no more attempts, no DLQ, no commit
-                        if self._stop.is_set() or (attempt < max_attempts and self._wait(self._handler_backoff(attempt))):
-                            stopped = True
-                            break
+                        if attempt < max_attempts:
+                            time.sleep(0.1 * (2**attempt))
 
-                # Route to DLQ (§6 Tier 2) only once the write is confirmed; a stop leaves the record uncommitted
-                if stopped or (not success and not self._dead_letter(msg, last_err, max_attempts, envelope.traceparent)):
-                    break
+                if not success and last_err:
+                    # Route to DLQ (§6 Tier 2)
+                    dlq_topic = f"{msg.topic()}.dlq"
+                    self.producer.publish_dlq(
+                        dlq_topic=dlq_topic,
+                        original_msg=msg,
+                        error=last_err,
+                        consumer_group=self.group_id,
+                        attempts=max_attempts,
+                        traceparent=traceparent,
+                    )
 
-                # Commit offset only after the handler or a confirmed DLQ write succeeded (§4 Layer 4)
-                self._commit(msg)
+                # Commit offset only after DB transaction or DLQ routing succeeds (§4 Layer 4)
+                self.consumer.commit(message=msg, asynchronous=False)
 
         except KeyboardInterrupt:
             logger.info("Consumer stopped by user.")
         finally:
             self.consumer.close()
-            for sig, old in saved.items():
-                signal.signal(sig, old if old is not None else signal.SIG_DFL)
-
-    def _dead_letter(self, msg: Message, error: Exception, attempts: int, traceparent: Optional[str]) -> bool:
-        """Retries the DLQ write in place until confirmed (True) or stop is requested (False). Never re-runs the handler."""
-        dlq_topic = f"{msg.topic()}.dlq"
-        payload = self.producer.build_dlq_payload(dlq_topic, msg, error, self.group_id, attempts, traceparent)
-        for rnd in itertools.count(1):
-            try:
-                self.producer.send_dlq(dlq_topic, payload)
-                return True
-            except Exception as e:
-                logger.critical(
-                    f"DLQ write failed ({self._coords(msg)} dlq_topic={dlq_topic} round={rnd}): {e}; not committing"
-                )
-                if self._wait(self._dlq_backoff(rnd)):
-                    return False
-
-    def _commit(self, msg: Message) -> None:
-        try:
-            self.consumer.commit(message=msg, asynchronous=False)
-        except KafkaException as e:  # never treated as committed: redelivered, or covered by the next commit
-            logger.error(f"Commit failed ({self._coords(msg)}): {e}; the record will be redelivered")
-
-    @staticmethod
-    def _coords(msg: Message) -> str:
-        return f"topic={msg.topic()} partition={msg.partition()} offset={msg.offset()}"
