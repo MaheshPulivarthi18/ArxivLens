@@ -9,6 +9,7 @@ case to make a run pass**; a wrong threshold needs an Accepted ADR.
 | `retrieval.jsonl` | `{"id","query","relevant_arxiv_ids":[...]}` | 30 |
 | `answer.jsonl` | `{"id","question","expected_arxiv_ids":[...]}` (in-corpus) | 20 |
 | `refusal.jsonl` | `{"id","question"}` (clearly out of corpus) | 20 |
+| `refusal_near_miss.jsonl` | `{"id","question","answered_by","why_near","reviewed_by"}` (in-domain, answering paper not in corpus; report-only) | 10 |
 | `thresholds.json` | PRD §8 targets used by `scripts/eval_gate.py` | — |
 | `results/` | one JSON per gate run (git-ignored) | — |
 
@@ -66,6 +67,48 @@ must be 1.0), and a partial run (`--skip-retrieval` / `--skip-answers`) never pa
 Every failed `/v1/ask` call (HTTP error, timeout, bad JSON) fails the gate via the `ask_errors == 0` check. It is
 also recorded in the p50/p95 latency at its elapsed time (a timeout counts as at least `--timeout`), and never counts
 as a refusal, hit, or supported citation. If every call fails, the gate exits 2 (could not run).
+
+### What the answer eval measures (EVAL-6)
+**ADR-0003 classification** of each `/v1/ask` response (`classify()` in `scripts/evaluate_answers.py`):
+
+| Response | Outcome | Refusal set | Answer set |
+|---|---|---|---|
+| request failed (HTTP error, timeout, bad JSON) | error | `ask_error_count` +1, not refused | `ask_error_count` +1 |
+| no `refusal_reason`, `citations: []` (early refusal, QA-5) | refusal | correct refusal | `answer_refusal_rate` |
+| `refusal_reason: "all_citations_unsupported"` (case A, carries evidence) | refusal | correct refusal | `answer_refusal_rate` |
+| `refusal_reason: "verification_unavailable"` (case B) | **error** | `ask_error_count` and `verification_unavailable_count` +1, not refused | same |
+| any other `refusal_reason` (fail closed) | error | `ask_error_count` +1, not refused | same |
+| no `refusal_reason`, ≥ 1 citation | answered | false answer | scored below |
+
+- **`supported_citation_rate` (gated)** = supported / all citations of *answered* answer-set responses. A refusal's
+  evidence passages are not answer citations and are not counted (pm-lead's reading of ADR-0003, to be confirmed by
+  Mahesh). An A-refusal is also never an expected-paper hit.
+
+**Report-only metrics.** They are printed and saved in the results JSON, and `check_thresholds` never reads them.
+Promoting one to a gate needs an ADR and a key in `thresholds.json`.
+- **`citation_coverage`** = cited units / all units, summed over answered answer-set responses. A unit is a `claims[]`
+  item (ADR-0014) when the response has a non-empty `claims` list, otherwise an answer sentence. A unit is cited if it
+  has ≥ 1 in-range marker, meaning a `[n]` (or a `claims[].markers` entry) that matches the `marker` of a returned
+  citation. The server drops markers outside 1..K, so only in-range markers get a citation. Sentences come from
+  `split_sentences()`, a port of `splitIntoSentences` in `internal/query/rag.go`: a sentence ends at `.`, `!` or `?`
+  followed by a space or the end of the text, unless it ends with `e.g.`, `i.e.`, `et al.`, `cf.`, `vs.`, `fig.` or
+  `eq.` (a test checks that list against `rag.go`). The value is `null` when there are no answered responses.
+- **`refusal_reason_counts`**: how many responses carried each `refusal_reason` value, over all three sets.
+- **`verification_unavailable_count`**: ADR-0003 case B responses in the answer and refusal sets (also in `ask_error_count`).
+- **`near_miss_correct_refusal_rate`** = refused / all rows of `refusal_near_miss.jsonl`, classified as above (errors
+  and B count as not refused); `null` when the set is empty. Near-miss calls are kept out of the gated latency and
+  `ask_error_count`, so an unreviewed row can't change a gate.
+- **Per-case records** (`answers.cases`): `id`, `set`, `outcome`, `refused`, `refusal_reason`, `latency_ms`,
+  `cited_units`/`total_units` (answered only), and per citation `arxiv_id`, `chunk_id`, `marker`, `supported`, `score`.
+  **No question, passage or answer text is saved**, because CI artifacts of this public repo can be downloaded.
+
+### Near-miss rows and human review
+`refusal_near_miss.jsonl` holds in-domain (ML/IR) questions that sound like the corpus but are answered by a paper
+that is **not** in `corpus.txt`: `answered_by` is that paper's arXiv ID, and `why_near` starts with the ID of the corpus
+paper it resembles. A test fails if any `answered_by` is in `corpus.txt` or a field is missing. Rows are drafts until
+a human reviewer (Mahesh or someone he names) checks on arxiv.org that `answered_by` answers the question and that no
+corpus paper does, then sets `reviewed_by` to their name or handle. `reviewed_by: null` means not reviewed yet.
+If a corpus paper turns out to answer a row, fix the row; don't add the paper to the corpus.
 
 ## Seeding the corpus
 On-demand ingest via the query API (fetches from arXiv, chunks and embeds):
