@@ -70,3 +70,42 @@ func TestErrorShape(t *testing.T) {
 		t.Fatal("attemptsText")
 	}
 }
+
+func TestErrorsIsAs(t *testing.T) {
+	sentinels := []error{ErrTimeout, ErrRateLimited, ErrProvider, ErrBadResponse, ErrInvalidRequest}
+	tests := []struct {
+		name  string
+		err   error // an interface value, the way callers receive it
+		kind  error // nil for a caller cancel
+		cause error
+	}{
+		{"timeout", newError(ErrTimeout, 0, 1, 0, context.DeadlineExceeded, "", "deadline"), ErrTimeout, context.DeadlineExceeded},
+		{"rate limited", newError(ErrRateLimited, 429, 2, time.Second, nil, "", "HTTP 429"), ErrRateLimited, nil},
+		{"provider", newError(ErrProvider, 0, 2, 0, errors.New("dial refused"), "", "transport"), ErrProvider, nil},
+		{"bad response", newError(ErrBadResponse, 200, 1, 0, errors.New("bad json"), "", "unparseable body"), ErrBadResponse, nil},
+		{"invalid request", newError(ErrInvalidRequest, 0, 0, 0, nil, "", "no messages"), ErrInvalidRequest, nil},
+		{"cancel", newError(nil, 0, 1, 0, context.Canceled, "", ""), nil, context.Canceled},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, s := range sentinels {
+				if got, want := errors.Is(tt.err, s), s == tt.kind; got != want {
+					t.Errorf("errors.Is(err, %v) = %t, want %t", s, got, want)
+				}
+			}
+			if tt.cause != nil && !errors.Is(tt.err, tt.cause) {
+				t.Errorf("errors.Is(err, %v) = false, want true", tt.cause)
+			}
+			if tt.kind != nil && errors.Is(tt.err, context.Canceled) {
+				t.Error("errors.Is(err, context.Canceled) = true for a typed error")
+			}
+			var e *Error
+			if !errors.As(tt.err, &e) {
+				t.Fatal("errors.As(err, *Error) = false")
+			}
+			if e.Kind != tt.kind {
+				t.Errorf("errors.As Kind = %v, want %v", e.Kind, tt.kind)
+			}
+		})
+	}
+}
