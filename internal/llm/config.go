@@ -118,7 +118,7 @@ func FromEnv(getenv func(string) string) (Provider, error) {
 		return nil, err
 	}
 	c, err := New(*cfg)
-	if err != nil {
+	if err != nil { // unreachable today (ConfigFromEnv already normalised cfg); kept so a new check in New is never dropped
 		return nil, err
 	}
 	return c, nil

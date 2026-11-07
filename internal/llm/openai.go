@@ -7,10 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -43,11 +44,16 @@ func New(cfg Config) (*Client, error) {
 	if err := cfg.normalize(); err != nil {
 		return nil, err
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// No client Timeout: all timing comes from ctx. Redirects are not followed
+	// (a 3xx is ErrProvider), so the body and key are never re-sent elsewhere.
+	hc := &http.Client{
+		Transport:     http.DefaultTransport.(*http.Transport).Clone(),
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	return &Client{
 		cfg:      cfg,
 		endpoint: cfg.BaseURL + "/chat/completions",
-		http:     &http.Client{Transport: transport}, // no client Timeout: all timing comes from ctx
+		http:     hc,
 		backoff:  defaultBackoff,
 	}, nil
 }
@@ -180,12 +186,8 @@ func (c *Client) attempt(ctx context.Context, body []byte, n int, key string) (*
 		if ctx.Err() != nil {
 			return nil, ctxError(ctx, n, 0, 0, key)
 		}
-		// Only the inner error is used: never the URL. Headers are never in it.
-		var ue *url.Error
-		if errors.As(err, &ue) {
-			err = ue.Err
-		}
-		return nil, newError(ErrProvider, 0, n, 0, err, key, "transport: "+err.Error()+" "+attemptsText(n))
+		detail, cause := transportDetail(err)
+		return nil, newError(ErrProvider, 0, n, 0, cause, key, "transport: "+detail+" "+attemptsText(n))
 	}
 	defer res.Body.Close()
 
@@ -232,6 +234,25 @@ func (c *Client) attempt(ctx context.Context, body []byte, n int, key string) (*
 		out.CompletionTokens = wire.Usage.CompletionTokens
 	}
 	return out, nil
+}
+
+// transportDetail describes a transport error without copying its text:
+// net/http protocol errors quote raw server bytes (which can echo the prompt
+// or the key), and the URL is never wanted. Only the socket op and the OS
+// error survive; the cause is that errno (or nil), never the raw error.
+func transportDetail(err error) (string, error) {
+	var op *net.OpError
+	var errno syscall.Errno
+	var dns *net.DNSError
+	switch {
+	case errors.As(err, &op) && errors.As(err, &errno):
+		return op.Op + ": " + errno.Error(), errno
+	case errors.As(err, &dns):
+		return "DNS lookup failed", nil
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return "connection closed early", nil
+	}
+	return "malformed response or protocol error", nil
 }
 
 // ctxError maps a finished ctx: a passed deadline (ours or the caller's) is

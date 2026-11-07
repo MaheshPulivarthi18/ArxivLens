@@ -1,17 +1,21 @@
 package llm
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -510,8 +514,27 @@ func TestTransportError(t *testing.T) {
 	if !errors.Is(err, ErrProvider) || e.Attempts != 1 || e.Status != 0 || time.Since(start) > time.Second {
 		t.Fatalf("got %v attempts %d", err, e.Attempts)
 	}
-	if strings.Contains(err.Error(), url) || !strings.Contains(err.Error(), "transport:") {
-		t.Fatalf("error %q should name the transport failure, not the URL", err)
+	if strings.Contains(err.Error(), url) || !strings.Contains(err.Error(), "transport: dial: connection refused") ||
+		!errors.Is(err, syscall.ECONNREFUSED) {
+		t.Fatalf("error %q should name the transport failure (errno kept as cause), not the URL", err)
+	}
+	var op *net.OpError
+	if errors.As(err, &op) { // the raw net error (address, server text) must not be unwrappable
+		t.Fatalf("raw transport error %v reachable through the cause chain", op)
+	}
+}
+
+func TestNoRedirect(t *testing.T) {
+	for _, code := range []int{301, 302, 307, 308} {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			srv, s := serve(t, reply(code, "", "Location", "/elsewhere"), reply(200, okBody))
+			c := newTestClient(t, srv.URL, "k", time.Second)
+			_, err := c.Complete(context.Background(), userReq("q"))
+			e := asError(t, err)
+			if !errors.Is(err, ErrProvider) || e.Status != code || e.Attempts != 1 || s.count() != 1 {
+				t.Fatalf("got %v status %d attempts %d requests %d, want ErrProvider %d after 1 request", err, e.Status, e.Attempts, s.count(), code)
+			}
+		})
 	}
 }
 
@@ -541,6 +564,40 @@ func TestConcurrentComplete(t *testing.T) {
 	for err := range errs {
 		t.Error(err)
 	}
+}
+
+// rawServer is a TCP server that parses one request per connection and writes
+// respond(body) verbatim, so tests can send malformed HTTP (httptest can't).
+// A request without "Bearer key" gets a well-formed 418, which has a Status.
+func rawServer(t *testing.T, key string, respond func(body []byte) string) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				r, err := http.ReadRequest(bufio.NewReader(conn))
+				if err != nil {
+					return
+				}
+				body, _ := io.ReadAll(r.Body)
+				out := "HTTP/1.1 418 I'm a teapot\r\nContent-Length: 0\r\n\r\n"
+				if r.Header.Get("Authorization") == "Bearer "+key {
+					out = respond(body)
+				}
+				_, _ = io.WriteString(conn, out)
+			}()
+		}
+	}()
+	return "http://" + ln.Addr().String()
 }
 
 // TestNoSecretLeaks: a hostile server echoes the Authorization header and the
@@ -574,7 +631,8 @@ func TestNoSecretLeaks(t *testing.T) {
 		timeout time.Duration
 		cancel  bool
 		closed  bool
-		kind    error // nil → cancel
+		raw     func(body []byte) string // malformed HTTP from rawServer; the error must be a transport one (Status 0)
+		kind    error                    // nil → cancel
 	}{
 		{name: "429 twice", steps: steps(echo(429, "")), kind: ErrRateLimited},
 		{name: "503 twice", steps: steps(echo(503, "")), kind: ErrProvider},
@@ -588,11 +646,22 @@ func TestNoSecretLeaks(t *testing.T) {
 		{name: "oversized", steps: steps(echo(200, bigJSON)), kind: ErrBadResponse},
 		{name: "connection refused", closed: true, kind: ErrProvider},
 		{name: "cancel during backoff", steps: steps(echo(503, "", "Retry-After", "1")), cancel: true},
+		{name: "raw: malformed status line", kind: ErrProvider, raw: func(b []byte) string {
+			return "HTTP/1.1 " + prompt + key + completion + " OK\r\n\r\n" + string(b)
+		}},
+		{name: "raw: malformed header", kind: ErrProvider, raw: func(b []byte) string {
+			return "HTTP/1.1 200 OK\r\n" + prompt + key + completion + string(b) + "\r\n\r\n"
+		}},
+		{name: "raw: garbage response", kind: ErrProvider, raw: func(b []byte) string {
+			return string(b) + key + completion + "\r\n\r\n"
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var url string
-			if tt.closed {
+			if tt.raw != nil {
+				url = rawServer(t, key, tt.raw)
+			} else if tt.closed {
 				srv := httptest.NewServer(http.NotFoundHandler())
 				url = srv.URL
 				srv.Close()
@@ -621,7 +690,18 @@ func TestNoSecretLeaks(t *testing.T) {
 			if tt.kind == nil && !errors.Is(err, context.Canceled) {
 				t.Fatalf("got %v, want cancel", err)
 			}
+			if e := asError(t, err); tt.raw != nil && (e.Status != 0 || !strings.Contains(err.Error(), "transport:")) {
+				t.Fatalf("want a transport error, got %v (status %d)", err, e.Status)
+			}
 			outs := []string{err.Error()}
+			for chain := []error{err}; len(chain) > 0; chain = chain[1:] { // every cause a caller could unwrap and log
+				outs = append(outs, chain[0].Error())
+				if u, ok := chain[0].(interface{ Unwrap() []error }); ok {
+					chain = append(chain, u.Unwrap()...)
+				} else if u := errors.Unwrap(chain[0]); u != nil {
+					chain = append(chain, u)
+				}
+			}
 			for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
 				outs = append(outs, fmt.Sprintf(verb, err), fmt.Sprintf(verb, c), fmt.Sprintf(verb, req))
 			}
