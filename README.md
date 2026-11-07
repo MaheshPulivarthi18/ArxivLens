@@ -231,7 +231,8 @@ The `Full stack` workflow (`.github/workflows/stack.yml`) does all of this on a 
 `make migrate`, starts `arxivlens download` and `arxivlens query` on the host, crawls 2 papers to `embedded`,
 ingests the `2608.20331` fixture and runs `make test-full`. Known failure F1: the two M3 `/v1/ask` tests exceed their 10 s
 timeout on CPU runners, so they are deselected there and run in a separate, non-blocking step. It runs on PRs that touch compose, Dockerfiles,
-`requirements*.txt`, the Makefile or the workflow, and on demand (`workflow_dispatch`).
+`requirements*.txt`, the Makefile, the workflow, Go code (`cmd/`, `internal/`, `go.mod`, `go.sum`) or `tests/`, and on demand (`workflow_dispatch`).
+Every run, green or red, uploads a `stack-logs` artifact with `compose.log`, `query.log`, `downloader.log` and `embedder-timing.log`.
 
 ---
 
