@@ -45,8 +45,8 @@ test-unit: test-go test-py ## Fast tests, no infra (Go + M0 + eval data). Fronte
 test-go: ## Go unit tests
 	go test ./...
 
-test-py: ## Python unit tests: M0 + eval data + worker heartbeat (M0 downloads BGE model on first run)
-	$(PYTEST) -q tests/test_m0.py tests/test_evals_data.py tests/test_worker_heartbeat.py
+test-py: ## Python unit tests: M0 + eval data + worker heartbeat + processor pages (M0 downloads BGE model on first run)
+	$(PYTEST) -q tests/test_m0.py tests/test_evals_data.py tests/test_worker_heartbeat.py tests/test_processor_pages.py
 
 test-fe: ## Frontend tests (available after FE-1)
 	@cd frontend && if npm run | grep -q " test"; then npm test; else echo "no frontend tests yet (FE-1)"; fi
