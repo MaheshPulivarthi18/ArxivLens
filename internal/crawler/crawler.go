@@ -8,11 +8,11 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"arxivlens/internal/arxiv"
 	"arxivlens/internal/db"
 	"arxivlens/internal/kafka"
 	"arxivlens/shared/events"
@@ -184,9 +184,6 @@ func (c *Crawler) Crawl(ctx context.Context, searchQuery string, limit int) (int
 	return totalDiscovered, nil
 }
 
-// versionRegex matches the trailing version suffix of an arXiv ID (e.g. "v2").
-var versionRegex = regexp.MustCompile(`v(\d+)$`)
-
 // parseAtomFeed maps an arXiv Atom API response body to paper records.
 func parseAtomFeed(body []byte) ([]db.PaperRecord, error) {
 	var feed Feed
@@ -196,19 +193,15 @@ func parseAtomFeed(body []byte) ([]db.PaperRecord, error) {
 
 	papers := make([]db.PaperRecord, 0, len(feed.Entries))
 	for _, entry := range feed.Entries {
-		// Extract arXiv ID (e.g., from http://arxiv.org/abs/2401.12345v2)
-		rawID := entry.ID
-		parts := strings.Split(rawID, "/abs/")
-		arxivIDWithVersion := rawID
-		if len(parts) > 1 {
-			arxivIDWithVersion = parts[1]
-		}
-
-		arxivID := arxivIDWithVersion
-		version := 1
-		if matches := versionRegex.FindStringSubmatch(arxivIDWithVersion); len(matches) > 1 {
-			version, _ = strconv.Atoi(matches[1])
-			arxivID = versionRegex.ReplaceAllString(arxivIDWithVersion, "")
+		// Extract arXiv ID and version (e.g., from http://arxiv.org/abs/2401.12345v2)
+		arxivID, version, versioned := arxiv.SplitVersion(entry.ID)
+		// An entry without a version keeps the unversioned URL: the version is unknown, and the
+		// stored 1 is only a default.
+		pdfURL := fmt.Sprintf("https://arxiv.org/pdf/%s.pdf", arxivID)
+		if versioned {
+			pdfURL = arxiv.PDFURL(arxivID, version)
+		} else {
+			version = 1
 		}
 
 		title := strings.Join(strings.Fields(entry.Title), " ")
@@ -232,8 +225,6 @@ func parseAtomFeed(body []byte) ([]db.PaperRecord, error) {
 		if entry.Published != "" {
 			pubTime, _ = time.Parse(time.RFC3339, entry.Published)
 		}
-
-		pdfURL := fmt.Sprintf("https://arxiv.org/pdf/%s.pdf", arxivID)
 
 		papers = append(papers, db.PaperRecord{
 			ArxivID:     arxivID,
