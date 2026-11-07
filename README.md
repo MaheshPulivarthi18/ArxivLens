@@ -160,7 +160,7 @@ CUDA in compose is untested: `TORCH_INDEX_URL=https://download.pytorch.org/whl/c
 | `GET` | `/healthz`, `/readyz` | Liveness / readiness |
 | `GET` | `/v1/stats` | Corpus counts (papers, chunks, embedded) |
 | `POST` | `/v1/search` | Hybrid search: `{query, categories?, limit?, rerank?}` |
-| `POST` | `/v1/ask` | Cited answer: `{question, categories?, max_citations?}` |
+| `POST` | `/v1/ask` | Cited answer: `{question, categories?, max_citations?}` → `{answer, citations, trace_id, refusal_reason?}`. When no citation is supported, the answer is withheld, `refusal_reason` is `all_citations_unsupported` or `verification_unavailable`, and `citations` lists every relevant passage as evidence (ADR-0003) |
 | `POST` | `/v1/papers/ingest` | On-demand ingest by arXiv ID or URL |
 | `POST` | `/v1/papers/discover` | Find the best-matching arXiv paper for a query and ingest it |
 | `GET` | `/v1/papers/{arxiv_id}` | Paper pipeline status |
