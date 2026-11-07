@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"arxivlens/internal/arxiv"
 	"arxivlens/internal/config"
 	"arxivlens/internal/db"
 	"github.com/minio/minio-go/v7"
@@ -41,6 +42,17 @@ type PaperIngester struct {
 	// ingestClient is used only for the embedder's synchronous /internal/ingest (chunk + embed),
 	// which can take minutes on CPU; arXiv fetches keep httpClient's shorter timeout.
 	ingestClient *http.Client
+	// limiter spaces every arXiv request this process's ingester makes (Technical PRD §9).
+	limiter *arxiv.Limiter
+}
+
+// doArxiv waits for the arXiv limiter, sets the identifying User-Agent and sends req.
+func (ing *PaperIngester) doArxiv(req *http.Request) (*http.Response, error) {
+	if err := ing.limiter.Wait(req.Context()); err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", arxiv.UserAgent("Query Ingester"))
+	return ing.httpClient.Do(req)
 }
 
 // NewPaperIngester builds an on-demand ingester. ingestTimeout bounds the /internal/ingest call;
@@ -61,6 +73,7 @@ func NewPaperIngester(database *db.DB, minioClient *minio.Client, minioBucket, e
 			Timeout: 45 * time.Second,
 		},
 		ingestClient: &http.Client{Timeout: ingestTimeout},
+		limiter:      arxiv.NewLimiter(arxiv.DefaultInterval),
 	}
 }
 
@@ -118,7 +131,7 @@ func (ing *PaperIngester) IngestPaper(ctx context.Context, input string) (*Inges
 		return nil, fmt.Errorf("failed to create arxiv request: %w", err)
 	}
 
-	resp, err := ing.httpClient.Do(req)
+	resp, err := ing.doArxiv(req)
 	if err != nil {
 		return nil, fmt.Errorf("arxiv API request failed: %w", err)
 	}
@@ -173,9 +186,8 @@ func (ing *PaperIngester) IngestPaper(ctx context.Context, input string) (*Inges
 	if err != nil {
 		return nil, fmt.Errorf("failed to create pdf request: %w", err)
 	}
-	pdfReq.Header.Set("User-Agent", "ArxivLens-Bot/1.0")
 
-	pdfResp, err := ing.httpClient.Do(pdfReq)
+	pdfResp, err := ing.doArxiv(pdfReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download pdf from arxiv: %w", err)
 	}
@@ -278,7 +290,7 @@ func (ing *PaperIngester) DiscoverAndIngest(ctx context.Context, query string) (
 		return nil, fmt.Errorf("failed to create search request: %w", err)
 	}
 
-	resp, err := ing.httpClient.Do(req)
+	resp, err := ing.doArxiv(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search arXiv: %w", err)
 	}

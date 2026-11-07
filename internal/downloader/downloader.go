@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"time"
 
+	"arxivlens/internal/arxiv"
 	"arxivlens/internal/db"
 	"arxivlens/internal/kafka"
 	"arxivlens/internal/storage"
@@ -24,6 +25,8 @@ type Downloader struct {
 	storage  *storage.Storage
 	producer *kafka.Producer
 	client   *http.Client
+	// limiter spaces this process's arXiv PDF requests (Technical PRD §9).
+	limiter *arxiv.Limiter
 }
 
 func NewDownloader(database *db.DB, storage *storage.Storage, producer *kafka.Producer) *Downloader {
@@ -32,6 +35,7 @@ func NewDownloader(database *db.DB, storage *storage.Storage, producer *kafka.Pr
 		storage:  storage,
 		producer: producer,
 		client:   &http.Client{Timeout: 60 * time.Second},
+		limiter:  arxiv.NewLimiter(arxiv.DefaultInterval),
 	}
 }
 
@@ -74,25 +78,9 @@ func (d *Downloader) HandleRecord(ctx context.Context, record *kgo.Record) error
 	if len(pdfBytes) == 0 {
 		// Download from arXiv PDF endpoint
 		pdfURL := fmt.Sprintf("https://arxiv.org/pdf/%s.pdf", arxivID)
-		req, err := http.NewRequestWithContext(ctx, "GET", pdfURL, nil)
+		pdfBytes, err = d.fetchPDF(ctx, pdfURL)
 		if err != nil {
-			return fmt.Errorf("failed to create pdf request: %w", err)
-		}
-		req.Header.Set("User-Agent", "ArxivLens/1.0 (Downloader Pipeline; mailto:contact@arxivlens.local)")
-
-		resp, err := d.client.Do(req)
-		if err != nil {
-			return fmt.Errorf("failed to download pdf from %s: %w", pdfURL, err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("arxiv pdf download failed with status %d", resp.StatusCode)
-		}
-
-		pdfBytes, err = io.ReadAll(resp.Body)
-		if err != nil {
-			return fmt.Errorf("failed to read pdf body: %w", err)
+			return err
 		}
 
 		h := sha256.Sum256(pdfBytes)
@@ -131,4 +119,32 @@ func (d *Downloader) HandleRecord(ctx context.Context, record *kgo.Record) error
 
 	log.Printf("[Downloader] Successfully processed & published papers.downloaded for %s", arxivID)
 	return nil
+}
+
+// fetchPDF waits for the arXiv limiter and GETs pdfURL with the identifying User-Agent.
+func (d *Downloader) fetchPDF(ctx context.Context, pdfURL string) ([]byte, error) {
+	if err := d.limiter.Wait(ctx); err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", pdfURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create pdf request: %w", err)
+	}
+	req.Header.Set("User-Agent", arxiv.UserAgent("Downloader Pipeline"))
+
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download pdf from %s: %w", pdfURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("arxiv pdf download failed with status %d", resp.StatusCode)
+	}
+
+	pdfBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read pdf body: %w", err)
+	}
+	return pdfBytes, nil
 }
