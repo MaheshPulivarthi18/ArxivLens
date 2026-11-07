@@ -109,6 +109,21 @@ func ConfigFromEnv(getenv func(string) string) (*Config, error) {
 	return &cfg, nil
 }
 
+// FromEnv builds the provider from the environment (see ConfigFromEnv). It
+// returns an untyped nil Provider and no error when LLM_MODEL is unset, so a
+// caller's `if p == nil` keeps the template answer.
+func FromEnv(getenv func(string) string) (Provider, error) {
+	cfg, err := ConfigFromEnv(getenv)
+	if err != nil || cfg == nil {
+		return nil, err
+	}
+	c, err := New(*cfg)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
 // normalize applies defaults to zero fields and validates the rest.
 func (c *Config) normalize() error {
 	if strings.TrimSpace(c.Model) == "" {
