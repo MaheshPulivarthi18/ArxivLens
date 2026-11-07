@@ -46,11 +46,7 @@ class ServiceKafkaProducer:
             self.producer.produce(topic=topic, key=key, value=value, headers=headers, on_delivery=on_delivery)
         except (BufferError, KafkaException) as e:
             raise DeliveryError(f"produce to {topic} failed: {e}") from e
-        self.producer.flush(timeout=self.delivery_timeout_s)  # serves delivery callbacks; its return value isn't trusted
-        if "err" not in outcome:
-            raise DeliveryError(f"delivery to {topic} not confirmed within {self.delivery_timeout_s}s")
-        if outcome["err"] is not None:
-            raise DeliveryError(f"delivery to {topic} failed: {outcome['err']}")
+        self.producer.flush(timeout=self.delivery_timeout_s)
 
     def publish(
         self,
