@@ -118,3 +118,97 @@ def test_chunk_output_identical_to_pre_change(chunker):
     assert got == EXPECTED_SNAPSHOT, f"got snapshot:\n{json.dumps(got, indent=1)}"
     assert [s["title"] for s in sections] == ["Introduction", "Method"]
     assert [s["page"] for s in sections] == [1, 3]
+
+
+def test_page_breaks_invariants():
+    sections = parse_fixture_sections()
+    assert sections, "fixture produced no sections"
+    for s in sections:
+        pb = s.get("page_breaks")
+        assert pb, f"{s['title']}: missing or empty page_breaks"
+        assert pb[0][0] == 0, f"{s['title']}: first offset {pb[0][0]}, want 0"
+        offsets, pages = [o for o, _ in pb], [p for _, p in pb]
+        assert offsets == sorted(set(offsets)), f"{s['title']}: offsets not strictly ascending {pb}"
+        assert pages == sorted(set(pages)), f"{s['title']}: pages not strictly ascending {pb}"
+        assert all(o < len(s["text"]) for o in offsets), f"{s['title']}: offset out of range {pb}"
+        assert pages[0] >= s["page"], f"{s['title']}: text starts before its heading page {pb}"
+        # Implementation-independent oracle: the text after each break starts with that page's vocabulary.
+        for o, p in pb:
+            assert first_word_page(s["text"][o:]) == p, f"{s['title']}: break {(o, p)} not at page {p}'s text"
+    assert any(len(s["page_breaks"]) >= 2 for s in sections), [s["page_breaks"] for s in sections]
+    intro = sections[0]
+    assert [p for _, p in intro["page_breaks"]] == [1, 2, 3]
+
+
+class FakeCursor:
+    """Records statements; `RETURNING id` yields ids 100, 101, ... in order."""
+
+    def __init__(self):
+        self.calls, self._next = [], 100
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=()):
+        self.calls.append((" ".join(sql.split()), params))
+
+    def fetchone(self):
+        self._next += 1
+        return (self._next - 1,)
+
+
+class FakeConn:
+    def __init__(self):
+        self.cur, self.commits = FakeCursor(), 0
+
+    def cursor(self):
+        return self.cur
+
+    def commit(self):
+        self.commits += 1
+
+
+def _chunk(i, **extra):
+    return {"chunk_index": i, "section_title": "Intro", "content": f"c{i}", "content_hash": f"h{i}", "token_count": 5, **extra}
+
+
+@pytest.mark.parametrize(
+    "chunk, want_sql, want_params, want_page_number",
+    [
+        (_chunk(0, page_start=4, page_number=3), "INSERT INTO paper_chunk_pages", (101, 4), 3),
+        (_chunk(0, page_start=1), "INSERT INTO paper_chunk_pages", (101, 1), 1),
+        (_chunk(0, page_number=2), "DELETE FROM paper_chunk_pages WHERE chunk_id = %s", (101,), 2),
+        (_chunk(0, page_start=None), "DELETE FROM paper_chunk_pages WHERE chunk_id = %s", (101,), 1),
+    ],
+    ids=["page_start-set", "page_start-1-no-page_number", "missing", "none"],
+)
+def test_save_chunks_page_rows(chunk, want_sql, want_params, want_page_number):
+    from services.common.db import save_sections_and_chunks
+
+    conn = FakeConn()
+    n = save_sections_and_chunks(conn, 7, [{"title": "Intro", "level": 1}], [chunk])
+    assert n == 1 and conn.commits == 0, "must stay inside the caller's transaction (L2)"
+    calls = conn.cur.calls
+    sec_sql, chunk_call = calls[0][0], calls[1]  # section id 100, chunk id 101
+    assert sec_sql.startswith("INSERT INTO paper_sections")
+    assert chunk_call[0].startswith("INSERT INTO paper_chunks") and chunk_call[0].endswith("RETURNING id;")
+    assert chunk_call[1] == (7, 100, 0, "c0", "h0", want_page_number, 5), "page_number arg must stay chunk.get('page_number', 1)"
+    page_calls = [c for c in calls if "paper_chunk_pages" in c[0]]
+    assert len(page_calls) == 1, page_calls
+    assert page_calls[0][0].startswith(want_sql) and page_calls[0][1] == want_params
+    if want_sql.startswith("INSERT"):
+        assert page_calls[0][0].endswith("ON CONFLICT (chunk_id) DO UPDATE SET page_start = EXCLUDED.page_start;")
+    assert calls[-1][0].startswith("UPDATE papers SET status = 'chunked'")
+
+
+def test_save_chunks_page_rows_use_each_returned_id():
+    from services.common.db import save_sections_and_chunks
+
+    conn = FakeConn()
+    save_sections_and_chunks(conn, 7, [{"title": "Intro", "level": 1}], [_chunk(0, page_start=2), _chunk(1), _chunk(2, page_start=5)])
+    page_calls = [(c[0].split()[0], c[1]) for c in conn.cur.calls if "paper_chunk_pages" in c[0]]
+    assert page_calls == [("INSERT", (101, 2)), ("DELETE", (102,)), ("INSERT", (103, 5))]
+    assert conn.commits == 0

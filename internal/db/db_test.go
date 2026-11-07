@@ -84,7 +84,7 @@ func TestRepoMigrationsOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"000001_init_schema.up.sql", "000002_chunk_embeddings_hnsw.up.sql"}
+	want := []string{"000001_init_schema.up.sql", "000002_chunk_embeddings_hnsw.up.sql", "000003_paper_chunk_pages.up.sql"}
 	if len(got) < len(want) {
 		t.Fatalf("got %v, want prefix %v", got, want)
 	}
