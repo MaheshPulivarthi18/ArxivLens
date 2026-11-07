@@ -391,6 +391,11 @@ func TestAskResponseShapeAndConstructor(t *testing.T) {
 	if got := sortedKeys(cite); !reflect.DeepEqual(got, want) {
 		t.Errorf("citation keys %v, want %v", got, want)
 	}
+	// AI-7 (ADR-0003): refusal_reason is the one added key, present only when set.
+	refused, _ := json.Marshal(AskResponse{RefusalReason: reasonAllUnsupported})
+	if got, want := sortedKeys(refused), []string{"answer", "citations", "refusal_reason", "trace_id"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("refusal response keys %v, want %v", got, want)
+	}
 	se, ec := &SearchEngine{}, &EmbedClient{}
 	if r := NewRAGService(se, ec); r.searchEngine != searcher(se) || r.embedClient != embedder(ec) {
 		t.Errorf("dependencies not wired: %+v", r)
@@ -592,8 +597,13 @@ func TestAskBatchFailClosed(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if len(resp.Citations) != 2 {
-				t.Fatalf("got %d citations, want 2 (markers kept, support withheld)", len(resp.Citations))
+			if len(resp.Citations) != 3 {
+				t.Fatalf("got %d citations, want 3 (ADR-0003: every relevant hit as evidence, support withheld)", len(resp.Citations))
+			}
+			if resp.RefusalReason != reasonVerificationUnavailable || resp.Answer != refusalUnavailable ||
+				!reflect.DeepEqual(markers(resp.Citations), []int{1, 2, 3}) {
+				t.Errorf("reason=%q answer=%q markers=%v, want verification_unavailable, the B sentence, [1 2 3]",
+					resp.RefusalReason, resp.Answer, markers(resp.Citations))
 			}
 			for _, c := range resp.Citations {
 				if c.Score != 0 || c.Supported {
@@ -604,8 +614,9 @@ func TestAskBatchFailClosed(t *testing.T) {
 				t.Errorf("EmbedTexts called %d times, want 2", len(emb.calls))
 			}
 			lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
-			if len(lines) != 1 || !strings.Contains(lines[0], tc.wantLog) {
-				t.Errorf("log = %q, want one line containing %q", buf.String(), tc.wantLog)
+			if len(lines) != 2 || !strings.Contains(lines[0], tc.wantLog) ||
+				!strings.Contains(lines[1], "reason=verification_unavailable") || !strings.Contains(lines[1], "trace_id="+resp.TraceID+" ") {
+				t.Errorf("log = %q, want the unverified line containing %q, then the refusal line", buf.String(), tc.wantLog)
 			}
 		})
 	}
@@ -652,5 +663,225 @@ func TestAskRerankFallbackLogsResponseTraceID(t *testing.T) {
 		if !strings.Contains(fallback[0], want) {
 			t.Errorf("fallback log %q missing %q", fallback[0], want)
 		}
+	}
+}
+
+// captureLog redirects the standard logger (no flags) for the rest of the test.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+	return &buf
+}
+
+// refusedLines returns the "ask refused" log lines.
+func refusedLines(buf *bytes.Buffer) []string {
+	var out []string
+	for _, l := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if strings.Contains(l, "ask refused") {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// checkEvidence asserts ADR-0003 evidence: every hit in rank order, marker i+1, its metadata,
+// the given scores, never supported.
+func checkEvidence(t *testing.T, got []Citation, hits []SearchHit, scores []float64) {
+	t.Helper()
+	if len(got) != len(hits) {
+		t.Fatalf("evidence = %d citations, want %d (one per relevant hit): %+v", len(got), len(hits), got)
+	}
+	for i, c := range got {
+		h := hits[i]
+		if c.Marker != i+1 || c.ChunkID != h.ChunkID || c.ArxivID != h.ArxivID || c.Title != h.Title ||
+			c.Section != h.SectionTitle || c.Content != h.Content || c.PDFURL != "https://arxiv.org/pdf/"+h.ArxivID+".pdf" {
+			t.Errorf("evidence %d = %+v, want hit %+v with marker %d", i, c, h, i+1)
+		}
+		if c.Score != scores[i] || c.Supported {
+			t.Errorf("evidence %d score=%v supported=%v, want %v false", i, c.Score, c.Supported, scores[i])
+		}
+	}
+}
+
+// AI-7 AC6: the refusal log line has the trace ID, reason and counts, and no question, answer or passage text.
+func checkRefusalLog(t *testing.T, buf *bytes.Buffer, traceID string, wantCounts string) {
+	t.Helper()
+	lines := refusedLines(buf)
+	if len(lines) != 1 {
+		t.Fatalf("log = %q, want exactly one ask refused line", buf.String())
+	}
+	for _, want := range []string{"trace_id=" + traceID + " ", "trace_id_source=ctx", wantCounts} {
+		if !strings.Contains(lines[0], want) {
+			t.Errorf("refusal log %q missing %q", lines[0], want)
+		}
+	}
+	for _, secret := range []string{"secret question", "Based on", "Furthermore", "chunk Method", "chunk Results", "chunk Discussion", "Paper", "couldn't", "unavailable right now"} {
+		if strings.Contains(buf.String(), secret) {
+			t.Errorf("log leaks text %q: %q", secret, buf.String())
+		}
+	}
+}
+
+// AI-7 AC1 + AC6: every checked citation < 0.50 → all_citations_unsupported, the A sentence, all hits as evidence.
+func TestAskRefusesAllUnsupported(t *testing.T) {
+	buf := captureLog(t)
+	r := &RAGService{searchEngine: &fakeSearcher{hits: batchHits()}, embedClient: simEmbedder(constSim(0.3))}
+	resp, err := r.Ask(context.Background(), "secret question", nil, 3)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.RefusalReason != reasonAllUnsupported || resp.Answer != refusalUnsupported {
+		t.Errorf("reason=%q answer=%q, want all_citations_unsupported and the A sentence", resp.RefusalReason, resp.Answer)
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(resp.TraceID) {
+		t.Errorf("TraceID = %q, want 32 hex chars", resp.TraceID)
+	}
+	// The template cites hits 1 and 2 (score 0.3); hit 3 is uncited (score 0).
+	checkEvidence(t, resp.Citations, batchHits(), []float64{0.3, 0.3, 0})
+	raw, _ := json.Marshal(resp)
+	if !strings.Contains(string(raw), `"refusal_reason":"all_citations_unsupported"`) {
+		t.Errorf("JSON %s missing refusal_reason", raw)
+	}
+	checkRefusalLog(t, buf, resp.TraceID, "reason=all_citations_unsupported citations=2 checked=2 unverified=0 evidence=3")
+	if strings.Contains(buf.String(), "citation support unverified") {
+		t.Errorf("case A must not log the unverified line: %q", buf.String())
+	}
+}
+
+// AI-7: an evidence score is the highest computed score among the checked citations of that hit,
+// including negative scores; uncited hits stay 0.
+func TestFinalizeEvidenceKeepsBestComputedScore(t *testing.T) {
+	captureLog(t)
+	hits := batchHits()
+	r := &RAGService{embedClient: simEmbedder(func(s string) float64 {
+		switch {
+		case strings.HasPrefix(s, "Weak claim"):
+			return 0.4
+		case strings.HasPrefix(s, "Neg"):
+			return -0.3
+		}
+		return 0.2
+	})}
+	resp := r.finalize(withTraceID(context.Background(), "t-ai7"), "t-ai7", "Weak claim [1]. Weaker claim [1]. Neg [2].", hits)
+	if resp.RefusalReason != reasonAllUnsupported || resp.TraceID != "t-ai7" {
+		t.Errorf("reason=%q trace=%q, want all_citations_unsupported t-ai7", resp.RefusalReason, resp.TraceID)
+	}
+	checkEvidence(t, resp.Citations, hits, []float64{0.4, -0.3, 0})
+}
+
+// AI-7 AC2 + AC6: support could not be checked for at least one citation and none is supported →
+// verification_unavailable, the B sentence, evidence with score 0 for every unverified citation.
+func TestAskRefusesVerificationUnavailable(t *testing.T) {
+	drop := func(v [][]float32) [][]float32 { return v[:len(v)-1] }
+	// mixed: hit 1 is checked at 0.3; hit 2's chunk has an empty vector, so citation [2] is unverified.
+	mixed := &fakeEmbedder{vec: func(t string) []float32 {
+		switch {
+		case t == "chunk Results":
+			return []float32{}
+		case strings.HasPrefix(t, "chunk"):
+			return []float32{1, 0}
+		case strings.HasPrefix(t, "Based on"):
+			return []float32{0.3, float32(math.Sqrt(1 - 0.09))}
+		}
+		return []float32{1, 0}
+	}}
+	tests := []struct {
+		name       string
+		emb        *countingEmbedder
+		wantScores []float64
+		wantCounts string
+	}{
+		{"chunk batch errors", &countingEmbedder{inner: batchVectors(), failCall: map[int]error{1: errors.New("down")}},
+			[]float64{0, 0, 0}, "citations=2 checked=0 unverified=2 evidence=3"},
+		{"sentence batch errors", &countingEmbedder{inner: batchVectors(), failCall: map[int]error{2: errors.New("down")}},
+			[]float64{0, 0, 0}, "citations=2 checked=0 unverified=2 evidence=3"},
+		{"sentence batch count mismatch", &countingEmbedder{inner: batchVectors(), reshape: map[int]func([][]float32) [][]float32{2: drop}},
+			[]float64{0, 0, 0}, "citations=2 checked=0 unverified=2 evidence=3"},
+		{"mixed checked-unsupported and unverified", &countingEmbedder{inner: mixed},
+			[]float64{0.3, 0, 0}, "citations=2 checked=1 unverified=1 evidence=3"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := captureLog(t)
+			r := &RAGService{searchEngine: &fakeSearcher{hits: batchHits()}, embedClient: tc.emb}
+			resp, err := r.Ask(context.Background(), "secret question", nil, 3)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if resp.RefusalReason != reasonVerificationUnavailable || resp.Answer != refusalUnavailable {
+				t.Errorf("reason=%q answer=%q, want verification_unavailable and the B sentence", resp.RefusalReason, resp.Answer)
+			}
+			checkEvidence(t, resp.Citations, batchHits(), tc.wantScores)
+			checkRefusalLog(t, buf, resp.TraceID, "reason=verification_unavailable "+tc.wantCounts)
+		})
+	}
+}
+
+// AI-7 AC4: an answer with no in-range marker (only [9] with K = 3, or none) → all_citations_unsupported,
+// with no embedder call.
+func TestAskRefusesNoInRangeMarker(t *testing.T) {
+	for _, answer := range []string{"Claim [9].", "No markers at all.", ""} {
+		t.Run(answer, func(t *testing.T) {
+			buf := captureLog(t)
+			emb := &countingEmbedder{inner: batchVectors()}
+			r := &RAGService{embedClient: emb}
+			resp := r.finalize(withTraceID(context.Background(), "t-ai7"), "t-ai7", answer, batchHits())
+			if resp.RefusalReason != reasonAllUnsupported || resp.Answer != refusalUnsupported || resp.TraceID != "t-ai7" {
+				t.Errorf("reason=%q answer=%q trace=%q, want all_citations_unsupported, the A sentence, t-ai7",
+					resp.RefusalReason, resp.Answer, resp.TraceID)
+			}
+			if len(emb.calls) != 0 {
+				t.Errorf("EmbedTexts called %d times, want 0", len(emb.calls))
+			}
+			checkEvidence(t, resp.Citations, batchHits(), []float64{0, 0, 0})
+			checkRefusalLog(t, buf, "t-ai7", "reason=all_citations_unsupported citations=0 checked=0 unverified=0 evidence=3")
+		})
+	}
+}
+
+// AI-7 AC3: one supported citation is enough; the answer and per-citation flags are returned as today,
+// with no refusal_reason key and no refusal log line.
+func TestAskKeepsAnswerWithOneSupportedCitation(t *testing.T) {
+	buf := captureLog(t)
+	r := &RAGService{searchEngine: &fakeSearcher{hits: batchHits()}, embedClient: simEmbedder(func(s string) float64 {
+		if strings.HasPrefix(s, "Based on") {
+			return 0.9
+		}
+		return 0.2
+	})}
+	resp, err := r.Ask(context.Background(), "q", nil, 3)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Answer != buildTemplateAnswer(batchHits()) || resp.RefusalReason != "" {
+		t.Errorf("answer=%q reason=%q, want the template answer and no reason", resp.Answer, resp.RefusalReason)
+	}
+	if len(resp.Citations) != 2 || resp.Citations[0].Marker != 1 || !resp.Citations[0].Supported || resp.Citations[0].Score != 0.9 ||
+		resp.Citations[1].Marker != 2 || resp.Citations[1].Supported || resp.Citations[1].Score != 0.2 {
+		t.Errorf("citations %+v, want [1] supported 0.9 and [2] unsupported 0.2", resp.Citations)
+	}
+	raw, _ := json.Marshal(resp)
+	if got, want := sortedKeys(raw), []string{"answer", "citations", "trace_id"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("JSON keys %v, want %v", got, want)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("answer path must not log, got %q", buf.String())
+	}
+}
+
+// AI-7 AC5: the early relevance refusal (QA-5) carries no refusal_reason.
+func TestAskEarlyRefusalHasNoRefusalReason(t *testing.T) {
+	r := &RAGService{searchEngine: &fakeSearcher{hits: []SearchHit{ragHit(1, "Method", 0.2)}}, embedClient: simEmbedder(constSim(1))}
+	resp, err := r.Ask(context.Background(), "q", nil, 3)
+	if err != nil || resp.RefusalReason != "" || resp.Answer != "No indexed papers are relevant to this question." {
+		t.Fatalf("got %+v err %v, want the early refusal without a reason", resp, err)
+	}
+	raw, _ := json.Marshal(resp)
+	if strings.Contains(string(raw), "refusal_reason") {
+		t.Errorf("early refusal JSON %s has refusal_reason", raw)
 	}
 }

@@ -16,6 +16,15 @@ const (
 	SupportThreshold      = 0.50  // Minimum cosine similarity to mark citation supported (§9)
 )
 
+// ADR-0003: when no citation is supported, /v1/ask refuses with evidence and says why.
+const (
+	reasonAllUnsupported          = "all_citations_unsupported"
+	reasonVerificationUnavailable = "verification_unavailable"
+
+	refusalUnsupported = "I couldn't verify any statement of a draft answer against the retrieved passages, so no answer is shown. The passages found are listed below."
+	refusalUnavailable = "Citation checking is unavailable right now, so no answer is shown. The passages found are listed below."
+)
+
 type Citation struct {
 	Marker    int     `json:"marker"`
 	ArxivID   string  `json:"arxiv_id"`
@@ -32,6 +41,9 @@ type AskResponse struct {
 	Answer    string     `json:"answer"`
 	Citations []Citation `json:"citations"`
 	TraceID   string     `json:"trace_id"`
+	// RefusalReason is set only when the answer is withheld (ADR-0003): reasonAllUnsupported or
+	// reasonVerificationUnavailable. Empty, and absent from the JSON, on every other path.
+	RefusalReason string `json:"refusal_reason,omitempty"`
 }
 
 // searcher is the part of *SearchEngine that Ask uses; tests substitute a fake.
@@ -93,7 +105,12 @@ func (r *RAGService) Ask(
 	}
 	hits = relevantHits
 
-	// 4. Synthesize cited response based on verified relevant contexts
+	// 4. Synthesize a cited answer, then validate it and refuse if nothing is supported.
+	return r.finalize(ctx, traceID, buildTemplateAnswer(hits), hits), nil
+}
+
+// buildTemplateAnswer is the templated synthesis over the relevant hits (QA-8 replaces it with an LLM).
+func buildTemplateAnswer(hits []SearchHit) string {
 	topHit := hits[0]
 	answer := fmt.Sprintf(
 		"Based on the indexed research, the paper %q addresses this in the %s section [1].",
@@ -107,14 +124,47 @@ func (r *RAGService) Ask(
 		)
 	}
 
-	// 4. Citation Validation (§9)
-	validatedCitations := r.validateCitations(ctx, answer, hits)
+	return answer
+}
 
-	return &AskResponse{
-		Answer:    answer,
-		Citations: validatedCitations,
-		TraceID:   traceID,
-	}, nil
+// finalize validates answer's citations (§9). If at least one is supported, the answer is returned
+// as is (ADR-0003 Option 1: per-citation flags). Otherwise it refuses with evidence: the fixed
+// sentence for the reason, every relevant hit as a citation in rank order (marker 1..K, its best
+// computed support score or 0, never supported), and one counts-only log line.
+func (r *RAGService) finalize(ctx context.Context, traceID, answer string, hits []SearchHit) *AskResponse {
+	cites, check := r.checkCitations(ctx, answer, hits)
+	for _, c := range cites {
+		if c.Supported {
+			return &AskResponse{Answer: answer, Citations: cites, TraceID: traceID}
+		}
+	}
+
+	reason, text := reasonAllUnsupported, refusalUnsupported
+	if check.unverified > 0 {
+		reason, text = reasonVerificationUnavailable, refusalUnavailable
+	}
+	evidence := make([]Citation, len(hits))
+	for i, h := range hits {
+		evidence[i] = newCitation(i+1, h, check.hitScore[i], false) // 0 when no checked citation scored hit i
+	}
+	id, src := traceIDFrom(ctx)
+	log.Printf("[Query Service] ask refused trace_id=%s trace_id_source=%s reason=%s citations=%d checked=%d unverified=%d evidence=%d",
+		id, src, reason, len(cites), check.checked, check.unverified, len(evidence))
+	return &AskResponse{Answer: text, Citations: evidence, TraceID: traceID, RefusalReason: reason}
+}
+
+func newCitation(marker int, hit SearchHit, score float64, supported bool) Citation {
+	return Citation{
+		Marker:    marker,
+		ArxivID:   hit.ArxivID,
+		Title:     hit.Title,
+		ChunkID:   hit.ChunkID,
+		Section:   hit.SectionTitle,
+		Content:   hit.Content,
+		PDFURL:    fmt.Sprintf("https://arxiv.org/pdf/%s.pdf", hit.ArxivID),
+		Score:     score,
+		Supported: supported,
+	}
 }
 
 // filterRelevantHits applies the relevance cutoff (rerank < 0.45 dropped) and the
@@ -145,7 +195,23 @@ var markerRegex = regexp.MustCompile(`\[(\d+)\]`)
 // Embeddings are fetched in at most two EmbedTexts calls (AI-3): one for every hit's chunk, then one for
 // the distinct marker-free cited sentences. No call is made when the answer has no in-range marker.
 func (r *RAGService) validateCitations(ctx context.Context, answer string, hits []SearchHit) []Citation {
+	cites, _ := r.checkCitations(ctx, answer, hits)
+	return cites
+}
+
+// citationCheck is the internal (never serialized) outcome of checkCitations. A citation is checked when
+// both its sentence and chunk vectors were present, else unverified. hitScore[i] is the highest score of
+// any checked citation of hit i, or 0 if none (hitScored[i] reports whether one exists).
+type citationCheck struct {
+	checked, unverified int
+	hitScore            []float64
+	hitScored           []bool
+}
+
+// checkCitations is validateCitations plus the per-citation checked/unverified state (AI-7).
+func (r *RAGService) checkCitations(ctx context.Context, answer string, hits []SearchHit) ([]Citation, citationCheck) {
 	k := len(hits)
+	check := citationCheck{hitScore: make([]float64, k), hitScored: make([]bool, k)}
 
 	// 1. Collect in-range markers in answer order, deduplicating the cleaned sentences to embed.
 	type pending struct{ hitIdx, sentIdx int }
@@ -173,7 +239,7 @@ func (r *RAGService) validateCitations(ctx context.Context, answer string, hits 
 		}
 	}
 	if len(cited) == 0 {
-		return nil
+		return nil, check
 	}
 
 	// 2. One call for all chunks, one for all distinct sentences.
@@ -204,6 +270,10 @@ func (r *RAGService) validateCitations(ctx context.Context, answer string, hits 
 			sim := cosineSimilarity(sentVec, chunkVec)
 			score = math.Round(float64(sim)*10000) / 10000
 			supported = score >= SupportThreshold
+			check.checked++
+			if !check.hitScored[c.hitIdx] || score > check.hitScore[c.hitIdx] {
+				check.hitScore[c.hitIdx], check.hitScored[c.hitIdx] = score, true
+			}
 		} else {
 			unverified++
 			if sentErr != nil {
@@ -211,25 +281,16 @@ func (r *RAGService) validateCitations(ctx context.Context, answer string, hits 
 			}
 		}
 
-		validatedCitations = append(validatedCitations, Citation{
-			Marker:    c.hitIdx + 1,
-			ArxivID:   hit.ArxivID,
-			Title:     hit.Title,
-			ChunkID:   hit.ChunkID,
-			Section:   hit.SectionTitle,
-			Content:   hit.Content,
-			PDFURL:    fmt.Sprintf("https://arxiv.org/pdf/%s.pdf", hit.ArxivID),
-			Score:     score,
-			Supported: supported,
-		})
+		validatedCitations = append(validatedCitations, newCitation(c.hitIdx+1, hit, score, supported))
 	}
+	check.unverified = unverified
 	if unverified > 0 {
 		// One line per request; counts only, never passage or sentence text.
 		id, src := traceIDFrom(ctx)
 		log.Printf("[Query Service] citation support unverified trace_id=%s trace_id_source=%s unverified=%d citations=%d chunks_without_vector=%d/%d sentence_embed_errors=%d",
 			id, src, unverified, len(validatedCitations), chunkMissing, k, sentenceErrs)
 	}
-	return validatedCitations
+	return validatedCitations, check
 }
 
 // embedBatch embeds texts (documents, not queries) in a single EmbedTexts call and returns exactly
