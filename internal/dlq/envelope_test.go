@@ -27,16 +27,32 @@ func dlqRec(key string, value map[string]interface{}) events.DLQPayload {
 		ErrorType: "ValueError", Attempts: 3, Traceparent: testTrace}
 }
 
-func envelopeCases() []envelopeCase {
-	full := map[string]interface{}{"event_id": testID, "event_type": testTarget, "occurred_at": "2026-11-07T00:00:00Z",
-		"paper_id": "2401.00001", "version": float64(1), "attempt": float64(3), "traceparent": "00-old-old-01",
+// fullEnv is a full envelope as a decoded JSON object, minus the keys in drop.
+func fullEnv(eventType string, drop ...string) map[string]interface{} {
+	m := map[string]interface{}{"event_id": testID, "event_type": eventType, "occurred_at": "2026-11-07T00:00:00Z",
+		"paper_id": "2401.00001", "version": float64(2), "attempt": float64(3), "traceparent": "00-old-old-01",
 		"payload": map[string]interface{}{"arxiv_id": "2401.00001"}}
+	for _, k := range drop {
+		delete(m, k)
+	}
+	return m
+}
+
+func envelopeCases() []envelopeCase {
+	full := fullEnv(testTarget)
 	raw := map[string]interface{}{"arxiv_id": "2401.00001", "version": float64(1)}
 	return []envelopeCase{
 		{name: "a full envelope", in: dlqRec("2401.00001", full), want: "keep"},
 		{name: "a full envelope, empty key", in: dlqRec("", full), want: "keep"},
+		{name: "a full envelope, other event_type and key", in: dlqRec("other-key", fullEnv(events.TopicPapersDownloaded)), want: "keep"},
 		{name: "b raw object", in: dlqRec("2401.00001", raw), want: "wrap"},
 		{name: "b partial envelope", in: dlqRec("2401.00001", map[string]interface{}{"event_id": "x"}), want: "wrap"},
+		// One row per conjunct of the full-envelope guard: an envelope missing exactly one ID field is re-enveloped.
+		{name: "b full envelope minus event_id", in: dlqRec("2401.00001", fullEnv(testTarget, "event_id")), want: "wrap"},
+		{name: "b full envelope minus event_type", in: dlqRec("2401.00001", fullEnv(testTarget, "event_type")), want: "wrap"},
+		{name: "b full envelope minus paper_id", in: dlqRec("2401.00001", fullEnv(testTarget, "paper_id")), want: "wrap"},
+		{name: "b raw_value plus another key", in: dlqRec("2401.00001", map[string]interface{}{
+			"raw_value": "b'\\xff'", "arxiv_id": "2401.00001"}), want: "wrap"},
 		{name: "b envelope with wrong field type", in: dlqRec("2401.00001", map[string]interface{}{
 			"event_id": testID, "event_type": testTarget, "paper_id": float64(7)}), want: "wrap"},
 		{name: "c nil value (B2)", in: dlqRec("2401.00001", nil), want: "skip", reason: skipNilValue},
@@ -45,6 +61,7 @@ func envelopeCases() []envelopeCase {
 			want: "skip", reason: skipRawValue},
 		{name: "c raw object, empty key", in: dlqRec("", raw), want: "skip", reason: skipNoKey},
 		{name: "c partial envelope, empty key", in: dlqRec("", map[string]interface{}{"event_id": "x"}), want: "skip", reason: skipNoKey},
+		{name: "c full envelope minus event_id, empty key", in: dlqRec("", fullEnv(testTarget, "event_id")), want: "skip", reason: skipNoKey},
 	}
 }
 
@@ -57,8 +74,13 @@ func TestReplayEnvelope(t *testing.T) {
 				if !ok || reason != "" {
 					t.Fatalf("ok=%v reason=%q, want the original envelope", ok, reason)
 				}
-				if env.EventID != testID || env.EventType != testTarget || env.PaperID != "2401.00001" {
+				v := tc.in.OriginalValue
+				if env.EventID != v["event_id"] || env.EventType != v["event_type"] || env.PaperID != v["paper_id"] {
 					t.Errorf("envelope = %+v, want the original event_id/event_type/paper_id", env)
+				}
+				if env.OccurredAt != v["occurred_at"] || float64(env.Version) != v["version"] ||
+					!reflect.DeepEqual(env.Payload, v["payload"]) {
+					t.Errorf("envelope = %+v, want the original occurred_at/version/payload", env)
 				}
 				if env.Attempt != 0 || env.Traceparent != testTrace {
 					t.Errorf("attempt=%d traceparent=%q, want 0 and the DLQ payload's", env.Attempt, env.Traceparent)
