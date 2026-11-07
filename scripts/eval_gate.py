@@ -31,6 +31,8 @@ from scripts import evaluate_retrieval as er  # noqa: E402  (stdlib-only at impo
 # ADRs: https://github.com/MaheshPulivarthi18/arxivlens-agents/tree/main/docs/adr
 GATED_MODE = er.RERANK_MODE
 BASELINE_MODES = ("BM25 Keyword", "Dense Vector")
+# Printed by print_table, never read by check_thresholds (EVAL-6). Definitions: evals/README.md.
+REPORT_ONLY_KEYS = ("citation_coverage", "near_miss_correct_refusal_rate", "verification_unavailable_count")
 
 
 def load_thresholds(path: str = os.path.join(EVALS_DIR, "thresholds.json")) -> Dict[str, Any]:
@@ -101,6 +103,13 @@ def print_table(checks: List[Dict[str, Any]], answers: Optional[Dict[str, Any]],
         print(f"{'(info) expected_paper_hit_rate':<48} | {answers['expected_paper_hit_rate']:>9.4f} |")
         p50 = answers["ask_p50_ms"]
         print(f"{'(info) ask_p50_ms':<48} | {'n/a' if p50 is None else f'{p50:.1f}':>9} |")
+        print("-" * 78)
+        print("report-only (EVAL-6; not gated, promoting one to a gate needs an ADR)")
+        for key in REPORT_ONLY_KEYS:
+            v = answers.get(key)
+            val = "n/a" if v is None else (f"{v:.4f}" if isinstance(v, float) else str(v))
+            print(f"{'(report-only) ' + key:<48} | {val:>9} |")
+        print(f"{'(report-only) refusal_reason_counts':<48} | {json.dumps(answers.get('refusal_reason_counts', {}))}")
     print("=" * 78)
 
 
@@ -131,7 +140,8 @@ def main(argv=None) -> int:
             from scripts import evaluate_answers as ea
             results["answers"] = ea.evaluate(ea.load_cases(os.path.join(EVALS_DIR, "answer.jsonl")),
                                              ea.load_cases(os.path.join(EVALS_DIR, "refusal.jsonl")),
-                                             ea.make_http_ask(args.api_url, args.timeout))
+                                             ea.make_http_ask(args.api_url, args.timeout),
+                                             ea.load_cases(os.path.join(EVALS_DIR, "refusal_near_miss.jsonl")))
             ea.print_report(results["answers"])
             if results["answers"]["requests_ok"] == 0:
                 raise ConnectionError(f"every /v1/ask request to {args.api_url} failed")

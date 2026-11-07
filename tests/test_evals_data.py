@@ -64,7 +64,7 @@ def test_dataset_schema_size_and_corpus_membership(name):
 
 
 def test_case_ids_unique_across_sets():
-    all_ids = [c["id"] for name in SETS for c in _jsonl(name)]
+    all_ids = [c["id"] for name in (*SETS, "refusal_near_miss.jsonl") for c in _jsonl(name)]
     assert len(all_ids) == len(set(all_ids))
 
 
@@ -794,3 +794,183 @@ def test_model_mismatch_uses_explicit_query_model_override(monkeypatch, tmp_path
     seen = {}
     monkeypatch.setattr(evaluate_retrieval, "run_retrieval_evaluation", lambda *a, **kw: seen.update(kw) or {})
     assert evaluate_retrieval.main(["--query-model", "org/large"]) == 0 and seen["query_model"] == "org/large"
+
+
+# --- EVAL-6: ADR-0003 classification, report-only answer metrics, near-miss set ---------------------
+
+NEAR_MISS_KEYS = {"id", "question", "answered_by", "why_near", "reviewed_by"}
+CITE = {"arxiv_id": "1706.03762", "chunk_id": 7, "content": "passage text", "title": "T", "score": 0.6}
+
+
+def _cite(marker, supported=True):
+    return {**CITE, "marker": marker, "supported": supported}
+
+
+A_REFUSAL = {"answer": "None of the cited passages support an answer.", "refusal_reason": "all_citations_unsupported",
+             "citations": [_cite(1, False), _cite(2, False), _cite(3, False)]}
+B_RESPONSE = {"answer": "Citations could not be verified.", "refusal_reason": "verification_unavailable",
+              "citations": [_cite(1, False)]}
+EARLY = {"answer": "No indexed papers are relevant to this question.", "citations": []}
+ANSWERED = {"answer": "X holds [1]. Y holds [2].", "citations": [_cite(1), _cite(2)]}
+ANS = [{"id": "a1", "question": "qa", "expected_arxiv_ids": ["1706.03762"]}]
+REF = [{"id": "x1", "question": "qr"}]
+
+
+def _run(answer_resp, refusal_resp, near_miss=None, nm_resp=None):
+    canned = {"qa": answer_resp, "qr": refusal_resp, "qn": nm_resp}
+    nm = [{"id": "n1", "question": "qn"}] if near_miss else None
+    return evaluate_answers.evaluate(ANS, REF, lambda q: (canned[q], 100.0), nm)
+
+
+def test_near_miss_rows_valid_and_not_in_corpus():
+    rows = _jsonl("refusal_near_miss.jsonl")
+    corpus = set(_corpus())
+    assert len(rows) >= 10
+    for r in rows:
+        assert set(r) == NEAR_MISS_KEYS, r
+        assert re.match(r"^n\d{3}$", r["id"]) and r["question"].strip() and r["why_near"].strip(), r
+        assert ARXIV_ID.match(r["answered_by"]), r
+        assert r["answered_by"] not in corpus, f"{r['id']}: answered_by {r['answered_by']} is in corpus.txt"
+        assert r["why_near"].split()[0] in corpus, f"{r['id']}: why_near must start with a corpus arXiv ID"
+        assert r["reviewed_by"] is None or (isinstance(r["reviewed_by"], str) and r["reviewed_by"].strip()), r
+    assert len({r["id"] for r in rows}) == len(rows)
+    assert len({r["question"].lower() for r in rows}) == len(rows)
+
+
+def test_a_refusal_is_correct_refusal_and_answer_refusal():
+    m = _run(A_REFUSAL, A_REFUSAL)
+    assert m["correct_refusal_rate"] == 1.0
+    assert m["answer_refusal_rate"] == 1.0 and m["expected_paper_hit_rate"] == 0.0  # evidence is not a hit
+    assert m["ask_error_count"] == 0 and m["verification_unavailable_count"] == 0
+    assert m["refusal_reason_counts"] == {"all_citations_unsupported": 2}
+
+
+def test_b_verification_unavailable_is_error_never_refusal():
+    m = _run(ANSWERED, B_RESPONSE)
+    assert m["correct_refusal_rate"] == 0.0 and m["refusal_failure_ids"] == ["x1"]
+    assert m["ask_error_count"] == 1 and m["verification_unavailable_count"] == 1 and m["error_case_ids"] == ["x1"]
+    m = _run(B_RESPONSE, EARLY)
+    assert m["answer_refusal_rate"] == 0.0 and m["ask_error_count"] == 1
+    assert m["verification_unavailable_count"] == 1 and m["citations_total"] == 0
+    res = _results()
+    res["answers"] = {**res["answers"], "ask_error_count": m["ask_error_count"]}
+    checks = {c["metric"]: c for c in eval_gate.check_thresholds(res, eval_gate.load_thresholds())}
+    assert not checks["ask_errors (answer + refusal sets)"]["passed"]
+
+
+def test_unknown_refusal_reason_fails_closed_as_error():
+    odd = {**EARLY, "refusal_reason": "something_new"}
+    m = _run(odd, odd)
+    assert m["correct_refusal_rate"] == 0.0 and m["answer_refusal_rate"] == 0.0
+    assert m["ask_error_count"] == 2 and m["verification_unavailable_count"] == 0
+    assert evaluate_answers.classify(odd) == "error"
+
+
+def test_early_refusal_and_classify_branches():
+    assert evaluate_answers.classify(EARLY) == "refusal" and evaluate_answers.is_refusal(EARLY)
+    assert evaluate_answers.classify({**EARLY, "refusal_reason": ""}) == "refusal"
+    assert evaluate_answers.classify(None) == "error"
+    assert evaluate_answers.classify(ANSWERED) == "answered"
+    assert evaluate_answers.is_refusal(A_REFUSAL) and not evaluate_answers.is_refusal(B_RESPONSE)
+    m = _run(ANSWERED, EARLY)
+    assert m["correct_refusal_rate"] == 1.0 and m["refusal_reason_counts"] == {}
+
+
+def test_supported_rate_excludes_refusal_evidence():
+    answers = ANS + [{"id": "a2", "question": "qa2", "expected_arxiv_ids": ["1706.03762"]}]
+    canned = {"qa": ANSWERED, "qa2": A_REFUSAL}
+    m = evaluate_answers.evaluate(answers, [], lambda q: (canned[q], 10.0))
+    assert m["supported_citation_rate"] == 1.0  # not 2/5 = 0.4
+    assert m["citations_total"] == 2
+
+
+@pytest.mark.parametrize("resp,expected", [
+    (ANSWERED, 1.0),
+    ({"answer": "X holds [1]. Y is uncited. Z holds [2].", "citations": [_cite(1), _cite(2)]}, 2 / 3),
+    # an out-of-range marker [9] has no citation, so it does not count
+    ({"answer": "X holds [1]. Y holds [9]. Smith et al. show Z [2].", "citations": [_cite(1), _cite(2)]}, 2 / 3),
+    # claims[] (ADR-0014) take precedence over the answer's sentences
+    ({"answer": "X holds [1]. Y holds [2].", "citations": [_cite(1), _cite(2)],
+      "claims": [{"text": "X", "status": "supported", "markers": [1]},
+                 {"text": "Y", "status": "unsupported", "markers": []},
+                 {"text": "Z", "status": "supported", "markers": [2]},
+                 {"text": "W", "status": "unsupported", "markers": [7]}]}, 0.5),
+])
+def test_citation_coverage(resp, expected):
+    m = _run(resp, EARLY)
+    assert m["citation_coverage"] == pytest.approx(expected, abs=1e-3)
+    if expected == 2 / 3:
+        assert round(m["citation_coverage"], 3) == 0.667
+
+
+def test_citation_coverage_null_without_answered_responses():
+    for resp in (EARLY, A_REFUSAL, B_RESPONSE, None):
+        assert _run(resp, EARLY)["citation_coverage"] is None
+
+
+def test_split_sentences_mirrors_rag_go():
+    with open(os.path.join(os.path.dirname(EVALS), "internal", "query", "rag.go"), encoding="utf-8") as f:
+        src = f.read()
+    go_abbr = re.search(r"sentenceAbbreviations = \[\]string\{([^}]*)\}", src).group(1)
+    assert tuple(re.findall(r'"([^"]+)"', go_abbr)) == evaluate_answers.SENTENCE_ABBREVIATIONS
+    assert evaluate_answers.split_sentences("Smith et al. [1] show X. Y holds [2]! Done?") == \
+        ["Smith et al. [1] show X.", "Y holds [2]!", "Done?"]
+    assert evaluate_answers.split_sentences("v1.5 works") == ["v1.5 works"]
+    assert evaluate_answers.split_sentences("") == []
+
+
+def test_near_miss_rate_is_report_only():
+    m = _run(ANSWERED, EARLY, near_miss=True, nm_resp=A_REFUSAL)
+    assert m["near_miss_correct_refusal_rate"] == 1.0 and m["near_miss_cases"] == 1
+    m = _run(ANSWERED, EARLY, near_miss=True, nm_resp=None)  # a failed near-miss call
+    assert m["near_miss_correct_refusal_rate"] == 0.0 and m["near_miss_error_ids"] == ["n1"]
+    assert m["ask_error_count"] == 0  # gated counts are untouched
+    m = _run(ANSWERED, EARLY, near_miss=True, nm_resp=B_RESPONSE)
+    assert m["near_miss_correct_refusal_rate"] == 0.0 and m["verification_unavailable_count"] == 0
+    assert _run(ANSWERED, EARLY)["near_miss_correct_refusal_rate"] is None
+
+
+def _keys(obj):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield k
+            yield from _keys(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _keys(v)
+
+
+def test_case_records_hold_ids_and_numbers_only():
+    m = _run(ANSWERED, A_REFUSAL, near_miss=True, nm_resp=None)
+    recs = m["cases"]
+    assert [(r["id"], r["set"], r["outcome"]) for r in recs] == \
+        [("a1", "answer", "answered"), ("x1", "refusal", "refusal"), ("n1", "near_miss", "error")]
+    assert recs[0]["citations"][0] == {"arxiv_id": "1706.03762", "chunk_id": 7, "marker": 1,
+                                       "supported": True, "score": 0.6}
+    assert recs[0]["cited_units"] == 2 and recs[0]["total_units"] == 2 and recs[0]["latency_ms"] == 100.0
+    assert recs[1]["refused"] is True and recs[1]["refusal_reason"] == "all_citations_unsupported"
+    assert not {"answer", "content", "text", "question", "title"} & set(_keys(recs))
+    dumped = json.dumps(m)
+    assert "passage text" not in dumped and "X holds" not in dumped
+
+
+def test_check_thresholds_names_unchanged_and_ignore_report_only():
+    expected = ["rerank via production /internal/rerank", "retrieval_coverage",
+                "recall@5 (Hybrid RRF + Rerank)", "hybrid+rerank beats BM25 & dense (MRR, NDCG@5)",
+                "supported_citation_rate", "correct_refusal_rate", "ask_p95_ms",
+                "ask_errors (answer + refusal sets)"]
+    res = _results()
+    assert [c["metric"] for c in eval_gate.check_thresholds(res, eval_gate.load_thresholds())] == expected
+    res["answers"].update(citation_coverage=0.0, near_miss_correct_refusal_rate=0.0,
+                          verification_unavailable_count=0, refusal_reason_counts={"x": 9})
+    checks = eval_gate.check_thresholds(res, eval_gate.load_thresholds())
+    assert [c["metric"] for c in checks] == expected and all(c["passed"] for c in checks)
+
+
+def test_print_table_shows_report_only_block(capsys):
+    m = _run(ANSWERED, EARLY, near_miss=True, nm_resp=EARLY)
+    eval_gate.print_table(eval_gate.check_thresholds({"answers": m}, eval_gate.load_thresholds()), m)
+    out = capsys.readouterr().out
+    assert "report-only" in out and "citation_coverage" in out and "near_miss_correct_refusal_rate" in out
+    evaluate_answers.print_report(m)
+    assert "Citation coverage" in capsys.readouterr().out
