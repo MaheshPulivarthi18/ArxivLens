@@ -9,7 +9,9 @@ Endpoints:
 """
 
 import logging
-from typing import List, Optional
+import os
+import time
+from typing import List, Optional, Sequence, Tuple
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -29,10 +31,86 @@ embedder: Optional[BGEEmbedder] = None
 reranker_tokenizer = None
 reranker_model = None
 
+# Cross-encoder input limit. Lowering it changes scores and ranking, so it needs an ADR (AI-9).
+RERANK_MAX_LENGTH = 512
+# Pairs are scored in length-sorted batches of this size to cut padding; scores go back in input order.
+RERANK_BATCH_SIZE = 8
+
+
+def _torch_threads() -> int:
+    """CPU threads for torch: EMBEDDER_TORCH_THREADS if set to a positive int, else the cores this process may use."""
+    raw = os.getenv("EMBEDDER_TORCH_THREADS", "").strip()
+    if raw:
+        try:
+            n = int(raw)
+            if n > 0:
+                return n
+        except ValueError:
+            pass
+        logger.warning(f"Ignoring invalid EMBEDDER_TORCH_THREADS={raw!r}")
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:  # not available on macOS
+        return max(1, os.cpu_count() or 1)
+
+
+def score_pairs(tokenizer, model, query: str, passages: Sequence[str],
+                batch_size: int = RERANK_BATCH_SIZE) -> Tuple[List[float], dict]:
+    """Cross-encoder sigmoid scores for (query, passage) pairs, returned in input order.
+
+    Same tokenization (truncation, max_length) and model call as a single padded batch, but pairs are
+    sorted by token length and scored in batches so short pairs aren't padded to the longest one.
+    Returns (scores, stats); stats holds counts and timings only, never text.
+    """
+    t0 = time.perf_counter()
+    pairs = [[query, p] for p in passages]
+    lengths = [len(ids) for ids in
+               tokenizer(pairs, truncation=True, max_length=RERANK_MAX_LENGTH)["input_ids"]]
+    order = sorted(range(len(pairs)), key=lambda i: lengths[i])  # stable: ties keep input order
+    batches = []
+    for start in range(0, len(order), batch_size):
+        idx = order[start:start + batch_size]
+        inputs = tokenizer([pairs[i] for i in idx], padding=True, truncation=True,
+                           return_tensors="pt", max_length=RERANK_MAX_LENGTH)
+        batches.append((idx, inputs))
+    t1 = time.perf_counter()
+
+    scores = [0.0] * len(pairs)
+    padded_tokens = 0
+    with torch.inference_mode():
+        for idx, inputs in batches:
+            logits = model(**inputs, return_dict=True).logits.view(-1, ).float()
+            probs = torch.sigmoid(logits).tolist()
+            for i, prob in zip(idx, probs):
+                scores[i] = float(prob)  # back to input order
+            padded_tokens += int(inputs["input_ids"].shape[0]) * int(inputs["input_ids"].shape[1])
+    t2 = time.perf_counter()
+
+    stats = {
+        "passages": len(pairs),
+        "batches": len(batches),
+        "max_len": max(lengths) if lengths else 0,
+        "tokens": sum(lengths),
+        "padded_tokens": padded_tokens,
+        "single_batch_padded_tokens": len(pairs) * (max(lengths) if lengths else 0),
+        "threads": torch.get_num_threads(),
+        "tokenize_ms": round((t1 - t0) * 1000, 1),
+        "forward_ms": round((t2 - t1) * 1000, 1),
+        "total_ms": round((t2 - t0) * 1000, 1),
+    }
+    return scores, stats
+
+
+def _format_stats(stats: dict) -> str:
+    return " ".join(f"{k}={v}" for k, v in stats.items())
+
 
 @app.on_event("startup")
 def load_models():
     global embedder, reranker_tokenizer, reranker_model
+    threads_before = torch.get_num_threads()
+    torch.set_num_threads(_torch_threads())
+    logger.info(f"torch threads: {threads_before} -> {torch.get_num_threads()}")
     logger.info(f"Loading embedding model {config.embedding_model} on device...")
     embedder = BGEEmbedder(model_name=config.embedding_model)
     logger.info(f"Model loaded successfully on {embedder.device}")
@@ -45,6 +123,15 @@ def load_models():
         logger.info("Cross-Encoder Reranker loaded successfully!")
     except Exception as e:
         logger.error(f"Warning: Failed to load cross-encoder ({e}), falling back to bi-encoder")
+        return
+
+    try:
+        # Warm-up so the first real request doesn't pay one-time kernel/allocator setup costs.
+        _, stats = score_pairs(reranker_tokenizer, reranker_model, "warm-up query",
+                               ["warm-up passage " * n for n in (8, 64, 256)])
+        logger.info(f"rerank warm-up {_format_stats(stats)}")
+    except Exception as e:
+        logger.warning(f"rerank warm-up failed ({e}); continuing")
 
 
 class EmbedRequest(BaseModel):
@@ -95,14 +182,9 @@ def rerank_endpoint(req: RerankRequest):
 
     try:
         if reranker_model is not None and reranker_tokenizer is not None:
-            pairs = [[req.query, p] for p in req.passages]
-            with torch.no_grad():
-                inputs = reranker_tokenizer(pairs, padding=True, truncation=True, return_tensors="pt", max_length=512)
-                scores = reranker_model(**inputs, return_dict=True).logits.view(-1, ).float()
-                probs = torch.sigmoid(scores).tolist()
-                if isinstance(probs, float):
-                    probs = [probs]
-                return RerankResponse(scores=[float(s) for s in probs])
+            scores, stats = score_pairs(reranker_tokenizer, reranker_model, req.query, req.passages)
+            logger.info(f"rerank {_format_stats(stats)}")
+            return RerankResponse(scores=scores)
         elif embedder is not None:
             q_vec = embedder.embed_texts([req.query], is_query=True)[0]
             p_vecs = embedder.embed_texts(req.passages, is_query=False)
