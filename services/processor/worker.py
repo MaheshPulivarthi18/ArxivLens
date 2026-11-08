@@ -115,7 +115,7 @@ class ProcessorWorker:
         import re
 
         sections = []
-        current_section = {"title": "Abstract", "level": 1, "text": "", "page": 1}
+        current_section = {"title": "Abstract", "level": 1, "text": "", "page": 1, "page_breaks": []}
 
         font_sizes = []
         for page in doc:
@@ -162,8 +162,12 @@ class ProcessorWorker:
                             "level": 1 if max_span_size >= base_font_size * 1.3 else 2,
                             "text": "",
                             "page": page_idx + 1,
+                            "page_breaks": [],  # (offset into text, 1-based page) where each page's text starts (ING-11)
                         }
                     else:
+                        pb = current_section["page_breaks"]
+                        if not pb or pb[-1][1] != page_idx + 1:
+                            pb.append((len(current_section["text"]), page_idx + 1))
                         current_section["text"] += line_text + " "
 
         if current_section["text"].strip():
