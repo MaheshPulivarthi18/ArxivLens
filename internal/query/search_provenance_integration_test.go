@@ -29,7 +29,7 @@ func TestSearchProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer d.Close()
+	t.Cleanup(d.Close) // registered first so it runs last, after the seed cleanup (t.Cleanup is LIFO)
 
 	// Every chunk and the query share one direction, so the vector arm returns all three; the keyword
 	// arm matches "zyxprov". Category test.prov keeps other rows (TestHNSW's corpus) out of both arms.
