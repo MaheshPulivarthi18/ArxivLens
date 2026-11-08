@@ -256,7 +256,10 @@ class ServiceKafkaConsumer:
                             break
 
                 # Route to DLQ (§6 Tier 2) only once the write is confirmed; a stop leaves the record uncommitted
-                if stopped or (not success and not self._dead_letter(msg, last_err, max_attempts, envelope.traceparent)):
+                if stopped:
+                    break
+                if not success and not self._dead_letter(msg, last_err, max_attempts, envelope.traceparent):
+                    self._commit(msg)
                     break
 
                 # Commit offset only after the handler or a confirmed DLQ write succeeded (§4 Layer 4)
