@@ -20,7 +20,8 @@ concurrency:
 jobs:
   eval:
     runs-on: ubuntu-latest
-    timeout-minutes: 100
+    # Setup + stack-up ~10 + self-test 1 + seed 70 + eval 30 + upload/teardown 2 = ~113 -> 120.
+    timeout-minutes: 120
     env:
       ARXIVLENS_HF_CACHE: /home/runner/.cache/huggingface
       PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
@@ -84,21 +85,27 @@ jobs:
           rc=${PIPESTATUS[0]}; set -e; cat "$RUNNER_TEMP/selftest.tsv"
           if [ "$rc" -eq 0 ] || ! awk -F'\t' '$1 == "0000.00000" && $2 == 3 && $3 == "000" {f = 1} END {exit !f}' \
             "$RUNNER_TEMP/selftest.tsv"; then echo "::error::eval-seed must exit non-zero after 3 attempts with HTTP 000"; exit 1; fi
-          echo "OK: eval-seed exited $rc after 3 attempts"
+          echo "OK: make eval-seed failed (make exit $rc) after 3 attempts"
+      # Worst observed seed 37.8 min x ~1.6 = ~60, + ~1.5 for ING-9's per-process 3 s waits -> 70. Needing more is a signal
+      # to cache the seeded DB/MinIO state (Backlog), not to raise this. Seed time is reported every run; >= 75% warns.
       - name: make eval-seed (31 corpus IDs from arXiv)
-        timeout-minutes: 45
+        timeout-minutes: 70
         run: |
           set +e; make eval-seed 2>&1 | tee seed.log
-          rc=${PIPESTATUS[0]}
-          { echo "### make eval-seed: exit $rc"; echo '```'; cat seed-ids.log; tail -n 3 seed.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          rc=${PIPESTATUS[0]}; t=$SECONDS; budget=70; n=$(grep -cE '^[0-9]{4}\.[0-9]{4,5}' evals/corpus.txt)
+          pct=$((t * 100 / (budget * 60))); line="seed: $((t / 60))m$((t % 60))s for $n IDs ($pct% of the $budget-min step budget)"
+          echo "$line"; if [ "$pct" -ge 75 ]; then echo "::warning::eval-seed used $pct% of its time budget"; fi
+          { echo "### make eval-seed: make exit $rc (non-zero = at least one corpus ID failed; see seed-ids.log)"; echo "$line"
+            echo '```'; cat seed-ids.log; tail -n 3 seed.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
       - name: Machine profile
         timeout-minutes: 1
         env:
-          SHA: ${{ github.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          { echo "### Machine profile"; echo '```'; echo "commit under test (github.sha): $SHA; main (base) SHA: $BASE_SHA"
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then main="main (PR base) SHA: $BASE_SHA"
+          else main="main SHA: $(git ls-remote origin refs/heads/main | cut -f1)"; fi
+          { echo "### Machine profile"; echo '```'; echo "run SHA/ref: $GITHUB_SHA ($GITHUB_REF_NAME); $main"
             lscpu | grep -E '^(Model name|CPU\(s\))'; free -g; echo "embedder /healthz: $(curl -fsS localhost:8081/healthz)"
             echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
       # No continue-on-error and no threshold edits: a latency-red gate is a finding (ADR-0010, Technical PRD §9).
