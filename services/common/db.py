@@ -108,7 +108,8 @@ def save_sections_and_chunks(
                     content_hash = EXCLUDED.content_hash,
                     page_number = EXCLUDED.page_number,
                     token_count = EXCLUDED.token_count,
-                    section_id = EXCLUDED.section_id;
+                    section_id = EXCLUDED.section_id
+                RETURNING id;
                 """,
                 (
                     paper_id,
@@ -120,6 +121,18 @@ def save_sections_and_chunks(
                     chunk.get("token_count", 0),
                 ),
             )
+            chunk_id = cur.fetchone()[0]
+            # ING-11: no row = page unknown. Same transaction as the chunk and the L2 ledger row.
+            if chunk.get("page_start") is not None:
+                cur.execute(
+                    """
+                    INSERT INTO paper_chunk_pages (chunk_id, page_start) VALUES (%s, %s)
+                    ON CONFLICT (chunk_id) DO UPDATE SET page_start = EXCLUDED.page_start;
+                    """,
+                    (chunk_id, chunk["page_start"]),
+                )
+            else:  # a reprocess without a recorded page must not keep a stale one
+                cur.execute("DELETE FROM paper_chunk_pages WHERE chunk_id = %s;", (chunk_id,))
 
         # 3. Update status to 'chunked'
         cur.execute(

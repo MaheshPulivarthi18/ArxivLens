@@ -160,7 +160,7 @@ CUDA in compose is untested: `TORCH_INDEX_URL=https://download.pytorch.org/whl/c
 | `GET` | `/healthz`, `/readyz` | Liveness / readiness |
 | `GET` | `/v1/stats` | Corpus counts (papers, chunks, embedded) |
 | `POST` | `/v1/search` | Hybrid search: `{query, categories?, limit?, rerank?}` |
-| `POST` | `/v1/ask` | Cited answer: `{question, categories?, max_citations?}` |
+| `POST` | `/v1/ask` | Cited answer: `{question, categories?, max_citations?}` → `{answer, citations, trace_id, refusal_reason?}`. When no citation is supported, the answer is withheld, `refusal_reason` is `all_citations_unsupported` or `verification_unavailable`, and `citations` lists every relevant passage as evidence (ADR-0003) |
 | `POST` | `/v1/papers/ingest` | On-demand ingest by arXiv ID or URL |
 | `POST` | `/v1/papers/discover` | Find the best-matching arXiv paper for a query and ingest it |
 | `GET` | `/v1/papers/{arxiv_id}` | Paper pipeline status |
@@ -231,7 +231,8 @@ The `Full stack` workflow (`.github/workflows/stack.yml`) does all of this on a 
 `make migrate`, starts `arxivlens download` and `arxivlens query` on the host, crawls 2 papers to `embedded`,
 ingests the `2608.20331` fixture and runs `make test-full`. Known failure F1: the two M3 `/v1/ask` tests exceed their 10 s
 timeout on CPU runners, so they are deselected there and run in a separate, non-blocking step. It runs on PRs that touch compose, Dockerfiles,
-`requirements*.txt`, the Makefile or the workflow, and on demand (`workflow_dispatch`).
+`requirements*.txt`, the Makefile, the workflow, Go code (`cmd/`, `internal/`, `go.mod`, `go.sum`) or `tests/`, and on demand (`workflow_dispatch`).
+Every run, green or red, uploads a `stack-logs` artifact with `compose.log` and `embedder-timing.log`, plus `query.log` and `downloader.log` once the host services have started.
 
 ---
 

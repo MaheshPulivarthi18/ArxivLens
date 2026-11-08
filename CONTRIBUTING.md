@@ -26,8 +26,10 @@ make setup-fe                              # frontend deps (npm ci)
 | `make infra-up` / `make infra-down` | Postgres+pgvector, Kafka, MinIO | Docker |
 | `make stack-up` / `make stack-down` | Infra + processor, embedder worker, embedder API (:8081) in compose; waits until healthy | Docker |
 | `make test-full` | All milestone suites M0–M6 (`TESTS=` picks paths/node IDs, `PYTEST_ARGS=` adds pytest flags) | `make stack-up`, `make migrate`, `./bin/arxivlens download` + `query` on the host |
-| `.github/workflows/stack.yml` | CI: whole stack, crawl 2 papers, `make test-full` (PRs touching compose/Dockerfiles/requirements/Makefile, or manual) | GitHub runner |
-| `make eval` | Retrieval eval (quality gate over `evals/` once EVAL-1, PR #2, lands) | Docker + indexed corpus |
+| `.github/workflows/stack.yml` | CI: whole stack, crawl 2 papers, `make test-full` (PRs touching compose/Dockerfiles/requirements/Makefile, Go code (`cmd/`, `internal/`, `go.mod`, `go.sum`) or `tests/`, or manual); every run uploads service logs (`stack-logs` artifact) | GitHub runner |
+| `make eval-seed` | Ingests every ID in `evals/corpus.txt` via `POST /v1/papers/ingest` (≥ 3 s apart, 3 attempts on HTTP 000/5xx); exits non-zero if any ID fails, never skips one. One line per ID in `seed-ids.log` | `make stack-up`, `make migrate`, `./bin/arxivlens query` |
+| `make eval` | Quality gate over `evals/` (`scripts/eval_gate.py`): exit 0 pass, 1 gate fail, 2 could not run; results in `evals/results/<timestamp>.json` | Seeded corpus + `query` + embedder API |
+| `.github/workflows/eval.yml` | CI: whole stack, `make eval-seed`, `make eval`. Runs nightly (06:17 UTC), by hand (`gh workflow run eval.yml`, or Actions → Eval → Run workflow) and on PRs that change `eval.yml`. Metric table and exit code in the run's step summary; artifact `eval-results-<run id>` (`evals/results/*.json` + logs) kept 30 days, `eval-stack-logs-<run id>` on failure kept 7 days. GitHub pauses the nightly after 60 days without repo activity | GitHub runner |
 
 Frontend (from `frontend/`): `npm run dev` (:5173, proxies `/v1` → :8080), `npm run lint`, `npm run build`.
 Python services run in compose via `make stack-up`; on the host (Apple-silicon MPS): `python services/processor/worker.py`, `python services/embedder/worker.py`, `python services/embedder/api.py` (:8081).
@@ -41,7 +43,7 @@ services/        Python: processor, embedder (worker + FastAPI), common
 shared/events/   Event envelope contracts (Go + Python, kept in sync)
 migrations/      SQL schema
 scripts/         ML primitives, batch ingest, eval tooling, HNSW benchmark
-evals/           Versioned eval datasets and thresholds for `make eval` (added by EVAL-1, PR #2)
+evals/           Versioned eval datasets and thresholds for `make eval`
 tests/           Milestone suites M0–M6 (pytest)
 frontend/        React 19 + Vite UI
 ```
@@ -55,7 +57,7 @@ frontend/        React 19 + Vite UI
   `arxivlens migrate` re-applies every `*.up.sql` on each run (no version table yet), so each migration must be
   idempotent (`IF NOT EXISTS`) and safe to re-run
 - Embedding model + dimension: `BAAI/bge-base-en-v1.5`, 768-d `halfvec`
-- Quality gates: thresholds (`evals/thresholds.json` once EVAL-1 lands) are never lowered to make a change pass
+- Quality gates: thresholds (`evals/thresholds.json`) are never lowered to make a change pass
 
 **Pipeline reliability** (keep `tests/test_m4_chaos.py` green):
 - Natural-key upserts, commit-after-process, 3× retry with backoff then DLQ with full diagnostics, idempotent replays

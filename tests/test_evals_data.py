@@ -13,7 +13,7 @@ import types
 
 import pytest
 
-from scripts import eval_gate, evaluate_answers, evaluate_retrieval
+from scripts import answer_review, eval_gate, evaluate_answers, evaluate_retrieval
 
 EVALS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "evals")
 ARXIV_ID = re.compile(r"^\d{4}\.\d{4,5}$")
@@ -64,7 +64,7 @@ def test_dataset_schema_size_and_corpus_membership(name):
 
 
 def test_case_ids_unique_across_sets():
-    all_ids = [c["id"] for name in SETS for c in _jsonl(name)]
+    all_ids = [c["id"] for name in (*SETS, "refusal_near_miss.jsonl") for c in _jsonl(name)]
     assert len(all_ids) == len(set(all_ids))
 
 
@@ -794,3 +794,316 @@ def test_model_mismatch_uses_explicit_query_model_override(monkeypatch, tmp_path
     seen = {}
     monkeypatch.setattr(evaluate_retrieval, "run_retrieval_evaluation", lambda *a, **kw: seen.update(kw) or {})
     assert evaluate_retrieval.main(["--query-model", "org/large"]) == 0 and seen["query_model"] == "org/large"
+
+
+# --- EVAL-6: ADR-0003 classification, report-only answer metrics, near-miss set ---------------------
+
+NEAR_MISS_KEYS = {"id", "question", "answered_by", "why_near", "reviewed_by"}
+CITE = {"arxiv_id": "1706.03762", "chunk_id": 7, "content": "passage text", "title": "T", "score": 0.6}
+
+
+def _cite(marker, supported=True):
+    return {**CITE, "marker": marker, "supported": supported}
+
+
+A_REFUSAL = {"answer": "None of the cited passages support an answer.", "refusal_reason": "all_citations_unsupported",
+             "citations": [_cite(1, False), _cite(2, False), _cite(3, False)]}
+B_RESPONSE = {"answer": "Citations could not be verified.", "refusal_reason": "verification_unavailable",
+              "citations": [_cite(1, False)]}
+EARLY = {"answer": "No indexed papers are relevant to this question.", "citations": []}
+ANSWERED = {"answer": "X holds [1]. Y holds [2].", "citations": [_cite(1), _cite(2)]}
+ANS = [{"id": "a1", "question": "qa", "expected_arxiv_ids": ["1706.03762"]}]
+REF = [{"id": "x1", "question": "qr"}]
+
+
+def _run(answer_resp, refusal_resp, near_miss=None, nm_resp=None):
+    canned = {"qa": answer_resp, "qr": refusal_resp, "qn": nm_resp}
+    nm = [{"id": "n1", "question": "qn"}] if near_miss else None
+    return evaluate_answers.evaluate(ANS, REF, lambda q: (canned[q], 100.0), nm)
+
+
+def test_near_miss_rows_valid_and_not_in_corpus():
+    rows = _jsonl("refusal_near_miss.jsonl")
+    corpus = set(_corpus())
+    assert len(rows) >= 10
+    for r in rows:
+        assert set(r) == NEAR_MISS_KEYS, r
+        assert re.match(r"^n\d{3}$", r["id"]) and r["question"].strip() and r["why_near"].strip(), r
+        assert ARXIV_ID.match(r["answered_by"]), r
+        assert r["answered_by"] not in corpus, f"{r['id']}: answered_by {r['answered_by']} is in corpus.txt"
+        assert r["why_near"].split()[0] in corpus, f"{r['id']}: why_near must start with a corpus arXiv ID"
+        assert r["reviewed_by"] is None or (isinstance(r["reviewed_by"], str) and r["reviewed_by"].strip()), r
+    assert len({r["id"] for r in rows}) == len(rows)
+    assert len({r["question"].lower() for r in rows}) == len(rows)
+
+
+def test_a_refusal_is_correct_refusal_and_answer_refusal():
+    m = _run(A_REFUSAL, A_REFUSAL)
+    assert m["correct_refusal_rate"] == 1.0
+    assert m["answer_refusal_rate"] == 1.0 and m["expected_paper_hit_rate"] == 0.0  # evidence is not a hit
+    assert m["ask_error_count"] == 0 and m["verification_unavailable_count"] == 0
+    assert m["refusal_reason_counts"] == {"all_citations_unsupported": 2}
+
+
+def test_b_verification_unavailable_is_error_never_refusal():
+    m = _run(ANSWERED, B_RESPONSE)
+    assert m["correct_refusal_rate"] == 0.0 and m["refusal_failure_ids"] == ["x1"]
+    assert m["ask_error_count"] == 1 and m["verification_unavailable_count"] == 1 and m["error_case_ids"] == ["x1"]
+    m = _run(B_RESPONSE, EARLY)
+    assert m["answer_refusal_rate"] == 0.0 and m["ask_error_count"] == 1
+    assert m["verification_unavailable_count"] == 1 and m["citations_total"] == 0
+    res = _results()
+    res["answers"] = {**res["answers"], "ask_error_count": m["ask_error_count"]}
+    checks = {c["metric"]: c for c in eval_gate.check_thresholds(res, eval_gate.load_thresholds())}
+    assert not checks["ask_errors (answer + refusal sets)"]["passed"]
+
+
+def test_unknown_refusal_reason_fails_closed_as_error():
+    odd = {**EARLY, "refusal_reason": "something_new"}
+    m = _run(odd, odd)
+    assert m["correct_refusal_rate"] == 0.0 and m["answer_refusal_rate"] == 0.0
+    assert m["ask_error_count"] == 2 and m["verification_unavailable_count"] == 0
+    assert evaluate_answers.classify(odd) == "error"
+
+
+def test_early_refusal_and_classify_branches():
+    assert evaluate_answers.classify(EARLY) == "refusal" and evaluate_answers.is_refusal(EARLY)
+    assert evaluate_answers.classify({**EARLY, "refusal_reason": ""}) == "refusal"
+    assert evaluate_answers.classify(None) == "error"
+    assert evaluate_answers.classify(ANSWERED) == "answered"
+    assert evaluate_answers.is_refusal(A_REFUSAL) and not evaluate_answers.is_refusal(B_RESPONSE)
+    m = _run(ANSWERED, EARLY)
+    assert m["correct_refusal_rate"] == 1.0 and m["refusal_reason_counts"] == {}
+
+
+def test_supported_rate_excludes_refusal_evidence():
+    answers = ANS + [{"id": "a2", "question": "qa2", "expected_arxiv_ids": ["1706.03762"]}]
+    canned = {"qa": ANSWERED, "qa2": A_REFUSAL}
+    m = evaluate_answers.evaluate(answers, [], lambda q: (canned[q], 10.0))
+    assert m["supported_citation_rate"] == 1.0  # not 2/5 = 0.4
+    assert m["citations_total"] == 2
+
+
+@pytest.mark.parametrize("resp,expected", [
+    (ANSWERED, 1.0),
+    ({"answer": "X holds [1]. Y is uncited. Z holds [2].", "citations": [_cite(1), _cite(2)]}, 2 / 3),
+    # an out-of-range marker [9] has no citation, so it does not count
+    ({"answer": "X holds [1]. Y holds [9]. Smith et al. show Z [2].", "citations": [_cite(1), _cite(2)]}, 2 / 3),
+    # claims[] (ADR-0014) take precedence over the answer's sentences
+    ({"answer": "X holds [1]. Y holds [2].", "citations": [_cite(1), _cite(2)],
+      "claims": [{"text": "X", "status": "supported", "markers": [1]},
+                 {"text": "Y", "status": "unsupported", "markers": []},
+                 {"text": "Z", "status": "supported", "markers": [2]},
+                 {"text": "W", "status": "unsupported", "markers": [7]}]}, 0.5),
+])
+def test_citation_coverage(resp, expected):
+    m = _run(resp, EARLY)
+    assert m["citation_coverage"] == pytest.approx(expected, abs=1e-3)
+    if expected == 2 / 3:
+        assert round(m["citation_coverage"], 3) == 0.667
+
+
+def test_citation_coverage_null_without_answered_responses():
+    for resp in (EARLY, A_REFUSAL, B_RESPONSE, None):
+        assert _run(resp, EARLY)["citation_coverage"] is None
+
+
+def test_split_sentences_mirrors_rag_go():
+    with open(os.path.join(os.path.dirname(EVALS), "internal", "query", "rag.go"), encoding="utf-8") as f:
+        src = f.read()
+    go_abbr = re.search(r"sentenceAbbreviations = \[\]string\{([^}]*)\}", src).group(1)
+    assert tuple(re.findall(r'"([^"]+)"', go_abbr)) == evaluate_answers.SENTENCE_ABBREVIATIONS
+    assert evaluate_answers.split_sentences("Smith et al. [1] show X. Y holds [2]! Done?") == \
+        ["Smith et al. [1] show X.", "Y holds [2]!", "Done?"]
+    assert evaluate_answers.split_sentences("v1.5 works") == ["v1.5 works"]
+    assert evaluate_answers.split_sentences("") == []
+
+
+def test_near_miss_rate_is_report_only():
+    m = _run(ANSWERED, EARLY, near_miss=True, nm_resp=A_REFUSAL)
+    assert m["near_miss_correct_refusal_rate"] == 1.0 and m["near_miss_cases"] == 1
+    m = _run(ANSWERED, EARLY, near_miss=True, nm_resp=None)  # a failed near-miss call
+    assert m["near_miss_correct_refusal_rate"] == 0.0 and m["near_miss_error_ids"] == ["n1"]
+    assert m["ask_error_count"] == 0  # gated counts are untouched
+    m = _run(ANSWERED, EARLY, near_miss=True, nm_resp=B_RESPONSE)
+    assert m["near_miss_correct_refusal_rate"] == 0.0 and m["verification_unavailable_count"] == 0
+    assert _run(ANSWERED, EARLY)["near_miss_correct_refusal_rate"] is None
+
+
+def _keys(obj):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield k
+            yield from _keys(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _keys(v)
+
+
+def test_case_records_hold_ids_and_numbers_only():
+    m = _run(ANSWERED, A_REFUSAL, near_miss=True, nm_resp=None)
+    recs = m["cases"]
+    assert [(r["id"], r["set"], r["outcome"]) for r in recs] == \
+        [("a1", "answer", "answered"), ("x1", "refusal", "refusal"), ("n1", "near_miss", "error")]
+    assert recs[0]["citations"][0] == {"arxiv_id": "1706.03762", "chunk_id": 7, "marker": 1,
+                                       "supported": True, "score": 0.6}
+    assert recs[0]["cited_units"] == 2 and recs[0]["total_units"] == 2 and recs[0]["latency_ms"] == 100.0
+    assert recs[1]["refused"] is True and recs[1]["refusal_reason"] == "all_citations_unsupported"
+    assert not {"answer", "content", "text", "question", "title"} & set(_keys(recs))
+    dumped = json.dumps(m)
+    assert "passage text" not in dumped and "X holds" not in dumped
+
+
+def test_check_thresholds_names_unchanged_and_ignore_report_only():
+    expected = ["rerank via production /internal/rerank", "retrieval_coverage",
+                "recall@5 (Hybrid RRF + Rerank)", "hybrid+rerank beats BM25 & dense (MRR, NDCG@5)",
+                "supported_citation_rate", "correct_refusal_rate", "ask_p95_ms",
+                "ask_errors (answer + refusal sets)"]
+    res = _results()
+    assert [c["metric"] for c in eval_gate.check_thresholds(res, eval_gate.load_thresholds())] == expected
+    res["answers"].update(citation_coverage=0.0, near_miss_correct_refusal_rate=0.0,
+                          verification_unavailable_count=0, refusal_reason_counts={"x": 9})
+    checks = eval_gate.check_thresholds(res, eval_gate.load_thresholds())
+    assert [c["metric"] for c in checks] == expected and all(c["passed"] for c in checks)
+
+
+def test_print_table_shows_report_only_block(capsys):
+    m = _run(ANSWERED, EARLY, near_miss=True, nm_resp=EARLY)
+    eval_gate.print_table(eval_gate.check_thresholds({"answers": m}, eval_gate.load_thresholds()), m)
+    out = capsys.readouterr().out
+    assert "report-only" in out and "citation_coverage" in out and "near_miss_correct_refusal_rate" in out
+    evaluate_answers.print_report(m)
+    assert "Citation coverage" in capsys.readouterr().out
+
+
+# --- EVAL-7: blind human review (synthetic fixtures only; agents never write real judgments) ---
+
+XC = {"arxiv_id": "1810.04805", "chunk_id": 21, "marker": 1, "supported": True, "score": 0.77}
+A1 = [{"arxiv_id": "1706.03762", "chunk_id": 11, "marker": 1, "supported": True, "score": 0.83},
+      {"arxiv_id": "1706.03762", "chunk_id": 12, "marker": 2, "supported": False, "score": 0.41}]
+REVIEW_RESULTS = {"timestamp": "run1", "answers": {"cases": [
+    {"id": "a001", "set": "answer", "outcome": "answered", "citations": A1},
+    {"id": "a002", "set": "answer", "outcome": "refusal", "citations": []},
+] + [{"id": x, "set": "refusal", "outcome": "answered", "citations": [XC]} for x in ("x001", "x002", "x003", "x004")]}}
+REVIEW_RESP = {
+    "a001": {"answer": "Alpha mixes heads [1]. Gamma holds [1][2][9]. Uncited line.", "citations": [
+        dict(c, content=f"PASSAGE-{n} body", status="unsupported") for n, c in zip(("ONE", "TWO"), A1)]},
+    "x001": {"answer": "Drifted [1].", "citations": [dict(XC, chunk_id=99, content="other")]},
+    "x002": {"answer": "New text, same pair [1].", "citations": [dict(XC, score=0.22, content="p")]},
+    "x004": {"answer": "New text, same pair [1].", "citations": [dict(XC, supported=False, content="p")]},
+    "x003": {"answer": "Refused [1].", "refusal_reason": "all_citations_unsupported", "citations": [dict(XC)]},
+}
+
+
+def _review_export(monkeypatch, tmp_path):
+    questions = {c["question"]: c["id"] for n in ("answer.jsonl", "refusal.jsonl") for c in _jsonl(n)}
+    monkeypatch.setattr(evaluate_answers, "make_http_ask",
+                        lambda url, t: lambda q: (REVIEW_RESP.get(questions[q]), 5.0))
+    res = tmp_path / "run1.json"
+    res.write_text(json.dumps(REVIEW_RESULTS))
+    assert answer_review.main(["export", "--results", str(res), "--out-dir", str(tmp_path)]) == 0
+    rows = evaluate_answers.load_cases(str(tmp_path / "run1.judgments.jsonl"))
+    return res, rows, (tmp_path / "run1.review.md").read_text()
+
+
+def test_review_export_one_row_per_claim_citation_and_blind(monkeypatch, tmp_path, capsys):
+    _, rows, sheet = _review_export(monkeypatch, tmp_path)
+    # a001: u0 [1]; u1 [1][2] ([9] out of range); u2 uncited. a002 not re-asked. x001-4 drift
+    assert [r["row_id"] for r in rows] == ["a001:u0:m1", "a001:u1:m1", "a001:u1:m2"]
+    assert [r["chunk_id"] for r in rows] == [11, 11, 12]
+    assert capsys.readouterr().out.endswith("drifted cases skipped: x001, x002, x003, x004\n")
+    assert "PASSAGE-ONE body" in sheet and "PASSAGE-TWO body" in sheet and "Gamma holds" in sheet
+    assert not [h for h in ("score", "supported", "status", "0.83", "0.41") if h in sheet.lower()]
+    for r in rows:  # the file the reviewer fills: IDs + empty labels, no text, no system verdict
+        assert set(r) == answer_review.LOCAL_KEYS and r["supports"] is None and r["claim_correct"] is None
+        assert not answer_review.validate_judgment(r)
+    assert "PASSAGE" not in json.dumps(rows) and "Alpha" not in json.dumps(rows)
+
+
+def _judged(rows, labels):
+    out = []
+    for r, (sup, cc) in zip(rows, labels):
+        r = dict(r, supports=sup, claim_correct=cc)
+        if sup or cc:
+            r.update(reviewer="tester", date="2026-11-07", notes="synthetic")
+        out.append(r)
+    return out
+
+
+REVIEW_ROWS = [dict(run_id="run1", row_id=f"a001:u{u}:m{m}", case_id="a001", unit=u, marker=m, chunk_id=c,
+                    arxiv_id="1706.03762", supports=None, claim_correct=None, reviewer=None, date=None, notes="")
+               for u, m, c in [(0, 1, 11), (1, 1, 11), (1, 2, 12), (2, 1, 11), (3, 2, 12), (4, 1, 11), (5, 2, 12)]]
+
+
+def test_review_score_known_numbers_and_unjudged_excluded():
+    js = _judged(REVIEW_ROWS, [("yes", "yes"), ("yes", "no"), ("partial", "no"), ("contradicts", "unsure"),
+                               ("no", None), (None, None), (None, None)])
+    m = answer_review.score(js, REVIEW_RESULTS)
+    assert (m["rows_judged"], m["rows_unjudged"]) == (5, 2)
+    assert m["citation_precision"] == pytest.approx(0.4)
+    assert m["partial_rate"] == pytest.approx(0.2) and m["contradiction_rate"] == pytest.approx(0.2)
+    assert m["claims_judged"] == 3 and m["claim_correct_counts"] == {"yes": 1, "no": 1, "unsure": 1}
+    assert m["claim_correctness"] == pytest.approx(1 / 3)
+    assert m["confusion_matrix"] == {"yes": {"true": 2, "false": 0, "missing": 0},
+                                     "partial": {"true": 0, "false": 1, "missing": 0},
+                                     "contradicts": {"true": 1, "false": 0, "missing": 0},
+                                     "no": {"true": 0, "false": 1, "missing": 0}}
+    e = answer_review.score(REVIEW_ROWS)
+    assert (e["rows_judged"], e["rows_unjudged"], e["citation_precision"], e["confusion_matrix"]) == (0, 7, None, None)
+
+
+@pytest.mark.parametrize("change,committed", [
+    ({"supports": "maybe"}, False), ({"supports": "Yes"}, False), ({"claim_correct": "true"}, False),
+    ({"claim": "Alpha mixes heads"}, False), ({"passage": "PASSAGE-ONE"}, False), ({"answer": "x"}, False),
+    ({"notes": "fine"}, True), ({"reviewer": None}, False), ({"date": "07/11/2026"}, False),
+    ({"marker": True}, False), ({"case_id": "a" * 65}, False), ({"reviewer": "r" * 65}, False),
+    ({"arxiv_id": "attention is all you need"}, True), ({"run_id": "run 1"}, True), ({"row_id": "a001:u0:m1 x"}, True),
+    ({"row_id": "a001:u1:m1"}, True), ({"case_id": "a 1", "row_id": "a 1:u0:m1"}, True)])
+def test_review_validator_rejects_bad_labels_and_text_fields(change, committed):
+    row = dict(REVIEW_ROWS[0], supports="yes", claim_correct="yes", reviewer="tester", date="2026-11-07")
+    assert not answer_review.validate_judgment(row)
+    if committed:
+        row.pop("notes")
+        assert not answer_review.validate_judgment(row, committed=True)
+    assert answer_review.validate_judgment(dict(row, **change), committed=committed)
+
+
+def test_review_load_rejects_conflicting_claim_labels_and_duplicates(tmp_path):
+    p = tmp_path / "j.jsonl"
+    js = _judged(REVIEW_ROWS[1:3], [("yes", "yes"), ("yes", "no")])  # same claim (a001, u1)
+    p.write_text("".join(json.dumps(j) + "\n" for j in js))
+    with pytest.raises(ValueError, match="conflicting claim_correct"):
+        answer_review.load_judgments(str(p))
+    p.write_text(json.dumps(REVIEW_ROWS[0]) + "\n" + json.dumps(REVIEW_ROWS[0]) + "\n")
+    with pytest.raises(ValueError, match="duplicate row_id"):
+        answer_review.load_judgments(str(p))
+
+
+def test_review_round_trip_export_score_save(monkeypatch, tmp_path, capsys):
+    res, rows, _ = _review_export(monkeypatch, tmp_path)
+    assert answer_review.main(["export", "--results", str(res), "--out-dir", str(tmp_path)]) == 2  # no overwrite
+    j = tmp_path / "filled.jsonl"
+    j.write_text("".join(json.dumps(r) + "\n" for r in _judged(rows, [("yes", "yes"), ("no", "no"), (None, None)])))
+    committed = tmp_path / "committed"
+    committed.mkdir()
+    out = tmp_path / "m.json"
+    assert answer_review.main(["score", "--judgments", str(j), "--results", str(res), "--save", str(committed),
+                               "--json-out", str(out)]) == 0
+    m = json.loads(out.read_text())
+    assert (m["rows_judged"], m["rows_unjudged"], m["citation_precision"]) == (2, 1, 0.5)
+    assert m["confusion_matrix"]["yes"]["true"] == 1 and m["confusion_matrix"]["no"]["true"] == 1
+    saved = answer_review.load_judgments(str(committed / "run1.jsonl"), committed=True)
+    assert len(saved) == 3 and all("notes" not in s for s in saved)
+    argv = ["score", "--judgments", str(j), "--save", str(committed)]
+    assert answer_review.main(argv) == 2 and answer_review.main(argv + ["--force"]) == 0  # no silent overwrite
+    assert "Citation precision" in capsys.readouterr().out
+
+
+def test_review_committed_judgments_hold_ids_and_labels_only():
+    d = os.path.join(EVALS, "answer_judgments")
+    files = [f for f in sorted(os.listdir(d)) if f.endswith(".jsonl")] if os.path.isdir(d) else []
+    for name in files:
+        rows = answer_review.load_judgments(os.path.join(d, name), committed=True)  # raises on text keys
+        assert {r["run_id"] for r in rows} == {name[:-len(".jsonl")]}, name
+    other = [f for f in (os.listdir(d) if os.path.isdir(d) else []) if not f.endswith(".jsonl") and f != ".gitkeep"]
+    assert not other, f"only <run-id>.jsonl judgments belong in evals/answer_judgments/: {other}"

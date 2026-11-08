@@ -100,25 +100,17 @@ func (m *Manager) Replay(
 			origTopic = strings.TrimSuffix(dlqTopic, ".dlq")
 		}
 
+		// Same rule in dry-run and real runs, so a dry-run's count equals what a real run publishes.
+		envelope, reason, ok := replayEnvelope(dlqEv, origTopic)
+		if !ok {
+			log.Print(skipLine(dlqEv, reason))
+			continue
+		}
+
 		log.Printf("[DLQ Replay] Event key=%s (error=%s) -> Target Topic: %s (DryRun=%v)",
 			dlqEv.OriginalKey, dlqEv.ErrorType, origTopic, dryRun)
 
 		if !dryRun {
-			// Construct envelope from original value
-			envelopeBytes, err := json.Marshal(dlqEv.OriginalValue)
-			if err != nil {
-				log.Printf("[DLQ Replay] Warning: Failed to marshal original value for %s: %v", dlqEv.OriginalKey, err)
-				continue
-			}
-
-			var envelope events.EventEnvelope
-			if err := json.Unmarshal(envelopeBytes, &envelope); err != nil {
-				// Re-envelope if original value was a raw payload
-				envelope = events.NewEventEnvelope(origTopic, dlqEv.OriginalKey, 1, dlqEv.OriginalValue)
-			}
-			envelope.Attempt = 0 // Reset attempt counter (§6)
-			envelope.Traceparent = dlqEv.Traceparent
-
 			if err := producer.Publish(ctx, origTopic, envelope); err != nil {
 				return replayedCount, fmt.Errorf("failed to republish to %s: %w", origTopic, err)
 			}

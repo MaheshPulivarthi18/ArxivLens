@@ -16,6 +16,11 @@ on:
       - requirements*.txt
       - Makefile
       - .github/workflows/stack.yml
+      - cmd/**
+      - internal/**
+      - go.mod
+      - go.sum
+      - tests/**
 
 permissions:
   contents: read
@@ -229,16 +234,30 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
+      # Every run, green or red, so the artifact always has service logs (embedder rerank timing for ADR-0015).
+      - name: Collect service logs
+        if: always()
+        timeout-minutes: 5
+        run: |
+          mkdir -p stack-logs || true
+          docker compose --profile workers logs --no-color --timestamps > stack-logs/compose.log 2>&1 || true
+          for f in downloader.log query.log ingest.json; do
+            if [ -f "$f" ]; then cp "$f" stack-logs/ || true; fi
+          done
+          t=stack-logs/embedder-timing.log
+          grep -F -e 'rerank passages=' -e 'rerank warm-up' -e 'torch threads' stack-logs/compose.log > "$t" || true
+          [ -s "$t" ] || echo "no embedder rerank timing lines (embedder predates AI-9)" > "$t" || true
+          { echo "### Embedder rerank timing"; echo '```'; head -n 200 "$t"; echo '```'; } >> "$GITHUB_STEP_SUMMARY" || true
+          ls -l stack-logs || true
+
       - name: Diagnostics
         if: "failure()"
         timeout-minutes: 5
         run: |
           mkdir -p stack-logs
           docker compose --profile workers ps -a | tee stack-logs/ps.txt
-          docker compose --profile workers logs --no-color --timestamps > stack-logs/compose.log 2>&1
-          cat stack-logs/compose.log
-          for f in downloader.log query.log ingest.json; do
-            if [ -f "$f" ]; then echo "== $f"; cat "$f"; cp "$f" stack-logs/; fi
+          for f in compose.log downloader.log query.log ingest.json; do
+            if [ -f "stack-logs/$f" ]; then echo "== $f"; cat "stack-logs/$f"; fi
           done
           for t in papers.discovered.dlq papers.downloaded.dlq papers.chunked.dlq; do
             ./bin/arxivlens dlq list --topic "$t" || true
