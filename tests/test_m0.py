@@ -175,6 +175,119 @@ def test_rerank_torch_threads_env(monkeypatch):
     assert api._torch_threads() >= 1
 
 
+def test_rerank_torch_threads_fallback_without_sched_getaffinity(monkeypatch):
+    from services.embedder import api
+
+    monkeypatch.delenv("EMBEDDER_TORCH_THREADS", raising=False)
+    monkeypatch.delattr(api.os, "sched_getaffinity", raising=False)  # e.g. macOS
+    monkeypatch.setattr(api.os, "cpu_count", lambda: 6)
+    assert api._torch_threads() == 6
+    monkeypatch.setattr(api.os, "cpu_count", lambda: None)
+    assert api._torch_threads() == 1
+
+
+@pytest.mark.parametrize("batch_size,n_batches", [(1, 20), (3, 7), (4, 5), (20, 1), (32, 1)])
+def test_rerank_score_pairs_batch_sizes(batch_size, n_batches):
+    """Exact multiples, a remainder, batch == pool and batch > pool all give the single-batch scores in input order."""
+    from services.embedder import api
+
+    tok, query, passages = _FakeRerankTokenizer(), "low rank adaptation", _mixed_length_passages()
+    expected = _legacy_rerank_scores(tok, _FakeRerankModel(), query, passages)
+    model = _FakeRerankModel()
+
+    scores, stats = api.score_pairs(tok, model, query, passages, batch_size=batch_size)
+
+    assert scores == pytest.approx(expected, abs=1e-6)
+    assert stats["batches"] == len(model.batch_shapes) == n_batches
+    assert sum(shape[0] for shape in model.batch_shapes) == 20
+    if n_batches == 1:
+        assert stats["padded_tokens"] == stats["single_batch_padded_tokens"]
+
+
+def test_rerank_single_passage_returns_one_score(monkeypatch):
+    """The old code special-cased a scalar `probs` for one passage; the new path must still return a 1-element list."""
+    from services.embedder import api
+
+    tok, query, passages = _FakeRerankTokenizer(), "rotary position embeddings", ["rotary embeddings rotate keys"]
+    expected = _legacy_rerank_scores(tok, _FakeRerankModel(), query, passages)
+
+    scores, stats = api.score_pairs(tok, _FakeRerankModel(), query, passages)
+    assert isinstance(scores, list) and len(scores) == 1 and scores == pytest.approx(expected, abs=1e-6)
+    assert stats["passages"] == stats["batches"] == 1
+
+    monkeypatch.setattr(api, "reranker_tokenizer", tok)
+    monkeypatch.setattr(api, "reranker_model", _FakeRerankModel())
+    resp = api.rerank_endpoint(api.RerankRequest(query=query, passages=passages))
+    assert resp.scores == pytest.approx(expected, abs=1e-6)
+
+
+def _patch_load_models(monkeypatch, api, reranker_load_error=None):
+    """Fake BGE and cross-encoder loaders for load_models; globals and torch threads are restored after the test."""
+    for name in ("embedder", "reranker_tokenizer", "reranker_model"):
+        monkeypatch.setattr(api, name, None)
+    monkeypatch.setattr(api.torch, "set_num_threads", lambda n: None)
+    monkeypatch.setattr(api, "BGEEmbedder", lambda model_name: SimpleNamespace(device="cpu"))
+
+    def load_tokenizer(*_a, **_k):
+        if reranker_load_error is not None:
+            raise reranker_load_error
+        return _FakeRerankTokenizer()
+
+    model = _FakeRerankModel()
+    model.eval = lambda: model
+    monkeypatch.setattr(api.AutoTokenizer, "from_pretrained", load_tokenizer)
+    monkeypatch.setattr(api.AutoModelForSequenceClassification, "from_pretrained", lambda *a, **k: model)
+
+
+def test_rerank_load_models_runs_warm_up(monkeypatch, caplog):
+    from services.embedder import api
+
+    _patch_load_models(monkeypatch, api)
+    calls = []
+    real_score_pairs = api.score_pairs
+    monkeypatch.setattr(api, "score_pairs", lambda *a, **k: calls.append(len(a[3])) or real_score_pairs(*a, **k))
+
+    with caplog.at_level("INFO", logger="embedder-api"):
+        api.load_models()
+
+    assert api.reranker_model is not None and api.reranker_tokenizer is not None
+    assert calls == [3]
+    assert any(r.getMessage().startswith("rerank warm-up passages=3 ") for r in caplog.records)
+
+
+def test_rerank_load_models_continues_when_warm_up_fails(monkeypatch, caplog):
+    from services.embedder import api
+
+    _patch_load_models(monkeypatch, api)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("warm-up exploded")
+
+    monkeypatch.setattr(api, "score_pairs", boom)
+
+    with caplog.at_level("INFO", logger="embedder-api"):
+        api.load_models()  # must not raise: start-up continues
+
+    assert api.embedder is not None and api.reranker_model is not None and api.reranker_tokenizer is not None
+    assert any("rerank warm-up failed (warm-up exploded); continuing" in r.getMessage() for r in caplog.records)
+
+
+def test_rerank_load_models_returns_early_when_cross_encoder_fails(monkeypatch, caplog):
+    from services.embedder import api
+
+    _patch_load_models(monkeypatch, api, reranker_load_error=OSError("no reranker"))
+    calls = []
+    monkeypatch.setattr(api, "score_pairs", lambda *a, **k: calls.append(a))
+
+    with caplog.at_level("INFO", logger="embedder-api"):
+        api.load_models()
+
+    assert api.embedder is not None  # the bi-encoder fallback stays available
+    assert api.reranker_model is None and api.reranker_tokenizer is None
+    assert calls == []  # no warm-up without a cross-encoder
+    assert any("Failed to load cross-encoder (no reranker)" in r.getMessage() for r in caplog.records)
+
+
 _RERANK_PARITY_SENTENCES = [
     "FlashAttention tiles the attention computation so blocks fit in on-chip SRAM and cut HBM traffic.",
     "Dense passage retrieval trains a dual encoder so questions and passages share one embedding space.",
@@ -199,32 +312,47 @@ _RERANK_PARITY_SENTENCES = [
 ]
 
 
+_RERANKER = "BAAI/bge-reranker-base"
+
+
+def _reranker_in_local_hf_cache() -> bool:
+    """True when bge-reranker-base is in the local Hugging Face cache (checked without any network call)."""
+    from huggingface_hub import try_to_load_from_cache
+
+    return isinstance(try_to_load_from_cache(_RERANKER, "config.json"), str)
+
+
 def test_rerank_real_cross_encoder_scores_match_single_batch():
     """AC2 parity on the real BAAI/bge-reranker-base: 3 queries x 20 passages, old vs new path within 1e-4.
 
-    Skips when the model can't be loaded (e.g. no Hugging Face access); CI downloads it.
+    Loads from the local HF cache only (never downloads). Skips only when the model isn't cached (ci.yml's Python
+    job); stack.yml pre-fetches it, so the test runs there. Any other load error fails the test.
     """
     from transformers import AutoTokenizer, AutoModelForSequenceClassification
     from services.embedder import api
 
-    try:
-        tok = AutoTokenizer.from_pretrained("BAAI/bge-reranker-base")
-        model = AutoModelForSequenceClassification.from_pretrained("BAAI/bge-reranker-base").eval()
-    except Exception as e:  # noqa: BLE001 - any load failure means "no model here"
-        pytest.skip(f"bge-reranker-base not loadable: {e}")
+    if not _reranker_in_local_hf_cache():
+        pytest.skip("bge-reranker-base not in local HF cache")
+    tok = AutoTokenizer.from_pretrained(_RERANKER, local_files_only=True)
+    model = AutoModelForSequenceClassification.from_pretrained(_RERANKER, local_files_only=True).eval()
 
-    reps = [1, 12, 2, 30, 4, 1, 8, 20, 3, 1, 6, 16, 2, 10, 1, 25, 5, 3, 14, 7]  # 1..30 sentences, > 512 tokens at the top
+    # 1..45 sentences; four passages (30, 40, 45, 35 sentences) exceed 512 tokens, so truncation is exercised.
+    reps = [1, 12, 2, 30, 4, 1, 8, 40, 3, 1, 6, 45, 2, 10, 1, 35, 5, 3, 14, 7]
     passages = [" ".join([s] * n) for s, n in zip(_RERANK_PARITY_SENTENCES, reps)]
     queries = ["how does flash attention reduce memory traffic",
                "dense retrieval with dual encoders for open-domain QA",
                "preference optimization without a reward model"]
     worst = 0.0
-    for q in queries:
+    for qi, q in enumerate(queries):
+        full_lengths = [len(ids) for ids in tok([[q, p] for p in passages], truncation=False)["input_ids"]]
+        truncated = sum(n > api.RERANK_MAX_LENGTH for n in full_lengths)
+        assert truncated >= 3, f"only {truncated} of 20 passages exceed {api.RERANK_MAX_LENGTH} tokens"
         old = _legacy_rerank_scores(tok, model, q, passages)
         new, stats = api.score_pairs(tok, model, q, passages)
-        worst = max(worst, max(abs(a - b) for a, b in zip(old, new)))
+        diff = max(abs(a - b) for a, b in zip(old, new))
+        worst = max(worst, diff)
         assert sorted(range(20), key=lambda i: -old[i]) == sorted(range(20), key=lambda i: -new[i]), q
         # warnings show in `pytest -q` output (CI log), so the parity numbers are visible without -s
-        warnings.warn(f"AI-9 parity query={queries.index(q)} max_abs_diff={max(abs(a - b) for a, b in zip(old, new)):.2e} "
+        warnings.warn(f"AI-9 parity query={qi} max_abs_diff={diff:.2e} truncated={truncated}/20 "
                       f"{api._format_stats(stats)}")
     assert worst <= 1e-4
