@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import signal
+import time
 import threading
 import traceback
 from datetime import datetime, timezone
@@ -251,7 +252,7 @@ class ServiceKafkaConsumer:
                             f"Error in handler (attempt {attempt}/{max_attempts}) for key={envelope.paper_id}: {type(e).__name__}"
                         )
                         # Stop requested (also: the handler failed because of it): no more attempts, no DLQ, no commit
-                        if self._stop.is_set() or (attempt < max_attempts and self._wait(self._handler_backoff(attempt))):
+                        if self._stop.is_set() or (attempt < max_attempts and time.sleep(self._handler_backoff(attempt))):
                             stopped = True
                             break
 
