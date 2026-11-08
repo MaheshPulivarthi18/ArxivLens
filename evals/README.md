@@ -12,6 +12,7 @@ case to make a run pass**; a wrong threshold needs an Accepted ADR.
 | `refusal_near_miss.jsonl` | `{"id","question","answered_by","why_near","reviewed_by"}` (in-domain, answering paper not in corpus; report-only) | 10 |
 | `thresholds.json` | PRD §8 targets used by `scripts/eval_gate.py` | — |
 | `results/` | one JSON per gate run (git-ignored) | — |
+| `answer_judgments/` | `<run-id>.jsonl` human review labels, IDs only (EVAL-7, see Human review) | — |
 
 ## Running
 ```bash
@@ -109,6 +110,28 @@ paper it resembles. A test fails if any `answered_by` is in `corpus.txt` or a fi
 a human reviewer (Mahesh or someone he names) checks on arxiv.org that `answered_by` answers the question and that no
 corpus paper does, then sets `reviewed_by` to their name or handle. `reviewed_by: null` means not reviewed yet.
 If a corpus paper turns out to answer a row, fix the row; don't add the paper to the corpus.
+
+## Human review of answers (EVAL-7, report-only)
+Cosine ≥ 0.50 says a sentence and a passage are related, not that the passage supports it. `scripts/answer_review.py`
+lets a person check, and its numbers are the evidence for or against an entailment verifier (ADR-0014). Not gated.
+**Who:** Mahesh or a reviewer he names. Agents never fill in judgments; tests use synthetic fixtures only.
+
+- **Export** (query service up on the run's corpus): `python3 scripts/answer_review.py export --results
+  evals/results/<run-id>.json [--db-url ...]`. Results hold no text, so each answered case is asked again for the claim
+  text; a case refused now, or whose per-citation (marker, chunk_id, score, supported) differs from the results, is
+  skipped as drifted. Passage text comes by `chunk_id` from that response, or Postgres with `--db-url`. It writes
+  `evals/results/<run-id>.review.md` to read and `<run-id>.judgments.jsonl` to fill: one row per (claim or sentence,
+  cited marker); uncited sentences get none.
+- **Keep it blind:** the sheet hides `score`, `supported`, `status`; don't open that run's results or UI until done.
+- **Labels:** `supports` = `yes | partial | no | contradicts`; `claim_correct` = `yes | no | unsure` (one per claim);
+  `reviewer`; `date` (`YYYY-MM-DD`); optional `notes` (local only). `supports: null` = unjudged (counted, not rated).
+- **How long (estimate):** a 20-case template run is ~40 rows, 20–40 min at 30–60 s a row (replace once measured).
+- **Score:** `python3 scripts/answer_review.py score --judgments <file> --results evals/results/<run-id>.json` prints
+  citation precision (`yes` / judged), partial and contradiction rates, claim correctness (`yes` / judged claims),
+  judged/unjudged counts and the confusion matrix of human `supports` × system `supported`.
+- **Where judgments go:** `--save evals/answer_judgments/` writes `<run-id>.jsonl` to commit (no overwrite without
+  `--force`): IDs and labels only, never passage, answer or notes text (public repo; arXiv licences vary). A test
+  rejects other keys and free text in ID fields. Keep the run's results JSON (or EVAL-3 artifact) for the matrix.
 
 ## Seeding the corpus
 On-demand ingest via the query API (fetches from arXiv, chunks and embeds):

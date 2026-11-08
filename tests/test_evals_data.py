@@ -13,7 +13,7 @@ import types
 
 import pytest
 
-from scripts import eval_gate, evaluate_answers, evaluate_retrieval
+from scripts import answer_review, eval_gate, evaluate_answers, evaluate_retrieval
 
 EVALS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "evals")
 ARXIV_ID = re.compile(r"^\d{4}\.\d{4,5}$")
@@ -974,3 +974,136 @@ def test_print_table_shows_report_only_block(capsys):
     assert "report-only" in out and "citation_coverage" in out and "near_miss_correct_refusal_rate" in out
     evaluate_answers.print_report(m)
     assert "Citation coverage" in capsys.readouterr().out
+
+
+# --- EVAL-7: blind human review (synthetic fixtures only; agents never write real judgments) ---
+
+XC = {"arxiv_id": "1810.04805", "chunk_id": 21, "marker": 1, "supported": True, "score": 0.77}
+A1 = [{"arxiv_id": "1706.03762", "chunk_id": 11, "marker": 1, "supported": True, "score": 0.83},
+      {"arxiv_id": "1706.03762", "chunk_id": 12, "marker": 2, "supported": False, "score": 0.41}]
+REVIEW_RESULTS = {"timestamp": "run1", "answers": {"cases": [
+    {"id": "a001", "set": "answer", "outcome": "answered", "citations": A1},
+    {"id": "a002", "set": "answer", "outcome": "refusal", "citations": []},
+] + [{"id": x, "set": "refusal", "outcome": "answered", "citations": [XC]} for x in ("x001", "x002", "x003", "x004")]}}
+REVIEW_RESP = {
+    "a001": {"answer": "Alpha mixes heads [1]. Gamma holds [1][2][9]. Uncited line.", "citations": [
+        dict(c, content=f"PASSAGE-{n} body", status="unsupported") for n, c in zip(("ONE", "TWO"), A1)]},
+    "x001": {"answer": "Drifted [1].", "citations": [dict(XC, chunk_id=99, content="other")]},
+    "x002": {"answer": "New text, same pair [1].", "citations": [dict(XC, score=0.22, content="p")]},
+    "x004": {"answer": "New text, same pair [1].", "citations": [dict(XC, supported=False, content="p")]},
+    "x003": {"answer": "Refused [1].", "refusal_reason": "all_citations_unsupported", "citations": [dict(XC)]},
+}
+
+
+def _review_export(monkeypatch, tmp_path):
+    questions = {c["question"]: c["id"] for n in ("answer.jsonl", "refusal.jsonl") for c in _jsonl(n)}
+    monkeypatch.setattr(evaluate_answers, "make_http_ask",
+                        lambda url, t: lambda q: (REVIEW_RESP.get(questions[q]), 5.0))
+    res = tmp_path / "run1.json"
+    res.write_text(json.dumps(REVIEW_RESULTS))
+    assert answer_review.main(["export", "--results", str(res), "--out-dir", str(tmp_path)]) == 0
+    rows = evaluate_answers.load_cases(str(tmp_path / "run1.judgments.jsonl"))
+    return res, rows, (tmp_path / "run1.review.md").read_text()
+
+
+def test_review_export_one_row_per_claim_citation_and_blind(monkeypatch, tmp_path, capsys):
+    _, rows, sheet = _review_export(monkeypatch, tmp_path)
+    # a001: u0 [1]; u1 [1][2] ([9] out of range); u2 uncited. a002 not re-asked. x001-4 drift
+    assert [r["row_id"] for r in rows] == ["a001:u0:m1", "a001:u1:m1", "a001:u1:m2"]
+    assert [r["chunk_id"] for r in rows] == [11, 11, 12]
+    assert capsys.readouterr().out.endswith("drifted cases skipped: x001, x002, x003, x004\n")
+    assert "PASSAGE-ONE body" in sheet and "PASSAGE-TWO body" in sheet and "Gamma holds" in sheet
+    assert not [h for h in ("score", "supported", "status", "0.83", "0.41") if h in sheet.lower()]
+    for r in rows:  # the file the reviewer fills: IDs + empty labels, no text, no system verdict
+        assert set(r) == answer_review.LOCAL_KEYS and r["supports"] is None and r["claim_correct"] is None
+        assert not answer_review.validate_judgment(r)
+    assert "PASSAGE" not in json.dumps(rows) and "Alpha" not in json.dumps(rows)
+
+
+def _judged(rows, labels):
+    out = []
+    for r, (sup, cc) in zip(rows, labels):
+        r = dict(r, supports=sup, claim_correct=cc)
+        if sup or cc:
+            r.update(reviewer="tester", date="2026-11-07", notes="synthetic")
+        out.append(r)
+    return out
+
+
+REVIEW_ROWS = [dict(run_id="run1", row_id=f"a001:u{u}:m{m}", case_id="a001", unit=u, marker=m, chunk_id=c,
+                    arxiv_id="1706.03762", supports=None, claim_correct=None, reviewer=None, date=None, notes="")
+               for u, m, c in [(0, 1, 11), (1, 1, 11), (1, 2, 12), (2, 1, 11), (3, 2, 12), (4, 1, 11), (5, 2, 12)]]
+
+
+def test_review_score_known_numbers_and_unjudged_excluded():
+    js = _judged(REVIEW_ROWS, [("yes", "yes"), ("yes", "no"), ("partial", "no"), ("contradicts", "unsure"),
+                               ("no", None), (None, None), (None, None)])
+    m = answer_review.score(js, REVIEW_RESULTS)
+    assert (m["rows_judged"], m["rows_unjudged"]) == (5, 2)
+    assert m["citation_precision"] == pytest.approx(0.4)
+    assert m["partial_rate"] == pytest.approx(0.2) and m["contradiction_rate"] == pytest.approx(0.2)
+    assert m["claims_judged"] == 3 and m["claim_correct_counts"] == {"yes": 1, "no": 1, "unsure": 1}
+    assert m["claim_correctness"] == pytest.approx(1 / 3)
+    assert m["confusion_matrix"] == {"yes": {"true": 2, "false": 0, "missing": 0},
+                                     "partial": {"true": 0, "false": 1, "missing": 0},
+                                     "contradicts": {"true": 1, "false": 0, "missing": 0},
+                                     "no": {"true": 0, "false": 1, "missing": 0}}
+    e = answer_review.score(REVIEW_ROWS)
+    assert (e["rows_judged"], e["rows_unjudged"], e["citation_precision"], e["confusion_matrix"]) == (0, 7, None, None)
+
+
+@pytest.mark.parametrize("change,committed", [
+    ({"supports": "maybe"}, False), ({"supports": "Yes"}, False), ({"claim_correct": "true"}, False),
+    ({"claim": "Alpha mixes heads"}, False), ({"passage": "PASSAGE-ONE"}, False), ({"answer": "x"}, False),
+    ({"notes": "fine"}, True), ({"reviewer": None}, False), ({"date": "07/11/2026"}, False),
+    ({"marker": True}, False), ({"case_id": "a" * 65}, False), ({"reviewer": "r" * 65}, False),
+    ({"arxiv_id": "attention is all you need"}, True), ({"run_id": "run 1"}, True), ({"row_id": "a001:u0:m1 x"}, True),
+    ({"row_id": "a001:u1:m1"}, True), ({"case_id": "a 1", "row_id": "a 1:u0:m1"}, True)])
+def test_review_validator_rejects_bad_labels_and_text_fields(change, committed):
+    row = dict(REVIEW_ROWS[0], supports="yes", claim_correct="yes", reviewer="tester", date="2026-11-07")
+    assert not answer_review.validate_judgment(row)
+    if committed:
+        row.pop("notes")
+        assert not answer_review.validate_judgment(row, committed=True)
+    assert answer_review.validate_judgment(dict(row, **change), committed=committed)
+
+
+def test_review_load_rejects_conflicting_claim_labels_and_duplicates(tmp_path):
+    p = tmp_path / "j.jsonl"
+    js = _judged(REVIEW_ROWS[1:3], [("yes", "yes"), ("yes", "no")])  # same claim (a001, u1)
+    p.write_text("".join(json.dumps(j) + "\n" for j in js))
+    with pytest.raises(ValueError, match="conflicting claim_correct"):
+        answer_review.load_judgments(str(p))
+    p.write_text(json.dumps(REVIEW_ROWS[0]) + "\n" + json.dumps(REVIEW_ROWS[0]) + "\n")
+    with pytest.raises(ValueError, match="duplicate row_id"):
+        answer_review.load_judgments(str(p))
+
+
+def test_review_round_trip_export_score_save(monkeypatch, tmp_path, capsys):
+    res, rows, _ = _review_export(monkeypatch, tmp_path)
+    assert answer_review.main(["export", "--results", str(res), "--out-dir", str(tmp_path)]) == 2  # no overwrite
+    j = tmp_path / "filled.jsonl"
+    j.write_text("".join(json.dumps(r) + "\n" for r in _judged(rows, [("yes", "yes"), ("no", "no"), (None, None)])))
+    committed = tmp_path / "committed"
+    committed.mkdir()
+    out = tmp_path / "m.json"
+    assert answer_review.main(["score", "--judgments", str(j), "--results", str(res), "--save", str(committed),
+                               "--json-out", str(out)]) == 0
+    m = json.loads(out.read_text())
+    assert (m["rows_judged"], m["rows_unjudged"], m["citation_precision"]) == (2, 1, 0.5)
+    assert m["confusion_matrix"]["yes"]["true"] == 1 and m["confusion_matrix"]["no"]["true"] == 1
+    saved = answer_review.load_judgments(str(committed / "run1.jsonl"), committed=True)
+    assert len(saved) == 3 and all("notes" not in s for s in saved)
+    argv = ["score", "--judgments", str(j), "--save", str(committed)]
+    assert answer_review.main(argv) == 2 and answer_review.main(argv + ["--force"]) == 0  # no silent overwrite
+    assert "Citation precision" in capsys.readouterr().out
+
+
+def test_review_committed_judgments_hold_ids_and_labels_only():
+    d = os.path.join(EVALS, "answer_judgments")
+    files = [f for f in sorted(os.listdir(d)) if f.endswith(".jsonl")] if os.path.isdir(d) else []
+    for name in files:
+        rows = answer_review.load_judgments(os.path.join(d, name), committed=True)  # raises on text keys
+        assert {r["run_id"] for r in rows} == {name[:-len(".jsonl")]}, name
+    other = [f for f in (os.listdir(d) if os.path.isdir(d) else []) if not f.endswith(".jsonl") and f != ".gitkeep"]
+    assert not other, f"only <run-id>.jsonl judgments belong in evals/answer_judgments/: {other}"
