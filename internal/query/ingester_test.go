@@ -2,8 +2,11 @@ package query
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"sort"
 	"strings"
 	"sync"
@@ -12,6 +15,8 @@ import (
 
 	"arxivlens/internal/arxiv"
 	"arxivlens/internal/config"
+	"arxivlens/internal/db"
+	"github.com/minio/minio-go/v7"
 )
 
 // Pins current behaviour of ExtractCleanArxivID (regex \d{4}\.\d{4,5}).
@@ -145,7 +150,7 @@ func checkSpaced(t *testing.T, stub *arxivStub, wantURLs ...string) {
 // IngestPaper sends Atom then PDF; DiscoverAndIngest sends search, Atom, PDF. All spaced and identified.
 func TestIngestSpacesArxivRequests(t *testing.T) {
 	for _, discover := range []bool{false, true} {
-		stub, want := &arxivStub{}, []string{"id_list=2307.08691", "arxiv.org/pdf/2307.08691.pdf"}
+		stub, want := &arxivStub{}, []string{"id_list=2307.08691", "arxiv.org/pdf/2307.08691v1.pdf"}
 		ing, err := newStubIngester(stub), error(nil)
 		if discover {
 			_, err = ing.DiscoverAndIngest(context.Background(), "flash attention")
@@ -170,4 +175,90 @@ func TestConcurrentIngestsShareOneLimiter(t *testing.T) {
 	}
 	wg.Wait()
 	checkSpaced(t, stub, "arxiv", "arxiv", "arxiv", "arxiv")
+}
+
+// ingestFakes stands in for arXiv (transport), Postgres and MinIO, and counts what IngestPaper did.
+type ingestFakes struct {
+	entryID   string
+	arxivURLs []string
+	records   []db.PaperRecord
+	updates   []string // "<storage key>@v<version>"
+	puts      []string
+}
+
+func (f *ingestFakes) RoundTrip(r *http.Request) (*http.Response, error) {
+	f.arxivURLs = append(f.arxivURLs, r.URL.String())
+	body := fmt.Sprintf(`<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>%s</id><title>T</title></entry></feed>`, f.entryID)
+	if strings.HasSuffix(r.URL.Path, ".pdf") {
+		body = "%PDF-1.4"
+	}
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+}
+func (f *ingestFakes) UpsertDiscoveredPaper(_ context.Context, p *db.PaperRecord) (int64, error) {
+	f.records = append(f.records, *p)
+	return 1, nil
+}
+func (f *ingestFakes) UpdatePaperDownloaded(_ context.Context, _ string, version int, key, _ string) error {
+	f.updates = append(f.updates, fmt.Sprintf("%s@v%d", key, version))
+	return nil
+}
+func (f *ingestFakes) PutObject(_ context.Context, _, object string, _ io.Reader, _ int64, _ minio.PutObjectOptions) (minio.UploadInfo, error) {
+	f.puts = append(f.puts, object)
+	return minio.UploadInfo{}, nil
+}
+
+// newFakeIngester wires f and a fake embedder whose /internal/ingest payloads land in *payloads.
+func newFakeIngester(t *testing.T, f *ingestFakes, payloads *[]map[string]any) *PaperIngester {
+	t.Helper()
+	emb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&p)
+		*payloads = append(*payloads, p)
+		_, _ = io.WriteString(w, `{"status":"ok","sections":1,"chunks":2,"embeddings":2}`)
+	}))
+	t.Cleanup(emb.Close)
+	ing := NewPaperIngester(nil, nil, "bucket", emb.URL, 0)
+	ing.database, ing.minioClient = f, f
+	ing.httpClient = &http.Client{Transport: f, Timeout: 5 * time.Second}
+	ing.limiter = arxiv.NewLimiter(time.Millisecond)
+	return ing
+}
+
+// AC1: the version in the Atom entry ID labels the PDF fetched, the stored row and the ingest call.
+func TestIngestUsesEntryVersion(t *testing.T) {
+	f, payloads := &ingestFakes{entryID: "http://arxiv.org/abs/2401.12345v3"}, []map[string]any{}
+	res, err := newFakeIngester(t, f, &payloads).IngestPaper(context.Background(), "2401.12345")
+	if err != nil {
+		t.Fatalf("IngestPaper: %v", err)
+	}
+	const key, pdf = "raw/2401.12345_v3.pdf", "https://arxiv.org/pdf/2401.12345v3.pdf"
+	if len(f.arxivURLs) != 2 || f.arxivURLs[1] != pdf {
+		t.Errorf("arXiv requests = %q, want the Atom query then %s", f.arxivURLs, pdf)
+	}
+	if len(f.records) != 1 || f.records[0].Version != 3 || f.records[0].SourceURL != pdf || f.records[0].PDFStorageKey != key {
+		t.Errorf("DB records = %+v, want one at v3, %s, %s", f.records, pdf, key)
+	}
+	if len(f.updates) != 1 || f.updates[0] != key+"@v3" || len(f.puts) != 1 || f.puts[0] != key {
+		t.Errorf("DB updates %q, MinIO puts %q, want one each for %s at v3", f.updates, f.puts, key)
+	}
+	if len(payloads) != 1 || payloads[0]["version"] != float64(3) || payloads[0]["pdf_storage_key"] != key {
+		t.Errorf("/internal/ingest payloads = %v, want one with version 3 and %s", payloads, key)
+	}
+	if res.Version != 3 {
+		t.Errorf("result version = %d, want 3", res.Version)
+	}
+}
+
+// AC2: no parseable version fails the ingest, naming the entry ID, before the PDF, MinIO or DB.
+func TestIngestRejectsUnversionedEntry(t *testing.T) {
+	for _, id := range []string{"http://arxiv.org/abs/2401.12345", "http://arxiv.org/abs/2401.12345v", "http://arxiv.org/abs/2401.12345v0", "http://arxiv.org/abs/2401.12345vx"} {
+		f, payloads := &ingestFakes{entryID: id}, []map[string]any{}
+		_, err := newFakeIngester(t, f, &payloads).IngestPaper(context.Background(), "2401.12345")
+		if err == nil || !strings.Contains(err.Error(), id) {
+			t.Errorf("%s: err = %v, want an error naming the entry ID", id, err)
+		}
+		if len(f.arxivURLs) != 1 || len(f.records)+len(f.updates)+len(f.puts)+len(payloads) != 0 {
+			t.Errorf("%s: arXiv %q, DB %d+%d, MinIO %q, ingest %v; want only the Atom query", id, f.arxivURLs, len(f.records), len(f.updates), f.puts, payloads)
+		}
+	}
 }

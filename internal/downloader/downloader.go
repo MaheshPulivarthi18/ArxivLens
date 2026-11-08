@@ -20,19 +20,41 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
+// paperDB, pdfStore and publisher are the parts of *db.DB, *storage.Storage and *kafka.Producer
+// that HandleRecord uses, so it can be unit-tested with fakes.
+type paperDB interface {
+	UpdatePaperDownloaded(ctx context.Context, arxivID string, version int, storageKey, sha256 string) error
+}
+
+type pdfStore interface {
+	ObjectExists(ctx context.Context, objectKey string) (bool, error)
+	DownloadPDF(ctx context.Context, objectKey string) (io.ReadCloser, error)
+	UploadPDF(ctx context.Context, objectKey string, reader io.Reader, size int64) error
+}
+
+type publisher interface {
+	Publish(ctx context.Context, topic string, envelope events.EventEnvelope) error
+}
+
 type Downloader struct {
-	database *db.DB
-	storage  *storage.Storage
-	producer *kafka.Producer
+	database paperDB
+	storage  pdfStore
+	bucket   string
+	producer publisher
 	client   *http.Client
 	// limiter spaces this process's arXiv PDF requests (Technical PRD §9).
 	limiter *arxiv.Limiter
 }
 
 func NewDownloader(database *db.DB, storage *storage.Storage, producer *kafka.Producer) *Downloader {
+	bucket := ""
+	if storage != nil {
+		bucket = storage.Bucket
+	}
 	return &Downloader{
 		database: database,
 		storage:  storage,
+		bucket:   bucket,
 		producer: producer,
 		client:   &http.Client{Timeout: 60 * time.Second},
 		limiter:  arxiv.NewLimiter(arxiv.DefaultInterval),
@@ -48,6 +70,7 @@ func (d *Downloader) HandleRecord(ctx context.Context, record *kgo.Record) error
 	arxivID := envelope.PaperID
 	version := envelope.Version
 	if version == 0 {
+		log.Printf("[Downloader] Warning: envelope for %s has no version (event_id=%s); assuming v1", arxivID, envelope.EventID)
 		version = 1
 	}
 
@@ -77,8 +100,7 @@ func (d *Downloader) HandleRecord(ctx context.Context, record *kgo.Record) error
 
 	if len(pdfBytes) == 0 {
 		// Download from arXiv PDF endpoint
-		pdfURL := fmt.Sprintf("https://arxiv.org/pdf/%s.pdf", arxivID)
-		pdfBytes, err = d.fetchPDF(ctx, pdfURL)
+		pdfBytes, err = d.fetchPDF(ctx, arxiv.PDFURL(arxivID, version))
 		if err != nil {
 			return err
 		}
@@ -107,7 +129,7 @@ func (d *Downloader) HandleRecord(ctx context.Context, record *kgo.Record) error
 		"pdf_storage_key": storageKey,
 		"sha256":          sha256Hex,
 		"bytes":           len(pdfBytes),
-		"storage_bucket":  d.storage.Bucket,
+		"storage_bucket":  d.bucket,
 	}
 
 	downEnvelope := events.NewEventEnvelope(events.TopicPapersDownloaded, arxivID, version, downloadedPayload)

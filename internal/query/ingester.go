@@ -33,9 +33,20 @@ type IngestResult struct {
 	Error      string `json:"error,omitempty"`
 }
 
+// ingestDB and objectPutter are the parts of *db.DB and *minio.Client the ingester uses, so
+// IngestPaper can be unit-tested with fakes.
+type ingestDB interface {
+	UpsertDiscoveredPaper(ctx context.Context, p *db.PaperRecord) (int64, error)
+	UpdatePaperDownloaded(ctx context.Context, arxivID string, version int, storageKey, sha256 string) error
+}
+
+type objectPutter interface {
+	PutObject(ctx context.Context, bucket, object string, r io.Reader, size int64, opts minio.PutObjectOptions) (minio.UploadInfo, error)
+}
+
 type PaperIngester struct {
-	database    *db.DB
-	minioClient *minio.Client
+	database    ingestDB
+	minioClient objectPutter // nil: skip the MinIO upload
 	minioBucket string
 	embedderURL string
 	httpClient  *http.Client
@@ -64,9 +75,8 @@ func NewPaperIngester(database *db.DB, minioClient *minio.Client, minioBucket, e
 	if ingestTimeout <= 0 {
 		ingestTimeout = config.DefaultIngestTimeout
 	}
-	return &PaperIngester{
+	ing := &PaperIngester{
 		database:    database,
-		minioClient: minioClient,
 		minioBucket: minioBucket,
 		embedderURL: strings.TrimRight(embedderURL, "/"),
 		httpClient: &http.Client{
@@ -75,6 +85,10 @@ func NewPaperIngester(database *db.DB, minioClient *minio.Client, minioBucket, e
 		ingestClient: &http.Client{Timeout: ingestTimeout},
 		limiter:      arxiv.NewLimiter(arxiv.DefaultInterval),
 	}
+	if minioClient != nil { // a nil *minio.Client must stay a nil interface
+		ing.minioClient = minioClient
+	}
+	return ing
 }
 
 // ExtractCleanArxivID extracts standard format "2608.20154" from any string or URL
@@ -152,6 +166,12 @@ func (ing *PaperIngester) IngestPaper(ctx context.Context, input string) (*Inges
 	}
 
 	entry := feed.Entries[0]
+	// The stored version must be the one whose PDF is chunked, so take it from the entry and fetch
+	// exactly that version. No version means no ingest: defaulting would label the latest PDF "v1".
+	_, version, ok := arxiv.SplitVersion(entry.ID)
+	if !ok {
+		return nil, fmt.Errorf("arXiv entry ID %q for %s has no valid version; not ingesting", entry.ID, arxivID)
+	}
 	cleanTitle := strings.TrimSpace(strings.ReplaceAll(entry.Title, "\n", " "))
 	cleanAbstract := strings.TrimSpace(strings.ReplaceAll(entry.Summary, "\n", " "))
 
@@ -176,9 +196,8 @@ func (ing *PaperIngester) IngestPaper(ctx context.Context, input string) (*Inges
 		pubTime = time.Now().UTC()
 	}
 
-	version := 1
 	pdfStorageKey := fmt.Sprintf("raw/%s_v%d.pdf", arxivID, version)
-	sourceURL := fmt.Sprintf("https://arxiv.org/pdf/%s.pdf", arxivID)
+	sourceURL := arxiv.PDFURL(arxivID, version)
 
 	// Step 2: Download PDF and Stream to MinIO
 	log.Printf("[Ingester] Downloading PDF from %s...", sourceURL)

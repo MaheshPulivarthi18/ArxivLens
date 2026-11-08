@@ -37,7 +37,7 @@ func TestParseAtomFeed(t *testing.T) {
 			authors:    []string{"Tri Dao"},
 			categories: []string{"cs.LG", "cs.AI"},
 			published:  time.Date(2023, 7, 17, 17, 50, 36, 0, time.UTC),
-			sourceURL:  "https://arxiv.org/pdf/2307.08691.pdf",
+			sourceURL:  "https://arxiv.org/pdf/2307.08691v2.pdf",
 		},
 		{
 			arxivID:    "2401.12345",
