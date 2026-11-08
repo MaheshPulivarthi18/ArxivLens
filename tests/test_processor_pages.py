@@ -212,3 +212,203 @@ def test_save_chunks_page_rows_use_each_returned_id():
     page_calls = [(c[0].split()[0], c[1]) for c in conn.cur.calls if "paper_chunk_pages" in c[0]]
     assert page_calls == [("INSERT", (101, 2)), ("DELETE", (102,)), ("INSERT", (103, 5))]
     assert conn.commits == 0
+
+
+# --- AI-11: TokenChunker records each chunk's start page (`page_start`) -------------------------------------------
+
+
+def build_fixture_doc_ac5():
+    """Body text before any heading on page 1 (the `Abstract` bucket), then `1 Introduction` as page 1's last line;
+    the Introduction body starts on page 2 and runs into page 3."""
+    doc = pymupdf.open()
+    layout = [
+        [(t, BODY_PT) for t in _body_lines(1, 30)] + [("1 Introduction", HEADING_PT)],
+        [(t, BODY_PT) for t in _body_lines(2, 40)],
+        [(t, BODY_PT) for t in _body_lines(3, 20)],
+    ]
+    for lines in layout:
+        page = doc.new_page()
+        y = 60
+        for text, size in lines:
+            page.insert_text((72, y), text, fontname="helv", fontsize=size)
+            y += LEADING if size == BODY_PT else 2 * LEADING
+    return doc
+
+
+def _parse(doc):
+    try:
+        return ProcessorWorker._parse_doc_sections(None, doc)
+    finally:
+        doc.close()
+
+
+def _assert_chunks_on_oracle_page(chunks):
+    assert chunks
+    for c in chunks:
+        assert "page_start" in c, f"chunk {c['chunk_index']}: no page_start"
+        assert c["page_start"] >= 1, c["page_start"]  # 0 would hit paper_chunk_pages' CHECK and fail the transaction
+        body = c["content"].split("\n\n", 1)[1]
+        assert c["page_start"] == first_word_page(body), f"chunk {c['chunk_index']}: {c['page_start']} vs {body[:40]!r}"
+
+
+def test_chunk_page_start_matches_first_word_page(chunker):
+    sections = parse_fixture_sections()
+    chunks = chunker.chunk_sections(FIXTURE_TITLE, sections)
+    _assert_chunks_on_oracle_page(chunks)
+    sec_page = {s["title"]: s["page"] for s in sections}
+    assert any(c["page_start"] > sec_page[c["section_title"]] for c in chunks), [c["page_start"] for c in chunks]
+
+
+def test_chunk_page_start_abstract_bucket_and_heading_at_page_end(chunker):
+    sections = _parse(build_fixture_doc_ac5())
+    assert [(s["title"], s["page"]) for s in sections] == [("Abstract", 1), ("Introduction", 1)]
+    assert sections[0]["page_breaks"] == [(0, 1)]
+    assert sections[1]["page_breaks"][0] == (0, 2)
+    chunks = chunker.chunk_sections(FIXTURE_TITLE, sections)
+    _assert_chunks_on_oracle_page(chunks)
+    assert {c["section_title"] for c in chunks} == {"Abstract", "Introduction"}
+    intro = [c for c in chunks if c["section_title"] == "Introduction"]
+    assert intro[0]["page_start"] == 2 and intro[0]["page_number"] == 1
+
+
+# Hand-made sections (no PDF). Words come from the single-wordpiece fixture vocabulary in a seeded random order, so every
+# chunk body occurs once in the text and its first character is found by `str.find`, independently of offset mappings.
+HAND_WORDS = sorted(WORD_PAGE)
+LEAD = "\n \t "
+
+
+def _hand_text(n=150, seed=11):
+    import random
+
+    rng = random.Random(seed)
+    return " ".join(rng.choice(HAND_WORDS) for _ in range(n))
+
+
+def _word_char(text, i):
+    """Char offset of word `i` in a single-space-joined `text`."""
+    return len(" ".join(text.split(" ")[:i])) + (1 if i else 0)
+
+
+@pytest.fixture(scope="module")
+def small_chunker(chunker):
+    import copy
+
+    c = copy.copy(chunker)  # same tokenizer, small windows (several per section, 50% overlap)
+    c.target_tokens, c.overlap_tokens, c.min_tokens = 60, 20, 5
+    return c
+
+
+def _hand_chunks(c, raw, **sec):
+    return c.chunk_sections("T", [{"title": "S", "text": raw, "page": 1, **sec}])
+
+
+def _body(chunk):
+    return chunk["content"].split("\n\n", 1)[1]
+
+
+def _chunk_char(raw, chunk):
+    body = _body(chunk)
+    assert raw.count(body) == 1, f"chunk body not unique in text: {body[:40]!r}"
+    return raw.find(body)
+
+
+def _oracle(raw, breaks, chunk):
+    pos = _chunk_char(raw, chunk)
+    pages = [p for o, p in breaks if o <= pos]
+    return pages[-1] if pages else None
+
+
+def _no_page(chunks):
+    return [{k: v for k, v in c.items() if k != "page_start"} for c in chunks]
+
+
+def _hand_case(name, c):
+    text = _hand_text()
+    base = _hand_chunks(c, text)
+    if name == "a-known-offsets":
+        return text, [(0, 1), (_word_char(text, 50), 2), (_word_char(text, 97), 3)]
+    if name == "b-straddle":
+        return text, [(0, 1), (_word_char(text, 30), 2)]
+    if name == "c-exact-break":
+        return text, [(0, 1), (_chunk_char(text, base[1]), 2), (_chunk_char(text, base[2]), 3)]
+    if name == "c-break-inside-first-word":  # first char before the break, rest of the first token after it
+        return text, [(0, 1), (_chunk_char(text, base[1]) + 1, 2)]
+    if name == "d-leading-ws":
+        return LEAD + text, [(0, 1), (len(LEAD) + _chunk_char(text, base[1]), 2)]
+    if name == "first-break-after-start":
+        return text, [(_word_char(text, 30), 4)]
+    raise ValueError(name)
+
+
+@pytest.mark.parametrize("name", [
+    "a-known-offsets", "b-straddle", "c-exact-break", "c-break-inside-first-word", "d-leading-ws", "first-break-after-start",
+])
+def test_page_start_hand_made_sections(small_chunker, name):
+    raw, breaks = _hand_case(name, small_chunker)
+    got = _hand_chunks(small_chunker, raw, page_breaks=breaks)
+    assert len(got) >= 4
+    assert _no_page(got) == _hand_chunks(small_chunker, raw), "(g) chunks minus page_start must equal the no-breaks output"
+    for ch in got:
+        want = _oracle(raw, breaks, ch)
+        assert ch.get("page_start") == want and (want is not None or "page_start" not in ch), (ch["chunk_index"], want)
+    pages = [ch.get("page_start") for ch in got]
+    if name == "a-known-offsets":
+        assert set(pages) == {1, 2, 3}, pages
+    elif name == "b-straddle":
+        b = breaks[1][0]
+        straddle = [ch for ch in got if _chunk_char(raw, ch) < b < _chunk_char(raw, ch) + len(_body(ch))]
+        assert straddle and all(ch["page_start"] == 1 for ch in straddle), pages
+    elif name in ("c-exact-break", "d-leading-ws"):
+        assert _chunk_char(raw, got[1]) == breaks[1][0] and pages[:2] == [1, 2], pages
+    elif name == "c-break-inside-first-word":
+        assert _chunk_char(raw, got[1]) == breaks[1][0] - 1 and pages[:3] == [1, 1, 2], pages
+    else:
+        assert None in pages and 4 in pages, pages
+
+
+class _TokProxy:
+    """Delegates to the real tokenizer except for `is_fast` and `__call__`."""
+
+    def __init__(self, tok, is_fast, call):
+        self._tok, self.is_fast, self._call = tok, is_fast, call
+
+    def __getattr__(self, name):
+        return getattr(self._tok, name)
+
+    def __call__(self, *args, **kwargs):
+        return self._call(self._tok, *args, **kwargs)
+
+
+def _call_must_not_happen(tok, *args, **kwargs):
+    raise AssertionError("a slow tokenizer has no offset mapping; it must not be called with return_offsets_mapping")
+
+
+def _call_ids_differ(tok, *args, **kwargs):
+    enc = tok(*args, **kwargs)
+    ids = list(enc["input_ids"])
+    return {"input_ids": ids[:-1] + [ids[-1] + 1], "offset_mapping": enc["offset_mapping"]}
+
+
+@pytest.mark.parametrize(
+    "variant, sec",
+    [
+        ("real", {}),
+        ("real", {"page_breaks": []}),
+        ("slow", {"page_breaks": [(0, 1), (100, 2)]}),
+        ("ids-differ", {"page_breaks": [(0, 1), (100, 2)]}),
+    ],
+    ids=["no-key", "empty-list", "is_fast-false", "call-ids-differ"],
+)
+def test_page_start_absent_when_unknown(small_chunker, variant, sec):
+    import copy
+
+    c = copy.copy(small_chunker)
+    if variant == "slow":
+        c.tokenizer = _TokProxy(small_chunker.tokenizer, False, _call_must_not_happen)
+    elif variant == "ids-differ":
+        c.tokenizer = _TokProxy(small_chunker.tokenizer, True, _call_ids_differ)
+    text = _hand_text()
+    got = _hand_chunks(c, text, **sec)
+    assert len(got) >= 4
+    assert not [ch for ch in got if "page_start" in ch]
+    assert got == _hand_chunks(small_chunker, text), "(f)/(g) chunks must equal the no-breaks output"

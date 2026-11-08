@@ -13,6 +13,7 @@ Demonstrates end-to-end pipeline locally without external services:
 import os
 import re
 import sys
+import bisect
 import hashlib
 import argparse
 from typing import List, Dict, Any, Tuple, Optional
@@ -203,6 +204,17 @@ class TokenChunker:
             if len(tokens) < self.min_tokens:
                 continue
 
+            # AI-11: char offset (into sec["text"]) of each token, only when it is exact; None means "page unknown".
+            page_breaks = sec.get("page_breaks") or []
+            break_offsets = [o for o, _ in page_breaks]
+            token_chars = None
+            if page_breaks and getattr(self.tokenizer, "is_fast", False):
+                enc = self.tokenizer(sec_text, add_special_tokens=False, return_offsets_mapping=True)
+                if enc["input_ids"] == tokens:
+                    raw = sec.get("text", "")
+                    lead = len(raw) - len(raw.lstrip())
+                    token_chars = [lead + start for start, _ in enc["offset_mapping"]]
+
             prefix = f"{paper_title} — {sec_title}\n\n"
             prefix_tokens = self.tokenizer.encode(prefix, add_special_tokens=False)
             effective_target = max(self.min_tokens, self.target_tokens - len(prefix_tokens) - 16)
@@ -227,6 +239,10 @@ class TokenChunker:
                     "content": full_content,
                     "content_hash": content_hash,
                 })
+                if token_chars is not None and token_chars[start_i] >= break_offsets[0]:
+                    # Page of the last break at or before the chunk's first character (ING-11 design decision 1).
+                    at = bisect.bisect_right(break_offsets, token_chars[start_i]) - 1
+                    all_chunks[-1]["page_start"] = page_breaks[at][1]
                 chunk_idx += 1
 
                 if start_i + effective_target >= len(tokens):
