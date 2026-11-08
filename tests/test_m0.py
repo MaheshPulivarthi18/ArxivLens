@@ -332,7 +332,9 @@ def test_rerank_real_cross_encoder_scores_match_single_batch():
     from services.embedder import api
 
     if not _reranker_in_local_hf_cache():
-        pytest.skip("bge-reranker-base not in local HF cache")
+        reason = "bge-reranker-base not in local HF cache"
+        warnings.warn(f"AI-9 parity skipped: {reason}")  # `make test-py` runs -q without -rs; this shows the reason
+        pytest.skip(reason)
     tok = AutoTokenizer.from_pretrained(_RERANKER, local_files_only=True)
     model = AutoModelForSequenceClassification.from_pretrained(_RERANKER, local_files_only=True).eval()
 
