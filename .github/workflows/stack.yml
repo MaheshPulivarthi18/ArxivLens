@@ -235,6 +235,7 @@ jobs:
           exit "$rc"
 
       # Every run, green or red, so the artifact always has service logs (embedder rerank timing for ADR-0015).
+      # The timing block is also tee'd to the job log: agent sandboxes can't read artifacts or step summaries (OPS-H10b).
       - name: Collect service logs
         if: always()
         timeout-minutes: 5
@@ -247,7 +248,7 @@ jobs:
           t=stack-logs/embedder-timing.log
           grep -F -e 'rerank passages=' -e 'rerank warm-up' -e 'torch threads' stack-logs/compose.log > "$t" || true
           [ -s "$t" ] || echo "no embedder rerank timing lines (embedder predates AI-9)" > "$t" || true
-          { echo "### Embedder rerank timing"; echo '```'; head -n 200 "$t"; echo '```'; } >> "$GITHUB_STEP_SUMMARY" || true
+          { echo "### Embedder rerank timing"; echo '```'; head -n 200 "$t"; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY" || true
           ls -l stack-logs || true
 
       - name: Diagnostics
