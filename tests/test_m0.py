@@ -78,3 +78,125 @@ def test_citation_validator_marker_and_support():
     answer_unsupported = "The method is specifically designed for baking sourdough bread [1]."
     res_unsupported = validator.validate_and_verify(answer_unsupported, retrieved_chunks)
     assert res_unsupported["citations"][0]["supported"] is False
+
+
+# --- Text fidelity: parsed and chunked text must be the paper's own words (regression for flags=11 + decode) ---
+
+WORDS = "FlashAttention-2 reaches 73% of the theoretical maximum FLOPs/s on A100 GPUs".split()
+
+
+def _gap_spaced_pdf(words, lines=40):
+    """A page laid out the way LaTeX does it: each word is placed on its own, with no space glyph between words.
+    Extracting it with TEXT_INHIBIT_SPACES runs every word in a line together."""
+    import pymupdf
+
+    doc = pymupdf.open()
+    page = doc.new_page()
+    y = 60
+    for _ in range(lines):
+        x = 72
+        for w in words:
+            page.insert_text((x, y), w, fontname="helv", fontsize=10)
+            x += pymupdf.get_text_length(w, fontname="helv", fontsize=10) + 3.5  # visual gap, no space glyph
+        y += 13
+    return doc
+
+
+def test_parser_keeps_spaces_between_gap_spaced_words():
+    from services.processor.worker import ProcessorWorker
+
+    doc = _gap_spaced_pdf(WORDS)
+    try:
+        sections = ProcessorWorker._parse_doc_sections(None, doc)
+    finally:
+        doc.close()
+    text = " ".join(s["text"] for s in sections)
+    assert " ".join(WORDS) in text, text[:200]
+    assert "  " not in text.strip()
+
+
+def test_paper_parser_keeps_spaces_between_gap_spaced_words(tmp_path):
+    doc = _gap_spaced_pdf(WORDS)
+    path = tmp_path / "gap.pdf"
+    doc.save(path)
+    doc.close()
+    text = " ".join(s["text"] for s in PaperParser().parse_pdf(str(path), "t"))
+    assert " ".join(WORDS) in text, text[:200]
+
+
+def test_chunk_text_is_verbatim_source_text():
+    chunker = TokenChunker(target_tokens=60, overlap_tokens=10, min_tokens=10)
+    body = " ".join(
+        f"Sentence {i}: FlashAttention-2 achieves state-of-the-art GPU utilization (73%) on NVIDIA A100s."
+        for i in range(30)
+    )
+    title = "FlashAttention-2: Faster Attention"
+    chunks = chunker.chunk_sections(title, [{"title": "Method", "level": 1, "text": body, "page": 1}])
+    assert len(chunks) > 3
+    prefix = f"{title} — Method\n\n"
+    for c in chunks:
+        assert c["content"].startswith(prefix)
+        text = c["content"][len(prefix):]
+        assert text in body, text[:120]  # verbatim: case, punctuation and spacing kept
+        assert "##" not in text
+        assert body.find(text) == 0 or body[body.find(text) - 1] == " ", "chunk starts mid-word"
+        end = body.find(text) + len(text)
+        assert end == len(body) or body[end] == " ", "chunk ends mid-word"
+        assert c["token_count"] <= chunker.target_tokens
+    assert "State-of-the-art".lower() in chunks[0]["content"].lower() and "A100s" in chunks[0]["content"]
+
+
+def test_slice_on_words_bounds():
+    from scripts.m0_skeleton import MAX_WORD_SNAP_CHARS, _slice_on_words
+
+    text = "alpha beta gamma"
+    assert _slice_on_words(text, 7, 9) == "beta"  # inside "beta" -> whole word
+    assert _slice_on_words(text, 0, len(text)) == text
+    long_word = "x" * (MAX_WORD_SNAP_CHARS * 3)
+    s = _slice_on_words(long_word, 50, 60)
+    assert len(s) == 10  # no boundary within reach: token edges kept
+
+
+def _small_caps_pdf():
+    """`References` set in small caps the way LaTeX does it: a large initial and a smaller rest, as separate spans."""
+    import pymupdf
+
+    doc = pymupdf.open()
+    page = doc.new_page()
+    y = 60
+    body = "Gradient methods converge quickly when the step size is chosen with care in practice"
+    for _ in range(30):
+        page.insert_text((72, y), body, fontname="helv", fontsize=10)
+        y += 13
+    for initial, rest, x_size in (("R", "EFERENCES", 14), ):
+        page.insert_text((72, y + 10), initial, fontname="hebo", fontsize=x_size)
+        w = pymupdf.get_text_length(initial, fontname="hebo", fontsize=x_size)
+        page.insert_text((72 + w, y + 10), rest, fontname="hebo", fontsize=11)
+    y += 30
+    for _ in range(10):
+        page.insert_text((72, y), "[3] A. Author and B. Author, Some cited paper title, Proceedings, 2017.", fontname="helv", fontsize=10)
+        y += 13
+    return doc
+
+
+def test_small_caps_heading_is_one_word_and_references_are_skipped():
+    from services.processor.worker import ProcessorWorker
+
+    doc = _small_caps_pdf()
+    try:
+        sections = ProcessorWorker._parse_doc_sections(None, doc)
+    finally:
+        doc.close()
+    titles = [s["title"] for s in sections]
+    assert "REFERENCES" in titles, titles
+    chunker = TokenChunker(target_tokens=100, overlap_tokens=20, min_tokens=10)
+    chunks = chunker.chunk_sections("Paper", sections)
+    assert chunks and not [c for c in chunks if "cited paper title" in c["content"]], "reference list was indexed"
+
+
+def test_line_text_from_spans():
+    from scripts.m0_skeleton import line_text_from_spans
+
+    assert line_text_from_spans([{"text": "R"}, {"text": "EFERENCES"}]) == "REFERENCES"
+    assert line_text_from_spans([{"text": "the "}, {"text": "Adam"}, {"text": "  optimizer "}]) == "the Adam optimizer"
+    assert line_text_from_spans([]) == ""

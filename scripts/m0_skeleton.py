@@ -13,6 +13,7 @@ Demonstrates end-to-end pipeline locally without external services:
 import os
 import re
 import sys
+import bisect
 import hashlib
 import argparse
 from typing import List, Dict, Any, Tuple, Optional
@@ -32,6 +33,12 @@ MIN_TOKENS = 50
 MODEL_NAME = "BAAI/bge-base-en-v1.5"
 SKIP_SECTIONS = {"references", "bibliography", "acknowledgments", "appendix"}
 SUPPORT_THRESHOLD = 0.5
+
+# PyMuPDF text-extraction flags for every get_text("dict") call (parser and processor worker).
+# Must NOT include TEXT_INHIBIT_SPACES (8): LaTeX PDFs rarely contain space glyphs, so MuPDF has to synthesize
+# spaces from glyph gaps; with that flag set, every word in a line runs together. TEXT_PRESERVE_LIGATURES (1)
+# is also left out so ligature glyphs expand to plain letters ("ﬁ" -> "fi") and keyword search matches them.
+PDF_TEXT_FLAGS = pymupdf.TEXT_PRESERVE_WHITESPACE
 
 
 class ArxivDownloader:
@@ -112,7 +119,7 @@ class PaperParser:
         # Calculate average font size to determine heading thresholds
         font_sizes = []
         for page in doc:
-            blocks = page.get_text("dict", flags=11)["blocks"]
+            blocks = page.get_text("dict", flags=PDF_TEXT_FLAGS)["blocks"]
             for b in blocks:
                 if b.get("type") == 0:  # text block
                     for line in b.get("lines", []):
@@ -124,13 +131,13 @@ class PaperParser:
         heading_threshold = base_font_size * 1.15  # Headings are typically 15%+ larger
 
         for page_idx, page in enumerate(doc):
-            blocks = page.get_text("dict", flags=11)["blocks"]
+            blocks = page.get_text("dict", flags=PDF_TEXT_FLAGS)["blocks"]
             for b in blocks:
                 if b.get("type") != 0:
                     continue
 
                 for line in b.get("lines", []):
-                    line_text = " ".join([span.get("text", "") for span in line.get("spans", []) if span.get("text", "").strip()]).strip()
+                    line_text = line_text_from_spans(line.get("spans", []))
                     if not line_text:
                         continue
 
@@ -162,6 +169,37 @@ class PaperParser:
         return sections
 
 
+def line_text_from_spans(spans: List[Dict[str, Any]]) -> str:
+    """One line of text from PyMuPDF spans, whitespace runs collapsed.
+
+    Spans are concatenated with no separator: MuPDF already puts the (synthesized) spaces inside the spans,
+    and a span boundary without one is a font change inside a word. Small-caps headings are the common case
+    ("R" + "EFERENCES"); joining with a space gave "R EFERENCES", which missed SKIP_SECTIONS and indexed
+    reference lists. Across 77 corpus PDFs this glues no additional words.
+    """
+    return " ".join("".join(span.get("text", "") for span in spans).split())
+
+
+# Longest distance a chunk edge moves to reach a word boundary; a longer "word" (a URL, a formula) is cut mid-way.
+MAX_WORD_SNAP_CHARS = 40
+
+
+def _slice_on_words(text: str, start: int, end: int) -> str:
+    """text[start:end] widened to whole words: start moves back and end moves forward to the nearest whitespace,
+    each by at most MAX_WORD_SNAP_CHARS, so a chunk never begins or ends inside a word."""
+    lo = start
+    while lo > 0 and not text[lo - 1].isspace() and start - lo < MAX_WORD_SNAP_CHARS:
+        lo -= 1
+    if lo > 0 and not text[lo - 1].isspace():
+        lo = start  # no boundary within reach: keep the token edge
+    hi = end
+    while hi < len(text) and not text[hi].isspace() and hi - end < MAX_WORD_SNAP_CHARS:
+        hi += 1
+    if hi < len(text) and not text[hi].isspace():
+        hi = end
+    return text[lo:hi].strip()
+
+
 class TokenChunker:
     """Token-based chunker with BGE tokenizer, section prefixing, and junk filtering."""
 
@@ -174,6 +212,9 @@ class TokenChunker:
         skip_sections: set = None,
     ):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        if not getattr(self.tokenizer, "is_fast", False):
+            # Chunk text is cut from the source via offset mappings, which only fast tokenizers provide.
+            raise ValueError(f"TokenChunker needs a fast tokenizer with offset mappings; {model_name} loaded a slow one")
         self.tokenizer.model_max_length = int(1e9)
         self.target_tokens = target_tokens
         self.overlap_tokens = overlap_tokens
@@ -198,10 +239,24 @@ class TokenChunker:
             if not sec_text:
                 continue
 
-            # Tokenize section text
-            tokens = self.tokenizer.encode(sec_text, add_special_tokens=False)
+            # Tokenize section text. Offsets map each token back to sec_text, so chunk text is cut from the
+            # original string: decoding token IDs would lowercase it (uncased vocab), split punctuation
+            # ("state - of - the - art") and leave "##" wordpiece fragments at chunk edges.
+            enc = self.tokenizer(sec_text, add_special_tokens=False, return_offsets_mapping=True)
+            tokens = enc["input_ids"]
+            offsets = enc["offset_mapping"]
             if len(tokens) < self.min_tokens:
                 continue
+
+            # AI-11: char offset (into sec["text"]) of each token; None means "page unknown" (no page_breaks).
+            # sec_text is sec["text"] stripped, so offsets shift by the stripped leading whitespace.
+            page_breaks = sec.get("page_breaks") or []
+            break_offsets = [o for o, _ in page_breaks]
+            token_chars = None
+            if page_breaks:
+                raw = sec.get("text", "")
+                lead = len(raw) - len(raw.lstrip())
+                token_chars = [lead + start for start, _ in offsets]
 
             prefix = f"{paper_title} — {sec_title}\n\n"
             prefix_tokens = self.tokenizer.encode(prefix, add_special_tokens=False)
@@ -215,7 +270,9 @@ class TokenChunker:
                     continue
 
 
-                raw_chunk_text = self.tokenizer.decode(chunk_token_slice, skip_special_tokens=True)
+                raw_chunk_text = _slice_on_words(
+                    sec_text, offsets[start_i][0], offsets[start_i + len(chunk_token_slice) - 1][1]
+                )
                 full_content = prefix + raw_chunk_text
                 content_hash = hashlib.sha256(full_content.strip().encode("utf-8")).hexdigest()
 
@@ -227,6 +284,10 @@ class TokenChunker:
                     "content": full_content,
                     "content_hash": content_hash,
                 })
+                if token_chars is not None and token_chars[start_i] >= break_offsets[0]:
+                    # Page of the last break at or before the chunk's first character (ING-11 design decision 1).
+                    at = bisect.bisect_right(break_offsets, token_chars[start_i]) - 1
+                    all_chunks[-1]["page_start"] = page_breaks[at][1]
                 chunk_idx += 1
 
                 if start_i + effective_target >= len(tokens):

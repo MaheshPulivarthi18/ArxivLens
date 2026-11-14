@@ -10,7 +10,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"time"
 
 	"arxivlens/internal/arxiv"
 	"arxivlens/internal/db"
@@ -56,7 +55,7 @@ func NewDownloader(database *db.DB, storage *storage.Storage, producer *kafka.Pr
 		storage:  storage,
 		bucket:   bucket,
 		producer: producer,
-		client:   &http.Client{Timeout: 60 * time.Second},
+		client:   &http.Client{}, // timeouts come from arxiv.DefaultPDFLimits in fetchPDF
 		limiter:  arxiv.NewLimiter(arxiv.DefaultInterval),
 	}
 }
@@ -148,25 +147,6 @@ func (d *Downloader) fetchPDF(ctx context.Context, pdfURL string) ([]byte, error
 	if err := d.limiter.Wait(ctx); err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, "GET", pdfURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create pdf request: %w", err)
-	}
-	req.Header.Set("User-Agent", arxiv.UserAgent("Downloader Pipeline"))
-
-	resp, err := d.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to download pdf from %s: %w", pdfURL, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("arxiv pdf download failed with status %d", resp.StatusCode)
-	}
-
-	pdfBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read pdf body: %w", err)
-	}
-	return pdfBytes, nil
+	// Stall-based limits instead of a total client timeout: large PDFs arrive slowly but steadily.
+	return arxiv.FetchPDF(ctx, d.client, pdfURL, arxiv.UserAgent("Downloader Pipeline"), arxiv.DefaultPDFLimits)
 }
