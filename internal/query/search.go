@@ -26,6 +26,13 @@ type SearchHit struct {
 	Content      string  `json:"content"`
 	RRFScore     float64 `json:"rrf_score"`
 	RerankScore  float64 `json:"rerank_score,omitempty"`
+	// Version is papers.version of the row that owns the chunk (ADR-0014, ING-7).
+	Version int `json:"version"`
+	// Page is deliberately never set, so "page" is omitted from every hit (ADR-0014, RET-2 design
+	// finding 2). paper_chunks.page_number is the start page of the chunk's *section*, wrong for later
+	// chunks of a multi-page section; do not "fix" this by selecting it. ING-11 fills Page from
+	// paper_chunk_pages.page_start once its query side lands.
+	Page *int `json:"page,omitempty"`
 }
 
 // reranker is the one method HybridSearch needs from *EmbedClient.
@@ -108,7 +115,7 @@ const hybridSearchSQL = `
 			ORDER BY ts_rank_cd(pc.content_tsv, q) DESC
 			LIMIT 50
 		)
-		SELECT c.id, c.content, p.arxiv_id, p.title, COALESCE(ps.title, '') AS section_title,
+		SELECT c.id, c.content, p.arxiv_id, p.title, COALESCE(ps.title, '') AS section_title, p.version,
 		       COALESCE(1.0/(60 + v.rank), 0) + COALESCE(1.0/(60 + k.rank), 0) AS rrf_score
 		FROM paper_chunks c
 		JOIN papers p ON p.id = c.paper_id
@@ -177,7 +184,7 @@ func (s *SearchEngine) fetchCandidates(ctx context.Context, queryString string, 
 	var hits []SearchHit
 	for rows.Next() {
 		var h SearchHit
-		if err := rows.Scan(&h.ChunkID, &h.Content, &h.ArxivID, &h.Title, &h.SectionTitle, &h.RRFScore); err != nil {
+		if err := rows.Scan(&h.ChunkID, &h.Content, &h.ArxivID, &h.Title, &h.SectionTitle, &h.Version, &h.RRFScore); err != nil {
 			return nil, fmt.Errorf("failed to scan search hit: %w", err)
 		}
 		hits = append(hits, h)

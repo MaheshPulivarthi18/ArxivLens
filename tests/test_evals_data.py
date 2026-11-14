@@ -271,8 +271,8 @@ _GO_TO_EVAL_SQL = [
     ("FROM paper_chunks pc JOIN papers p ON p.id = pc.paper_id, websearch_to_tsquery('english', $4) q "
      "WHERE pc.content_tsv @@ q AND ($3::text[] IS NULL OR p.categories && $3) ORDER BY",
      "FROM paper_chunks pc, websearch_to_tsquery('english', $4) q WHERE pc.content_tsv @@ q ORDER BY"),
-    # outer SELECT: the eval needs only (id, arxiv_id, content); no titles, so no paper_sections join
-    ("SELECT c.id, c.content, p.arxiv_id, p.title, COALESCE(ps.title, '') AS section_title,",
+    # outer SELECT: the eval needs only (id, arxiv_id, content); no titles or version (RET-2), so no paper_sections join
+    ("SELECT c.id, c.content, p.arxiv_id, p.title, COALESCE(ps.title, '') AS section_title, p.version,",
      "SELECT c.id, p.arxiv_id, c.content,"),
     ("JOIN papers p ON p.id = c.paper_id LEFT JOIN paper_sections ps ON ps.id = c.section_id LEFT JOIN",
      "JOIN papers p ON p.id = c.paper_id LEFT JOIN"),

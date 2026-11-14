@@ -13,7 +13,7 @@ import logging
 from typing import Dict, Any
 from confluent_kafka import Message
 
-from scripts.m0_skeleton import PaperParser, TokenChunker
+from scripts.m0_skeleton import PDF_TEXT_FLAGS, PaperParser, TokenChunker
 from services.common.config import config
 from services.common.db import (
     get_db_connection,
@@ -119,7 +119,7 @@ class ProcessorWorker:
 
         font_sizes = []
         for page in doc:
-            blocks = page.get_text("dict", flags=11)["blocks"]
+            blocks = page.get_text("dict", flags=PDF_TEXT_FLAGS)["blocks"]
             for b in blocks:
                 if b.get("type") == 0:
                     for line in b.get("lines", []):
@@ -131,15 +131,14 @@ class ProcessorWorker:
         heading_threshold = base_font_size * 1.15
 
         for page_idx, page in enumerate(doc):
-            blocks = page.get_text("dict", flags=11)["blocks"]
+            blocks = page.get_text("dict", flags=PDF_TEXT_FLAGS)["blocks"]
             for b in blocks:
                 if b.get("type") != 0:
                     continue
 
                 for line in b.get("lines", []):
-                    line_text = " ".join(
-                        [span.get("text", "") for span in line.get("spans", []) if span.get("text", "").strip()]
-                    ).strip()
+                    # Spans carry their own edge spaces; collapse every whitespace run to one space.
+                    line_text = " ".join(" ".join(span.get("text", "") for span in line.get("spans", [])).split())
                     if not line_text:
                         continue
 
