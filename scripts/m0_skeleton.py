@@ -201,6 +201,9 @@ class TokenChunker:
         skip_sections: set = None,
     ):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        if not getattr(self.tokenizer, "is_fast", False):
+            # Chunk text is cut from the source via offset mappings, which only fast tokenizers provide.
+            raise ValueError(f"TokenChunker needs a fast tokenizer with offset mappings; {model_name} loaded a slow one")
         self.tokenizer.model_max_length = int(1e9)
         self.target_tokens = target_tokens
         self.overlap_tokens = overlap_tokens
@@ -234,16 +237,15 @@ class TokenChunker:
             if len(tokens) < self.min_tokens:
                 continue
 
-            # AI-11: char offset (into sec["text"]) of each token, only when it is exact; None means "page unknown".
+            # AI-11: char offset (into sec["text"]) of each token; None means "page unknown" (no page_breaks).
+            # sec_text is sec["text"] stripped, so offsets shift by the stripped leading whitespace.
             page_breaks = sec.get("page_breaks") or []
             break_offsets = [o for o, _ in page_breaks]
             token_chars = None
-            if page_breaks and getattr(self.tokenizer, "is_fast", False):
-                enc = self.tokenizer(sec_text, add_special_tokens=False, return_offsets_mapping=True)
-                if enc["input_ids"] == tokens:
-                    raw = sec.get("text", "")
-                    lead = len(raw) - len(raw.lstrip())
-                    token_chars = [lead + start for start, _ in enc["offset_mapping"]]
+            if page_breaks:
+                raw = sec.get("text", "")
+                lead = len(raw) - len(raw.lstrip())
+                token_chars = [lead + start for start, _ in offsets]
 
             prefix = f"{paper_title} — {sec_title}\n\n"
             prefix_tokens = self.tokenizer.encode(prefix, add_special_tokens=False)

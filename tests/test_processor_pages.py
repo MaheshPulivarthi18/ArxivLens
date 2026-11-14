@@ -366,49 +366,26 @@ def test_page_start_hand_made_sections(small_chunker, name):
         assert None in pages and 4 in pages, pages
 
 
-class _TokProxy:
-    """Delegates to the real tokenizer except for `is_fast` and `__call__`."""
-
-    def __init__(self, tok, is_fast, call):
-        self._tok, self.is_fast, self._call = tok, is_fast, call
-
-    def __getattr__(self, name):
-        return getattr(self._tok, name)
-
-    def __call__(self, *args, **kwargs):
-        return self._call(self._tok, *args, **kwargs)
-
-
-def _call_must_not_happen(tok, *args, **kwargs):
-    raise AssertionError("a slow tokenizer has no offset mapping; it must not be called with return_offsets_mapping")
-
-
-def _call_ids_differ(tok, *args, **kwargs):
-    enc = tok(*args, **kwargs)
-    ids = list(enc["input_ids"])
-    return {"input_ids": ids[:-1] + [ids[-1] + 1], "offset_mapping": enc["offset_mapping"]}
-
-
 @pytest.mark.parametrize(
-    "variant, sec",
-    [
-        ("real", {}),
-        ("real", {"page_breaks": []}),
-        ("slow", {"page_breaks": [(0, 1), (100, 2)]}),
-        ("ids-differ", {"page_breaks": [(0, 1), (100, 2)]}),
-    ],
-    ids=["no-key", "empty-list", "is_fast-false", "call-ids-differ"],
+    "sec",
+    [{}, {"page_breaks": []}],
+    ids=["no-key", "empty-list"],
 )
-def test_page_start_absent_when_unknown(small_chunker, variant, sec):
-    import copy
-
-    c = copy.copy(small_chunker)
-    if variant == "slow":
-        c.tokenizer = _TokProxy(small_chunker.tokenizer, False, _call_must_not_happen)
-    elif variant == "ids-differ":
-        c.tokenizer = _TokProxy(small_chunker.tokenizer, True, _call_ids_differ)
+def test_page_start_absent_when_unknown(small_chunker, sec):
     text = _hand_text()
-    got = _hand_chunks(c, text, **sec)
+    got = _hand_chunks(small_chunker, text, **sec)
     assert len(got) >= 4
     assert not [ch for ch in got if "page_start" in ch]
     assert got == _hand_chunks(small_chunker, text), "(f)/(g) chunks must equal the no-breaks output"
+
+
+def test_token_chunker_rejects_slow_tokenizer(monkeypatch):
+    # Chunk text and page_start both come from offset mappings, which only fast tokenizers provide (#40).
+    from scripts import m0_skeleton
+
+    class _SlowTokenizer:  # transformers 5 loads a fast tokenizer even with use_fast=False, so stub one
+        is_fast = False
+
+    monkeypatch.setattr(m0_skeleton.AutoTokenizer, "from_pretrained", lambda name, **kw: _SlowTokenizer())
+    with pytest.raises(ValueError, match="fast tokenizer"):
+        TokenChunker(model_name=MODEL_NAME)
