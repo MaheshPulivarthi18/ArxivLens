@@ -137,7 +137,7 @@ class PaperParser:
                     continue
 
                 for line in b.get("lines", []):
-                    line_text = " ".join(" ".join(span.get("text", "") for span in line.get("spans", [])).split())
+                    line_text = line_text_from_spans(line.get("spans", []))
                     if not line_text:
                         continue
 
@@ -167,6 +167,17 @@ class PaperParser:
 
         doc.close()
         return sections
+
+
+def line_text_from_spans(spans: List[Dict[str, Any]]) -> str:
+    """One line of text from PyMuPDF spans, whitespace runs collapsed.
+
+    Spans are concatenated with no separator: MuPDF already puts the (synthesized) spaces inside the spans,
+    and a span boundary without one is a font change inside a word. Small-caps headings are the common case
+    ("R" + "EFERENCES"); joining with a space gave "R EFERENCES", which missed SKIP_SECTIONS and indexed
+    reference lists. Across 77 corpus PDFs this glues no additional words.
+    """
+    return " ".join("".join(span.get("text", "") for span in spans).split())
 
 
 # Longest distance a chunk edge moves to reach a word boundary; a longer "word" (a URL, a formula) is cut mid-way.
