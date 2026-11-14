@@ -2,7 +2,10 @@ package query
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"math/rand"
@@ -148,7 +151,7 @@ Rules:
 {"claims": [{"text": "One factual statement.", "citations": [1, 2]}], "insufficient_evidence": false}
 Do not write [n] markers inside "text".`
 
-var blockTagRegex = regexp.MustCompile(`(?i)<(/?)(passage|question)`)
+var blockTagRegex = regexp.MustCompile(`(?i)<\s*(/?)\s*(passage|question)`)
 
 // contextPassage is one hit as it is placed in the prompt.
 type contextPassage struct {
@@ -184,6 +187,7 @@ func renderPassage(n int, h SearchHit, text string) string {
 // It drops duplicates (same non-zero ChunkID, or the same whitespace-collapsed content), keeps at most
 // maxPassagesPerPaper per paper, and stops at the first passage that doesn't fit budgetTokens (lower-ranked
 // passages never jump ahead). Only a single top passage over budget is cut, at the last whitespace that fits.
+// A hit whose content is empty after whitespace collapse is skipped (nothing to cite): no cap slot, no budget.
 // Papers are then grouped in order of their best hit, rerank order inside a paper, and numbered 1..K.
 //
 // An empty (non-nil) result means no prompt can be built: callers must take the template path.
@@ -195,7 +199,7 @@ func selectContext(hits []SearchHit, budgetTokens int) []contextPassage {
 			break
 		}
 		norm := strings.Join(strings.Fields(h.Content), " ")
-		if (h.ChunkID != 0 && ids[h.ChunkID]) || contents[norm] || perPaper[h.ArxivID] >= maxPassagesPerPaper {
+		if norm == "" || (h.ChunkID != 0 && ids[h.ChunkID]) || contents[norm] || perPaper[h.ArxivID] >= maxPassagesPerPaper {
 			continue
 		}
 		p := contextPassage{HitIndex: i, Hit: h, Text: sanitizeBlock(h.Content)}
@@ -260,6 +264,88 @@ func buildSynthesisPrompt(question string, passages []contextPassage) (system, u
 	}
 	fmt.Fprintf(&b, "<question>\n%s\n</question>\n", sanitizeBlock(strings.TrimSpace(question)))
 	return synthesisSystemPrompt, b.String()
+}
+
+// --- AI-6b: parser for the model's JSON reply (docs/design/QA-8.md §1, §5). Not called by Ask yet. ---
+
+// synthesisClaim is one factual statement from the model, with its validated citation numbers.
+type synthesisClaim struct {
+	Text      string // trimmed; inline "[n]" markers removed
+	Citations []int  // distinct, in first-seen order, each in 1..k, never empty
+	Quote     string // optional; parsed and kept, not checked or used until AI-8 (ADR-0014)
+}
+
+type synthesisResult struct {
+	Claims               []synthesisClaim
+	InsufficientEvidence bool // model said the passages don't answer the question; Claims is then empty
+	DroppedMarkers       int  // citation numbers outside 1..k (array and inline), discarded
+	DroppedClaims        int  // claims removed: empty text, or no in-range citation left
+}
+
+// The parse errors are bare sentinels: they never wrap the encoding/json error, which can echo completion bytes.
+var (
+	errSynthesisMalformed = errors.New("synthesis: malformed reply") // not one JSON object of the expected shape
+	errSynthesisNoClaims  = errors.New("synthesis: no claims")       // claims empty and insufficient_evidence false
+)
+
+// parseSynthesis turns the model's reply into claims citing passages 1..k. Only a ``` / ```json fence around
+// one JSON object is tolerated. insufficient_evidence: true wins over any claims (refusal signal). Out-of-range
+// citation numbers (array or inline [n]) are dropped and counted; claims left empty or uncited are dropped and
+// counted. If every claim is dropped the result has zero claims and a nil error (QA-8 refuses, not template).
+func parseSynthesis(raw string, k int) (synthesisResult, error) {
+	s := strings.TrimSpace(raw)
+	if strings.HasPrefix(s, "```") {
+		if len(s) < 6 || !strings.HasSuffix(s, "```") {
+			return synthesisResult{}, errSynthesisMalformed
+		}
+		s = strings.TrimSpace(strings.TrimPrefix(s[3:len(s)-3], "json"))
+	}
+	var reply struct {
+		Claims []struct {
+			Text      string `json:"text"`
+			Citations []int  `json:"citations"`
+			Quote     string `json:"quote"`
+		} `json:"claims"`
+		InsufficientEvidence bool `json:"insufficient_evidence"`
+	}
+	dec := json.NewDecoder(strings.NewReader(s))
+	if !strings.HasPrefix(s, "{") || dec.Decode(&reply) != nil || dec.Decode(&struct{}{}) != io.EOF {
+		return synthesisResult{}, errSynthesisMalformed
+	}
+	if reply.InsufficientEvidence {
+		return synthesisResult{InsufficientEvidence: true}, nil
+	}
+	if len(reply.Claims) == 0 {
+		return synthesisResult{}, errSynthesisNoClaims
+	}
+	var res synthesisResult
+	for _, c := range reply.Claims {
+		nums := c.Citations
+		for _, m := range markerRegex.FindAllStringSubmatch(c.Text, -1) {
+			n, _ := strconv.Atoi(m[1]) // overflow gives a huge n: out of range
+			nums = append(nums, n)
+		}
+		var cites []int
+		seen := map[int]bool{}
+		for _, n := range nums {
+			if seen[n] {
+				continue
+			}
+			seen[n] = true
+			if n < 1 || n > k {
+				res.DroppedMarkers++
+				continue
+			}
+			cites = append(cites, n)
+		}
+		text := strings.TrimSpace(markerRegex.ReplaceAllString(c.Text, ""))
+		if text == "" || len(cites) == 0 {
+			res.DroppedClaims++
+			continue
+		}
+		res.Claims = append(res.Claims, synthesisClaim{Text: text, Citations: cites, Quote: c.Quote})
+	}
+	return res, nil
 }
 
 // finalize validates answer's citations (§9). If at least one is supported, the answer is returned

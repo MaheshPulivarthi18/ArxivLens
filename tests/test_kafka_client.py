@@ -1,8 +1,13 @@
-"""OPS-H8 (part a): the Python producer confirms delivery, so no offset is committed past an unconfirmed DLQ write.
-Fakes only: no broker, no network. The consumer loop (`start`) is the unchanged one from main."""
+"""OPS-H8/H8b: the Python producer confirms delivery and the consumer commits only after success or a confirmed DLQ write
+(retried in place), with interruptible waits, graceful stop and poison records. Fakes only: no broker, no network."""
 import json
+import logging
+import signal
+import threading
+import time
 
 import pytest
+from confluent_kafka import KafkaException
 
 from services.common import kafka_client as kc
 
@@ -31,20 +36,23 @@ class FakeMsg:
 
 
 class FakeConsumer:
-    """poll() pops the script; once it is empty, KeyboardInterrupt ends the unchanged `while True` loop."""
+    """poll() pops the script; once it is empty it asks the owner to stop. commit/close append to the shared log."""
 
-    def __init__(self, script, log):
-        self.script, self.log = list(script), log
+    def __init__(self, script, log, commit_errors=()):
+        self.script, self.log, self.commit_errors, self.owner = list(script), log, set(commit_errors), None
 
     def subscribe(self, topics): pass
     def assignment(self): return [(TOPIC, 0)]
 
     def poll(self, timeout):
         if not self.script:
-            raise KeyboardInterrupt
+            self.owner.stop()
+            return None
         return self.script.pop(0)
 
     def commit(self, message, asynchronous):
+        if message.offset() in self.commit_errors:
+            raise KafkaException("Broker: Unknown member")
         self.log.append(("commit", message.offset()))
 
     def close(self): self.log.append(("close",))
@@ -55,18 +63,20 @@ class FakeErr:
 
 
 class FakeProducer:
-    """outcomes: per produce, 'ok' | 'err' (callback with error) | 'queued' (no callback) | 'raise' (produce raises).
-    The last outcome repeats."""
+    """outcomes: per produce, 'ok' | 'err' (callback with error) | 'queued' (no callback) | 'raise' / 'raise-kafka'
+    (produce raises). The last outcome repeats."""
 
     def __init__(self, outcomes, log=None):
         self.outcomes, self.log, self.sent, self.pending = list(outcomes), [] if log is None else log, [], None
 
     def produce(self, topic, key, value, headers, on_delivery):
         outcome = self.outcomes.pop(0) if len(self.outcomes) > 1 else self.outcomes[0]
-        if outcome == "raise":
-            raise BufferError("Local: Queue full")
         body = json.loads(value)
         self.log.append(("produce", topic, body.get("offset")))
+        if outcome == "raise":
+            raise BufferError("Local: Queue full")
+        if outcome == "raise-kafka":
+            raise KafkaException("Local: Queue full")
         self.pending = (outcome, on_delivery, body, headers)
 
     def flush(self, timeout):
@@ -79,36 +89,47 @@ class FakeProducer:
         return 0
 
 
-@pytest.fixture
-def sleeps(monkeypatch):
-    calls = []
-    monkeypatch.setattr(kc.time, "sleep", calls.append)
-    return calls
-
-
-def make(script, dlq=("ok",)):
-    log = []
-    c = kc.ServiceKafkaConsumer("processor-v1", [TOPIC], brokers="unused:9092", consumer=FakeConsumer(script, log),
+def make(script, dlq=("ok",), commit_errors=(), stop_after_waits=None):
+    """A consumer on fakes. Waits are recorded, return at once, and request a stop after `stop_after_waits` of them."""
+    log, waits = [], []
+    c = kc.ServiceKafkaConsumer("processor-v1", [TOPIC], brokers="unused:9092",
+                                consumer=FakeConsumer(script, log, commit_errors),
                                 producer=kc.ServiceKafkaProducer("unused:9092", producer=FakeProducer(dlq, log)))
-    return c, log
+    c.consumer.owner = c
+
+    def fake_wait(seconds):
+        waits.append(seconds)
+        if stop_after_waits is not None and len(waits) >= stop_after_waits:
+            c.stop()
+        return c._stop.is_set()
+
+    c._wait = fake_wait
+    return c, log, waits
 
 
-def failing_at(offset, calls):
+def handler_failing(fail_counts, calls, exc=None):
+    """fail_counts: offset -> number of leading failures (99 = always)."""
     def handle(env, msg):
         calls[msg.offset()] = calls.get(msg.offset(), 0) + 1
-        if msg.offset() == offset:
-            raise RuntimeError("boom")
+        if calls[msg.offset()] <= fail_counts.get(msg.offset(), 0):
+            raise exc or RuntimeError("boom")
     return handle
+
+
+def failing_at(offset, calls, exc=None):
+    return handler_failing({offset: 99}, calls, exc)
 
 
 # AC1: publish returns only on a confirmed delivery; the error names topic and cause, never the record value
 @pytest.mark.parametrize("outcome, cause", [("ok", None), ("err", "Message timed out"), ("queued", "not confirmed"),
-                                            ("raise", "Queue full")])
+                                            ("raise", "Queue full"), ("raise-kafka", "Queue full")])
 def test_publish_requires_confirmation(outcome, cause):
-    p = kc.ServiceKafkaProducer("unused:9092", producer=FakeProducer([outcome]))
+    fake = FakeProducer([outcome])
+    p = kc.ServiceKafkaProducer("unused:9092", producer=fake)
     args = ("papers.chunked", "paper.chunked", "2401.00001", 1, {"note": SENTINEL})
     if outcome == "ok":
-        assert p.publish(*args, traceparent=TP)
+        event_id = p.publish(*args, traceparent=TP)
+        assert len(fake.sent) == 1 and event_id == fake.sent[0][0]["event_id"]
         return
     with pytest.raises(kc.DeliveryError) as exc:
         p.publish(*args, traceparent=TP)
@@ -164,35 +185,154 @@ def test_delivery_bound_outlasts_message_timeout(monkeypatch):
     assert p.producer["message.timeout.ms"] == kc.MESSAGE_TIMEOUT_MS and p.delivery_timeout_s == kc.DELIVERY_TIMEOUT_S
 
 
-# AC5 (interim, unchanged start): an unconfirmed DLQ write leaves start before the commit; nothing after it is processed
-@pytest.mark.parametrize("outcome", ["err", "queued"])
-def test_unconfirmed_dlq_write_stops_before_commit(outcome, sleeps):
+# AC1 (H8b): success on attempt 1, 2 or 3 -> exactly one commit, no DLQ produce
+@pytest.mark.parametrize("failures, want_waits", [(0, []), (1, [0.2]), (2, [0.2, 0.4])])
+def test_success_path(failures, want_waits):
     calls = {}
-    c, log = make([FakeMsg(4), FakeMsg(5), FakeMsg(6)], dlq=[outcome])
-    with pytest.raises(kc.DeliveryError):
-        c.start(failing_at(5, calls))
+    c, log, waits = make([FakeMsg(5)])
+    c.start(handler_failing({5: failures}, calls))
+    assert log == [("commit", 5), ("close",)]
+    assert waits == pytest.approx(want_waits) and calls == {5: failures + 1}
+
+
+def test_commit_error_is_logged_and_loop_continues(caplog):
+    c, log, _ = make([FakeMsg(5), FakeMsg(6)], commit_errors={5})
+    c.start(handler_failing({}, {}))
+    assert log == [("commit", 6), ("close",)]
+    assert any(r.levelno == logging.ERROR and "Commit failed (topic=papers.downloaded partition=0 offset=5)" in r.getMessage()
+               for r in caplog.records)
+
+
+# AC2 (H8b): 3 failures -> one DLQ message with full diagnostics, committed only after the confirmed write.
+# traceparent: the header when present, else the envelope's own.
+@pytest.mark.parametrize("headers", ["header", "envelope"])
+def test_confirmed_dlq_write_then_commit(headers):
+    calls = {}
+    msg = FakeMsg(5) if headers == "header" else FakeMsg(
+        5, value=json.dumps({**json.loads(envelope(5)), "traceparent": TP}).encode(), headers=())
+    c, log, waits = make([msg])
+    c.start(failing_at(5, calls))
+    assert log == [("produce", DLQ, 5), ("commit", 5), ("close",)] and calls == {5: 3} and waits == pytest.approx([0.2, 0.4])
+    (body, hdrs), = c.producer.producer.sent
+    assert (body["original_topic"], body["partition"], body["offset"], body["attempts"]) == (TOPIC, 0, 5, 3)
+    assert (body["consumer_group"], body["traceparent"], hdrs) == ("processor-v1", TP, [("traceparent", TP.encode())])
+    assert "in handle" in body["stack_trace"] and "RuntimeError: boom" in body["stack_trace"]  # the handler's trace
+
+
+# AC3 (H8b; replaces part a's interim "start raises"): the DLQ write never lands -> nothing at or after @5 is committed,
+# it is retried in place without re-running the handler, @6 is never handled, start returns normally and closes.
+@pytest.mark.parametrize("outcome", ["err", "queued", "raise", "raise-kafka"])
+def test_unconfirmed_dlq_write_stops_before_commit(outcome):
+    calls = {}
+    c, log, waits = make([FakeMsg(4), FakeMsg(5), FakeMsg(6)], dlq=[outcome], stop_after_waits=5)
+    c.start(failing_at(5, calls))
     commits = [e for e in log if e[0] == "commit"]
     assert commits == [("commit", 4)] and calls == {4: 1, 5: 3} and log[-1] == ("close",)
+    assert waits == pytest.approx([0.2, 0.4, 1, 2, 4]) and log.count(("produce", DLQ, 5)) == 3
 
 
-def test_confirmed_dlq_write_then_commit(sleeps):
+# AC4 (H8b): two failed rounds, then the write lands -> one DLQ message, one commit after it, DLQ waits 1 s and 2 s
+def test_dlq_recovers_after_two_failures():
     calls = {}
-    c, log = make([FakeMsg(5)])
+    c, log, waits = make([FakeMsg(5)], dlq=["err", "err", "ok"])
     c.start(failing_at(5, calls))
-    assert log == [("produce", DLQ, 5), ("commit", 5), ("close",)] and calls == {5: 3} and sleeps == [0.2, 0.4]
-    (body, headers), = c.producer.producer.sent
-    assert (body["original_topic"], body["partition"], body["offset"], body["attempts"]) == (TOPIC, 0, 5, 3)
-    assert body["consumer_group"] == "processor-v1" and "RuntimeError: boom" in body["stack_trace"]
+    assert log == [("produce", DLQ, 5)] * 3 + [("commit", 5), ("close",)]
+    assert len(c.producer.producer.sent) == 1 and calls == {5: 3} and waits == pytest.approx([0.2, 0.4, 1, 2])
 
 
-def test_failing_publish_in_handler_is_retried(sleeps):
+def test_dlq_backoff_schedule():
+    c, _, _ = make([])
+    assert [c._dlq_backoff(r) for r in range(1, 8)] == [1, 2, 4, 8, 16, 30, 30]
+
+
+# AC5: a processor-style handler whose publish keeps failing is retried; committed only once its DLQ write is confirmed
+@pytest.mark.parametrize("dlq", ["ok", "err"])
+def test_failing_publish_in_handler_is_retried(dlq):
     downstream, calls = kc.ServiceKafkaProducer("unused:9092", producer=FakeProducer(["err"])), []
 
     def processor_like(env, msg):
         calls.append(msg.offset())
         downstream.publish("papers.chunked", "paper.chunked", env.paper_id, 1, {}, traceparent=env.traceparent)
 
-    c, log = make([FakeMsg(5)])
+    c, log, _ = make([FakeMsg(5)], dlq=[dlq], stop_after_waits=4)
     c.start(processor_like)
-    assert calls == [5, 5, 5] and log == [("produce", DLQ, 5), ("commit", 5), ("close",)]
-    assert c.producer.producer.sent[0][0]["error_type"] == "DeliveryError"
+    assert calls == [5, 5, 5]
+    if dlq == "ok":
+        assert log == [("produce", DLQ, 5), ("commit", 5), ("close",)]
+        assert c.producer.producer.sent[0][0]["error_type"] == "DeliveryError"
+    else:
+        assert not [e for e in log if e[0] == "commit"] and log[-1] == ("close",)
+
+
+# AC6: a stop interrupts a 5 s wait at once (real threading.Event): no commit, no further DLQ write
+@pytest.mark.parametrize("stage", ["handler-wait", "dlq-wait"])
+def test_stop_during_wait_returns_promptly(stage):
+    c, log, _ = make([FakeMsg(5)], dlq=["err"])
+    c._wait = c._stop.wait
+    c._handler_backoff = (lambda a: 5.0) if stage == "handler-wait" else (lambda a: 0)
+    c._dlq_backoff = lambda r: 5.0
+    threading.Timer(0.05, c.stop).start()
+    t0 = time.monotonic()
+    c.start(failing_at(5, {}))
+    assert time.monotonic() - t0 < 0.2
+    assert log == ([] if stage == "handler-wait" else [("produce", DLQ, 5)]) + [("close",)]
+
+
+# AC6b: the handler fails because shutdown was requested -> not a processing failure: no DLQ write, no commit
+@pytest.mark.parametrize("stop_on_call, want_waits", [(3, [0.2, 0.4]), (1, [])])
+def test_stop_during_last_attempt_is_not_a_failure(stop_on_call, want_waits):
+    calls = []
+    c, log, waits = make([FakeMsg(5)])
+
+    def handler(env, msg):
+        calls.append(1)
+        if len(calls) == stop_on_call:
+            c.stop()
+        raise RuntimeError("interrupted")
+
+    c.start(handler)
+    assert len(calls) == stop_on_call and waits == pytest.approx(want_waits) and log == [("close",)]
+
+
+def test_signal_handler_sets_stop_and_is_restored():
+    before, calls = signal.getsignal(signal.SIGTERM), []
+    c, log, _ = make([FakeMsg(5), FakeMsg(6)])
+
+    def handler(env, msg):
+        calls.append(msg.offset())
+        signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)  # what `docker stop` delivers
+
+    c.start(handler)
+    assert calls == [5] and log == [("commit", 5), ("close",)]  # the finished record is committed, then exit
+    assert signal.getsignal(signal.SIGTERM) is before
+    with pytest.raises(KeyboardInterrupt):  # a second signal forces the stop
+        c._on_signal(signal.SIGINT, None)
+
+
+# AC7: an undecodable record goes to the DLQ once (attempts=1), is committed after it, and the loop keeps consuming
+@pytest.mark.parametrize("value, want", [
+    (b"not json", {"raw_value": "b'not json'"}),
+    (b'{"event_id": "x"}', {"event_id": "x"}),
+    (b"[1, 2]", {"raw_value": "b'[1, 2]'"}),
+])
+def test_poison_record_goes_to_dlq_and_loop_continues(value, want):
+    calls = {}
+    c, log, _ = make([FakeMsg(5, value=value), FakeMsg(6)])
+    c.start(handler_failing({}, calls))
+    assert log == [("produce", DLQ, 5), ("commit", 5), ("commit", 6), ("close",)] and calls == {6: 1}
+    (body, _), = c.producer.producer.sent
+    assert (body["offset"], body["attempts"], body["original_value"]) == (5, 1, want)
+
+
+# AC8: a failed DLQ write is logged with coordinates and the error, never with the record value or the handler error text
+@pytest.mark.parametrize("poison", [False, True])
+def test_dlq_failure_log_has_coordinates_not_value(caplog, poison):
+    value = json.dumps({"event_id": SENTINEL}).encode() if poison else envelope(5)
+    c, log, _ = make([FakeMsg(5, value=value)], dlq=["err", "ok"])
+    caplog.set_level(logging.DEBUG)
+    c.start(failing_at(5, {}, RuntimeError(f"bad value {SENTINEL}")))
+    crit = [r.getMessage() for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert len(crit) == 1 and ("commit", 5) in log
+    for part in ["topic=papers.downloaded", "partition=0", "offset=5", f"dlq_topic={DLQ}", "round=1", "Message timed out"]:
+        assert part in crit[0]
+    assert not [r for r in caplog.records if SENTINEL in r.getMessage()]

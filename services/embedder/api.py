@@ -72,6 +72,10 @@ def score_pairs(tokenizer, model, query: str, passages: Sequence[str],
         idx = order[start:start + batch_size]
         inputs = tokenizer([pairs[i] for i in idx], padding=True, truncation=True,
                            return_tensors="pt", max_length=RERANK_MAX_LENGTH)
+        # Same device as the model (#43: MPS/CUDA when the embedder has one). BatchEncoding has .to().
+        device = getattr(model, "device", None)
+        if device is not None and hasattr(inputs, "to"):
+            inputs = inputs.to(device)
         batches.append((idx, inputs))
     t1 = time.perf_counter()
 
@@ -119,8 +123,11 @@ def load_models():
         logger.info("Loading Cross-Encoder Reranker BAAI/bge-reranker-base...")
         reranker_tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-reranker-base")
         reranker_model = AutoModelForSequenceClassification.from_pretrained("BAAI/bge-reranker-base")
+        # Same device as the embedder (MPS/CUDA/CPU). Left on CPU it scored 20 pairs in ~2.3 s on Apple
+        # silicon, most of the /v1/ask latency budget. fp32 everywhere, so scores do not change.
+        reranker_model.to(embedder.device)
         reranker_model.eval()
-        logger.info("Cross-Encoder Reranker loaded successfully!")
+        logger.info(f"Cross-Encoder Reranker loaded successfully on {embedder.device}!")
     except Exception as e:
         logger.error(f"Warning: Failed to load cross-encoder ({e}), falling back to bi-encoder")
         return
