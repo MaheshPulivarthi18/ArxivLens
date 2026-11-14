@@ -41,8 +41,11 @@ def load_models():
         logger.info("Loading Cross-Encoder Reranker BAAI/bge-reranker-base...")
         reranker_tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-reranker-base")
         reranker_model = AutoModelForSequenceClassification.from_pretrained("BAAI/bge-reranker-base")
+        # Same device as the embedder (MPS/CUDA/CPU). Left on CPU it scored 20 pairs in ~2.3 s on Apple
+        # silicon, most of the /v1/ask latency budget. fp32 everywhere, so scores do not change.
+        reranker_model.to(embedder.device)
         reranker_model.eval()
-        logger.info("Cross-Encoder Reranker loaded successfully!")
+        logger.info(f"Cross-Encoder Reranker loaded successfully on {embedder.device}!")
     except Exception as e:
         logger.error(f"Warning: Failed to load cross-encoder ({e}), falling back to bi-encoder")
 
@@ -98,6 +101,7 @@ def rerank_endpoint(req: RerankRequest):
             pairs = [[req.query, p] for p in req.passages]
             with torch.no_grad():
                 inputs = reranker_tokenizer(pairs, padding=True, truncation=True, return_tensors="pt", max_length=512)
+                inputs = {k: v.to(reranker_model.device) for k, v in inputs.items()}
                 scores = reranker_model(**inputs, return_dict=True).logits.view(-1, ).float()
                 probs = torch.sigmoid(scores).tolist()
                 if isinstance(probs, float):
