@@ -51,10 +51,12 @@ type PaperIngester struct {
 	embedderURL string
 	httpClient  *http.Client
 	// ingestClient is used only for the embedder's synchronous /internal/ingest (chunk + embed),
-	// which can take minutes on CPU; arXiv fetches keep httpClient's shorter timeout.
+	// which can take minutes on CPU; arXiv metadata fetches keep httpClient's shorter timeout.
 	ingestClient *http.Client
 	// limiter spaces every arXiv request this process's ingester makes (Technical PRD §9).
 	limiter *arxiv.Limiter
+	// pdfLimits bounds PDF downloads (stall/total/size); httpClient's Timeout applies to metadata only.
+	pdfLimits arxiv.PDFLimits
 }
 
 // doArxiv waits for the arXiv limiter, sets the identifying User-Agent and sends req.
@@ -84,6 +86,7 @@ func NewPaperIngester(database *db.DB, minioClient *minio.Client, minioBucket, e
 		},
 		ingestClient: &http.Client{Timeout: ingestTimeout},
 		limiter:      arxiv.NewLimiter(arxiv.DefaultInterval),
+		pdfLimits:    arxiv.DefaultPDFLimits,
 	}
 	if minioClient != nil { // a nil *minio.Client must stay a nil interface
 		ing.minioClient = minioClient
@@ -201,25 +204,13 @@ func (ing *PaperIngester) IngestPaper(ctx context.Context, input string) (*Inges
 
 	// Step 2: Download PDF and Stream to MinIO
 	log.Printf("[Ingester] Downloading PDF from %s...", sourceURL)
-	pdfReq, err := http.NewRequestWithContext(ctx, http.MethodGet, sourceURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create pdf request: %w", err)
+	if err := ing.limiter.Wait(ctx); err != nil {
+		return nil, err
 	}
-
-	pdfResp, err := ing.doArxiv(pdfReq)
+	// Stall-based limits, not httpClient's 45 s total: large PDFs arrive slowly but steadily.
+	pdfBytes, err := arxiv.FetchPDF(ctx, ing.httpClient, sourceURL, arxiv.UserAgent("Query Ingester"), ing.pdfLimits)
 	if err != nil {
-		return nil, fmt.Errorf("failed to download pdf from arxiv: %w", err)
-	}
-	defer pdfResp.Body.Close()
-
-	if pdfResp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("arxiv returned status %d when downloading PDF", pdfResp.StatusCode)
-	}
-
-	// Read into memory or stream to compute SHA-256 and upload to MinIO
-	pdfBytes, err := io.ReadAll(pdfResp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read pdf body: %w", err)
+		return nil, err
 	}
 
 	hasher := sha256.New()
