@@ -65,7 +65,7 @@ jobs:
           $PSQL -At < /tmp/snapshot.sql > /tmp/run2.txt
           diff -u /tmp/run1.txt /tmp/run2.txt
           echo "Schema identical after run 2: $(wc -l < /tmp/run2.txt) objects (extensions, columns, indexes)"
-      - name: HNSW plan + recall (real search.go SQL)
+      - name: HNSW plan + recall + search provenance (real search.go SQL)
         run: |
           go vet -tags integration ./internal/query/
-          go test -tags integration -count=1 -v -timeout 20m -run TestHNSW ./internal/query/
+          go test -tags integration -count=1 -v -timeout 20m -run 'TestHNSW|TestSearchProvenance' ./internal/query/
