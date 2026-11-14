@@ -13,6 +13,7 @@ Demonstrates end-to-end pipeline locally without external services:
 import os
 import re
 import sys
+import bisect
 import hashlib
 import argparse
 from typing import List, Dict, Any, Tuple, Optional
@@ -200,6 +201,9 @@ class TokenChunker:
         skip_sections: set = None,
     ):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        if not getattr(self.tokenizer, "is_fast", False):
+            # Chunk text is cut from the source via offset mappings, which only fast tokenizers provide.
+            raise ValueError(f"TokenChunker needs a fast tokenizer with offset mappings; {model_name} loaded a slow one")
         self.tokenizer.model_max_length = int(1e9)
         self.target_tokens = target_tokens
         self.overlap_tokens = overlap_tokens
@@ -233,6 +237,16 @@ class TokenChunker:
             if len(tokens) < self.min_tokens:
                 continue
 
+            # AI-11: char offset (into sec["text"]) of each token; None means "page unknown" (no page_breaks).
+            # sec_text is sec["text"] stripped, so offsets shift by the stripped leading whitespace.
+            page_breaks = sec.get("page_breaks") or []
+            break_offsets = [o for o, _ in page_breaks]
+            token_chars = None
+            if page_breaks:
+                raw = sec.get("text", "")
+                lead = len(raw) - len(raw.lstrip())
+                token_chars = [lead + start for start, _ in offsets]
+
             prefix = f"{paper_title} — {sec_title}\n\n"
             prefix_tokens = self.tokenizer.encode(prefix, add_special_tokens=False)
             effective_target = max(self.min_tokens, self.target_tokens - len(prefix_tokens) - 16)
@@ -259,6 +273,10 @@ class TokenChunker:
                     "content": full_content,
                     "content_hash": content_hash,
                 })
+                if token_chars is not None and token_chars[start_i] >= break_offsets[0]:
+                    # Page of the last break at or before the chunk's first character (ING-11 design decision 1).
+                    at = bisect.bisect_right(break_offsets, token_chars[start_i]) - 1
+                    all_chunks[-1]["page_start"] = page_breaks[at][1]
                 chunk_idx += 1
 
                 if start_i + effective_target >= len(tokens):
