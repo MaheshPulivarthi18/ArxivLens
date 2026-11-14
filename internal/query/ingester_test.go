@@ -82,9 +82,12 @@ func TestNewPaperIngesterTimeouts(t *testing.T) {
 			if got := ing.ingestClient.Timeout; got != tt.wantIngest {
 				t.Fatalf("ingest timeout = %s, want %s", got, tt.wantIngest)
 			}
-			// arXiv metadata/PDF fetches keep their own shorter timeout.
+			// arXiv metadata fetches keep their own shorter timeout; PDFs use stall-based limits instead.
 			if got := ing.httpClient.Timeout; got != 45*time.Second {
 				t.Fatalf("arXiv client timeout = %s, want 45s", got)
+			}
+			if ing.pdfLimits != arxiv.DefaultPDFLimits {
+				t.Fatalf("pdfLimits = %+v, want arxiv.DefaultPDFLimits", ing.pdfLimits)
 			}
 			if ing.limiter == nil || ing.limiter.Interval() != arxiv.DefaultInterval {
 				t.Fatalf("arXiv limiter not set to DefaultInterval")
