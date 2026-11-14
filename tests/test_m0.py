@@ -155,3 +155,48 @@ def test_slice_on_words_bounds():
     long_word = "x" * (MAX_WORD_SNAP_CHARS * 3)
     s = _slice_on_words(long_word, 50, 60)
     assert len(s) == 10  # no boundary within reach: token edges kept
+
+
+def _small_caps_pdf():
+    """`References` set in small caps the way LaTeX does it: a large initial and a smaller rest, as separate spans."""
+    import pymupdf
+
+    doc = pymupdf.open()
+    page = doc.new_page()
+    y = 60
+    body = "Gradient methods converge quickly when the step size is chosen with care in practice"
+    for _ in range(30):
+        page.insert_text((72, y), body, fontname="helv", fontsize=10)
+        y += 13
+    for initial, rest, x_size in (("R", "EFERENCES", 14), ):
+        page.insert_text((72, y + 10), initial, fontname="hebo", fontsize=x_size)
+        w = pymupdf.get_text_length(initial, fontname="hebo", fontsize=x_size)
+        page.insert_text((72 + w, y + 10), rest, fontname="hebo", fontsize=11)
+    y += 30
+    for _ in range(10):
+        page.insert_text((72, y), "[3] A. Author and B. Author, Some cited paper title, Proceedings, 2017.", fontname="helv", fontsize=10)
+        y += 13
+    return doc
+
+
+def test_small_caps_heading_is_one_word_and_references_are_skipped():
+    from services.processor.worker import ProcessorWorker
+
+    doc = _small_caps_pdf()
+    try:
+        sections = ProcessorWorker._parse_doc_sections(None, doc)
+    finally:
+        doc.close()
+    titles = [s["title"] for s in sections]
+    assert "REFERENCES" in titles, titles
+    chunker = TokenChunker(target_tokens=100, overlap_tokens=20, min_tokens=10)
+    chunks = chunker.chunk_sections("Paper", sections)
+    assert chunks and not [c for c in chunks if "cited paper title" in c["content"]], "reference list was indexed"
+
+
+def test_line_text_from_spans():
+    from scripts.m0_skeleton import line_text_from_spans
+
+    assert line_text_from_spans([{"text": "R"}, {"text": "EFERENCES"}]) == "REFERENCES"
+    assert line_text_from_spans([{"text": "the "}, {"text": "Adam"}, {"text": "  optimizer "}]) == "the Adam optimizer"
+    assert line_text_from_spans([]) == ""

@@ -13,7 +13,7 @@ import logging
 from typing import Dict, Any
 from confluent_kafka import Message
 
-from scripts.m0_skeleton import PDF_TEXT_FLAGS, PaperParser, TokenChunker
+from scripts.m0_skeleton import PDF_TEXT_FLAGS, PaperParser, TokenChunker, line_text_from_spans
 from services.common.config import config
 from services.common.db import (
     get_db_connection,
@@ -137,8 +137,7 @@ class ProcessorWorker:
                     continue
 
                 for line in b.get("lines", []):
-                    # Spans carry their own edge spaces; collapse every whitespace run to one space.
-                    line_text = " ".join(" ".join(span.get("text", "") for span in line.get("spans", [])).split())
+                    line_text = line_text_from_spans(line.get("spans", []))
                     if not line_text:
                         continue
 
