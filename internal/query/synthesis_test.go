@@ -90,26 +90,8 @@ func TestSynthesisDropsUnsupportedClaims(t *testing.T) {
 }
 
 func TestSynthesisRefusals(t *testing.T) {
-	t.Run("no claim verified: all_citations_unsupported with every passage as evidence", func(t *testing.T) {
-		buf := captureLog(t)
-		r, _ := llmRAG(batchHits(), byPassage(map[string]float64{"Method": 0.3, "Results": 0.1, "Discussion": 0.2}), llmtest.Reply(twoClaims))
-		resp, _ := r.Ask(context.Background(), "secret question", nil, 3)
-		if resp.RefusalReason != reasonAllUnsupported || resp.Answer != refusalUnsupported {
-			t.Fatalf("resp = %+v", resp)
-		}
-		checkEvidence(t, resp.Citations, batchHits(), []float64{0.3, 0.1, 0.2})
-		checkRefusalLog(t, buf, resp.TraceID, "reason=all_citations_unsupported citations=3 checked=3 unverified=0 evidence=3")
-	})
-	t.Run("verifier down: verification_unavailable", func(t *testing.T) {
-		captureLog(t)
-		v := &fakeVerifier{score: func(string, string) float64 { return 1 }, err: errors.New("down")}
-		r, _ := llmRAG(batchHits(), v, llmtest.Reply(twoClaims))
-		resp, _ := r.Ask(context.Background(), "q", nil, 3)
-		if resp.RefusalReason != reasonVerificationUnavailable {
-			t.Fatalf("resp = %+v", resp)
-		}
-		checkEvidence(t, resp.Citations, batchHits(), []float64{0, 0, 0})
-	})
+	// No claim verified, or the verifier is down: the quoted answer replaces the synthesis and is judged on its own
+	// terms (TestSynthesisClaimsUnsupportedFallBackToQuotes). Only the model's own "insufficient" is a refusal here.
 	t.Run("model says the passages do not answer: insufficient_evidence, no verification", func(t *testing.T) {
 		buf := captureLog(t)
 		v := simVerifier(constSim(1))
@@ -156,20 +138,70 @@ func TestSynthesisFallsBackToExtractive(t *testing.T) {
 	}
 }
 
-// Claims that cite only passages that do not exist are dropped by the parser; the answer is refused (AI-6b design:
-// the model asserted things it could not cite), never replaced by the extractive answer.
-func TestSynthesisRefusesWhenEveryCitationIsFabricated(t *testing.T) {
-	buf := captureLog(t)
-	v := simVerifier(constSim(1))
-	r, _ := llmRAG(batchHits(), v, llmtest.Reply(`{"claims": [{"text": "X.", "citations": [9]}]}`))
-	resp, _ := r.Ask(context.Background(), "q", nil, 3)
-	if resp.RefusalReason != reasonAllUnsupported || len(v.calls) != 0 || strings.Contains(buf.String(), "synthesis fallback") {
-		t.Fatalf("resp=%+v verify calls=%d log=%q", resp, len(v.calls), buf.String())
+// When no LLM claim survives verification (unsupported, unverifiable, or every citation fabricated), the reader
+// gets the quoted answer, which is checked on its own terms and refuses by itself when nothing is supported.
+func TestSynthesisClaimsUnsupportedFallBackToQuotes(t *testing.T) {
+	extractive := (&RAGService{extractor: prefersImproves()}).buildExtractiveAnswer(context.Background(), "q", batchHits())
+	for _, tc := range []struct {
+		name  string
+		v     *fakeVerifier
+		reply string
+		logs  string
+	}{
+		{"claims unsupported", byPassage(map[string]float64{"Method": 0.3, "Results": 0.1, "Discussion": 0.2}), twoClaims,
+			"claims=2 citations=3 checked=3 unverified=0"},
+		{"citations fabricated", simVerifier(constSim(1)), `{"claims": [{"text": "X.", "citations": [9]}]}`,
+			"claims=0 citations=0 checked=0 unverified=0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := captureLog(t)
+			r, _ := llmRAG(batchHits(), tc.v, llmtest.Reply(tc.reply))
+			resp, _ := r.Ask(context.Background(), "secret question", nil, 3)
+			if resp.Answer != extractive || resp.RefusalReason != "" || resp.AnswerKind != AnswerQuoted {
+				t.Fatalf("resp = %+v, want the quoted answer", resp)
+			}
+			if !strings.Contains(buf.String(), "synthesis claims unsupported") || !strings.Contains(buf.String(), tc.logs) ||
+				!strings.Contains(buf.String(), "reason=claims_unsupported") || strings.Contains(buf.String(), "secret question") {
+				t.Errorf("log = %q", buf.String())
+			}
+		})
 	}
-	if !strings.Contains(buf.String(), "dropped_claims=1 dropped_markers=1") {
-		t.Errorf("log = %q, want the dropped counts", buf.String())
+	t.Run("verifier down: verbatim quotes still verify by string match", func(t *testing.T) {
+		captureLog(t)
+		v := &fakeVerifier{score: func(string, string) float64 { return 1 }, err: errors.New("down")}
+		r, _ := llmRAG(batchHits(), v, llmtest.Reply(twoClaims))
+		resp, _ := r.Ask(context.Background(), "q", nil, 3)
+		if resp.Answer != extractive || resp.AnswerKind != AnswerQuoted {
+			t.Fatalf("resp = %+v", resp)
+		}
+		for _, c := range resp.Citations {
+			if !c.Supported || c.Score != 1 {
+				t.Errorf("citation %+v, want a quote match", c)
+			}
+		}
+	})
+}
+
+// Quick answers skip the LLM and say a synthesized answer can be requested; without an LLM they never say so.
+func TestQuickAnswerSkipsSynthesis(t *testing.T) {
+	captureLog(t)
+	r, f := llmRAG(batchHits(), simVerifier(constSim(1)), llmtest.Reply(twoClaims))
+	resp, _ := r.AskWith(context.Background(), "q", nil, 3, AskOptions{Quick: true})
+	if len(f.Requests()) != 0 || resp.AnswerKind != AnswerQuoted || !resp.SynthesisAvailable {
+		t.Fatalf("resp = %+v, llm requests %d", resp, len(f.Requests()))
 	}
-	checkEvidence(t, resp.Citations, batchHits(), []float64{0, 0, 0})
+	full, _ := r.AskWith(context.Background(), "q", nil, 3, AskOptions{})
+	if full.AnswerKind != AnswerSynthesized || full.SynthesisAvailable {
+		t.Errorf("full = %+v", full)
+	}
+	plain, _ := newRAG(batchHits(), simVerifier(constSim(1))).AskWith(context.Background(), "q", nil, 3, AskOptions{Quick: true})
+	if plain.SynthesisAvailable || plain.AnswerKind != AnswerQuoted {
+		t.Errorf("no-LLM quick = %+v", plain)
+	}
+	raw, _ := json.Marshal(resp)
+	if !strings.Contains(string(raw), `"answer_kind":"quoted","synthesis_available":true`) {
+		t.Errorf("JSON %s", raw)
+	}
 }
 
 // Markers number passages in prompt order, which groups each paper's passages after its best one.

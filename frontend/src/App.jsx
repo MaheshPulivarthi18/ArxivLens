@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useRef } from 'react';
 import { AlertCircle } from 'lucide-react';
 import Navbar from './components/Navbar';
 import HeroSearch from './components/HeroSearch';
@@ -16,10 +16,13 @@ export default function App() {
   const [searchResult, setSearchResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [earlyRefusal, setEarlyRefusal] = useState(false);
-  const [lastQuestion, setLastQuestion] = useState('How does G-CARL improve patient-oriented medical report interpretation?');
+  const [lastQuestion, setLastQuestion] = useState('');
   const [discovering, setDiscovering] = useState(false);
   const [activeMarker, setActiveMarker] = useState(1);
   const [toastMessage, setToastMessage] = useState('');
+  // 'writing' while the synthesized answer is being written after the quoted one is shown.
+  const [synthesis, setSynthesis] = useState('idle');
+  const searchSeq = useRef(0);
 
   const showToast = (msg) => {
     setToastMessage(msg);
@@ -57,33 +60,61 @@ export default function App() {
     document.body.removeChild(ta);
   };
 
+  const ask = async (question, quick) => {
+    const resp = await fetch('/v1/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question, max_citations: 5, quick })
+    });
+    if (!resp.ok) throw new Error(`ask failed: ${resp.status}`);
+    return resp.json();
+  };
+
+  // Two-stage answer: the quoted answer (exact sentences from the papers) appears in about the time of a search;
+  // when the server has an LLM, a written answer whose every claim is verified replaces it when ready. A newer
+  // search discards both stages of an older one.
   const handleSearch = async (question) => {
+    const seq = ++searchSeq.current;
     setLastQuestion(question);
     setLoading(true);
     setEarlyRefusal(false);
     setSearchResult(null);
+    setSynthesis('idle');
 
+    let quick;
     try {
-      const resp = await fetch('/v1/ask', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question, max_citations: 5 })
-      });
-      const data = await resp.json();
-
-      if (data.answer && data.answer.includes("No indexed papers are relevant")) {
+      quick = await ask(question, true);
+      if (seq !== searchSeq.current) return;
+      if (quick.answer && quick.answer.includes("No indexed papers are relevant")) {
         setEarlyRefusal(true);
-      } else {
-        setSearchResult(data);
-        if (data.citations && data.citations.length > 0) {
-          setActiveMarker(data.citations[0].marker);
-        }
+        return;
+      }
+      setSearchResult(quick);
+      if (quick.citations && quick.citations.length > 0) {
+        setActiveMarker(quick.citations[0].marker);
       }
     } catch (err) {
       console.error("Search request failed:", err);
-      showToast("❌ Search request failed. Make sure backend is running.");
+      if (seq === searchSeq.current) showToast("❌ Search request failed. Make sure backend is running.");
+      return;
     } finally {
-      setLoading(false);
+      if (seq === searchSeq.current) setLoading(false);
+    }
+
+    if (!quick.synthesis_available) return;
+    setSynthesis('writing');
+    try {
+      const full = await ask(question, false);
+      if (seq !== searchSeq.current) return;
+      // Keep the quoted answer if the written one was refused: the quotes are already verified evidence.
+      if (full.answer_kind === 'synthesized') {
+        setSearchResult(full);
+        if (full.citations && full.citations.length > 0) setActiveMarker(full.citations[0].marker);
+      }
+    } catch (err) {
+      console.error("Synthesis request failed:", err);
+    } finally {
+      if (seq === searchSeq.current) setSynthesis('idle');
     }
   };
 
@@ -111,11 +142,6 @@ export default function App() {
       setDiscovering(false);
     }
   };
-
-  // Run initial default query on mount
-  useEffect(() => {
-    handleSearch("How does G-CARL improve patient-oriented medical report interpretation?");
-  }, []);
 
   const handleCitationClick = (marker) => {
     setActiveMarker(marker);
@@ -171,6 +197,9 @@ export default function App() {
                   <SynthesisView
                     answer={searchResult.answer}
                     traceId={searchResult.trace_id}
+                    answerKind={searchResult.answer_kind}
+                    refusalReason={searchResult.refusal_reason}
+                    writing={synthesis === 'writing'}
                     citations={searchResult.citations}
                     onCitationClick={handleCitationClick}
                     onCopy={handleCopy}

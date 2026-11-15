@@ -57,6 +57,24 @@ type AskResponse struct {
 	// RefusalReason is set only when the answer is withheld (ADR-0003): reasonAllUnsupported or
 	// reasonVerificationUnavailable. Empty, and absent from the JSON, on every other path.
 	RefusalReason string `json:"refusal_reason,omitempty"`
+	// AnswerKind says how a non-refused answer was written: AnswerQuoted (sentences quoted from the passages) or
+	// AnswerSynthesized (LLM claims, each verified). Empty on refusals.
+	AnswerKind string `json:"answer_kind,omitempty"`
+	// SynthesisAvailable is true when an LLM is configured but this answer was quoted because the caller asked for
+	// the quick answer: the client can ask again without Quick for a synthesized one.
+	SynthesisAvailable bool `json:"synthesis_available,omitempty"`
+}
+
+// Answer kinds (AskResponse.AnswerKind).
+const (
+	AnswerQuoted      = "quoted"
+	AnswerSynthesized = "synthesized"
+)
+
+// AskOptions are per-request choices. Quick skips LLM synthesis and returns the quoted answer, which is ready in
+// about the time of search; a client shows it first and asks again for the synthesized answer (two-stage answers).
+type AskOptions struct {
+	Quick bool
 }
 
 // searcher is the part of *SearchEngine that Ask uses; tests substitute a fake.
@@ -104,6 +122,17 @@ func (r *RAGService) Ask(
 	categories []string,
 	maxCitations int,
 ) (*AskResponse, error) {
+	return r.AskWith(ctx, question, categories, maxCitations, AskOptions{})
+}
+
+// AskWith is Ask with per-request options.
+func (r *RAGService) AskWith(
+	ctx context.Context,
+	question string,
+	categories []string,
+	maxCitations int,
+	opts AskOptions,
+) (*AskResponse, error) {
 	if maxCitations <= 0 {
 		maxCitations = 5
 	}
@@ -131,12 +160,17 @@ func (r *RAGService) Ask(
 
 	// 4. QA-8: an LLM writes cited claims over the selected passages and each claim is verified against the
 	// passage text it was given. Without an LLM, or when it fails, quote the passages instead (also verified).
-	if r.llm != nil {
+	if r.llm != nil && !opts.Quick {
 		if resp := r.synthesize(ctx, traceID, question, hits); resp != nil {
 			return resp, nil
 		}
 	}
-	return r.finalize(ctx, traceID, r.buildExtractiveAnswer(ctx, question, hits), hits), nil
+	resp := r.finalize(ctx, traceID, r.buildExtractiveAnswer(ctx, question, hits), hits)
+	if resp.RefusalReason == "" {
+		resp.AnswerKind = AnswerQuoted
+		resp.SynthesisAvailable = r.llm != nil && opts.Quick
+	}
+	return resp, nil
 }
 
 // synthesisContextTokens bounds the estimated tokens of the passages sent to the LLM (selectContext).
@@ -194,12 +228,17 @@ func (r *RAGService) synthesize(ctx context.Context, traceID, question string, h
 			id, src, reasonInsufficientEvidence, len(evidence))
 		return &AskResponse{Answer: refusalInsufficient, Citations: evidence, TraceID: traceID, RefusalReason: reasonInsufficientEvidence}
 	}
-	return r.finalizeClaims(ctx, traceID, parsed.Claims, phits)
+	if resp := r.finalizeClaims(ctx, traceID, parsed.Claims, phits); resp != nil {
+		return resp
+	}
+	// No claim survived verification (or every citation was fabricated). The quoted answer is checked on its own
+	// terms and refuses by itself if nothing is supported, so a reader still gets the evidence the passages hold.
+	return fallback("claims_unsupported")
 }
 
 // finalizeClaims verifies every (claim, cited passage) pair and keeps only claims with at least one supported
 // citation: an unverified LLM sentence is never shown. A kept claim lists all its citations, each with its own
-// score and flag. When no claim survives, it refuses exactly as finalize does (ADR-0003).
+// score and flag. When no claim survives it returns nil and synthesize falls back to the quoted answer.
 func (r *RAGService) finalizeClaims(ctx context.Context, traceID string, claims []synthesisClaim, hits []SearchHit) *AskResponse {
 	type ref struct{ claim, marker int }
 	var refs []ref
@@ -252,9 +291,11 @@ func (r *RAGService) finalizeClaims(ctx context.Context, traceID string, claims 
 		if kept < len(claims) {
 			log.Printf("[Query Service] synthesis dropped unsupported claims trace_id=%s trace_id_source=%s claims=%d kept=%d", id, src, len(claims), kept)
 		}
-		return &AskResponse{Answer: b.String(), Citations: cites, TraceID: traceID}
+		return &AskResponse{Answer: b.String(), Citations: cites, TraceID: traceID, AnswerKind: AnswerSynthesized}
 	}
-	return refusal(ctx, traceID, len(refs), check, hits)
+	log.Printf("[Query Service] synthesis claims unsupported trace_id=%s trace_id_source=%s claims=%d citations=%d checked=%d unverified=%d",
+		id, src, len(claims), len(refs), check.checked, check.unverified)
+	return nil
 }
 
 // withMarkers appends "[m]" markers before a claim's final punctuation: "X holds." -> "X holds [1][2]."

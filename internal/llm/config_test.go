@@ -22,7 +22,7 @@ func TestConfigFromEnv(t *testing.T) {
 	}{
 		{name: "model unset disables the provider", env: map[string]string{"LLM_BASE_URL": "http://x/v1", "LLM_API_KEY": "k"}},
 		{name: "model only takes the local defaults", env: map[string]string{"LLM_MODEL": "llama3"},
-			want: &Config{BaseURL: "http://localhost:11434/v1", Model: "llama3", Timeout: 2 * time.Second, MaxTokens: 256}},
+			want: &Config{BaseURL: "http://localhost:11434/v1", Model: "llama3", Timeout: 30 * time.Second, MaxTokens: 256}},
 		{name: "every variable set", env: map[string]string{"LLM_MODEL": "gpt-x", "LLM_BASE_URL": "https://api.example.com/v1/",
 			"LLM_API_KEY": "sk-abc", "LLM_TIMEOUT": "500ms", "LLM_MAX_TOKENS": "8192"},
 			want: &Config{BaseURL: "https://api.example.com/v1", Model: "gpt-x", Timeout: 500 * time.Millisecond, MaxTokens: 8192}},
