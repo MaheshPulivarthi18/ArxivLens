@@ -398,6 +398,7 @@ def run_retrieval_evaluation(dataset_path: str = DEFAULT_DATASET, embedder_url: 
 
     metric_names = ("recall@5", "mrr", "ndcg@5", "chunk_precision@5")
     results = {m: {**{n: [] for n in metric_names}, "latencies_ms": []} for m in MODES}
+    by_kind: Dict[str, Dict[str, Dict[str, List[float]]]] = {}  # kind -> mode -> metric -> values (info, not gated)
 
     with conn.cursor() as cur:
         for q_item in eval_queries:
@@ -416,8 +417,11 @@ def run_retrieval_evaluation(dataset_path: str = DEFAULT_DATASET, embedder_url: 
             vec_literal = "[" + ",".join(f"{x:.6f}" for x in q_vec) + "]"
 
             for mode_name, (hits, lat) in run_modes_for_case(cur, query, vec_literal, model, rerank).items():
+                kind_metrics = by_kind.setdefault(q_item.get("kind", "unlabelled"), {}).setdefault(
+                    mode_name, {n: [] for n in metric_names})
                 for n, v in score_case(hits, relevant_arxiv_ids).items():
                     results[mode_name][n].append(v)
+                    kind_metrics[n].append(v)
                 results[mode_name]["latencies_ms"].append(lat)
 
     conn.close()
@@ -442,6 +446,16 @@ def run_retrieval_evaluation(dataset_path: str = DEFAULT_DATASET, embedder_url: 
         summary["modes"][mode] = row
         print(f"{mode:<24} | {row['recall@5']:<8.4f} | {row['mrr']:<8.4f} | {row['ndcg@5']:<8.4f} | "
               f"{row['chunk_precision@5']:<8.4f} | {row['avg_latency_ms']:.2f}")
+    print("=" * 80)
+    summary["by_kind"] = {
+        kind: {mode: {"n": len(m["mrr"]), **{n: mean(m[n]) for n in ("recall@5", "mrr", "ndcg@5")}}
+               for mode, m in modes.items()}
+        for kind, modes in by_kind.items()}
+    print("By query kind (info, not gated): MRR per mode, n = cases")
+    print(f"{'Kind':<22} | {'n':>3} | " + " | ".join(f"{m[:14]:<14}" for m in MODES))
+    for kind, modes in summary["by_kind"].items():
+        n = next(iter(modes.values()))["n"]
+        print(f"{kind:<22} | {n:>3} | " + " | ".join(f"{modes[m]['mrr']:<14.4f}" for m in MODES if m in modes))
     print("=" * 80)
     print(f"Cases evaluated: {summary['cases_evaluated']}/{summary['cases_total']}")
     if skipped:

@@ -6,7 +6,7 @@ case to make a run pass**; a wrong threshold needs an Accepted ADR.
 | File | Schema | Min size |
 |---|---|---|
 | `corpus.txt` | one arXiv ID per line (no version), `#` comments | — |
-| `retrieval.jsonl` | `{"id","query","relevant_arxiv_ids":[...]}` | 30 |
+| `retrieval.jsonl` | `{"id","kind","query","relevant_arxiv_ids":[...]}` (kinds below) | 30, ≥ 6 per kind |
 | `answer.jsonl` | `{"id","question","expected_arxiv_ids":[...]}` (in-corpus) | 20 |
 | `refusal.jsonl` | `{"id","question"}` (clearly out of corpus) | 20 |
 | `refusal_near_miss.jsonl` | `{"id","question","answered_by","why_near","reviewed_by"}` (in-domain, answering paper not in corpus; report-only) | 10 |
@@ -22,6 +22,23 @@ make eval                                # = python3 scripts/eval_gate.py; exit 
 python3 scripts/evaluate_retrieval.py    # retrieval only (DATABASE_URL + ARXIVLENS_EMBEDDER_URL, default http://localhost:8081)
 python3 scripts/evaluate_answers.py      # /v1/ask only (ARXIVLENS_API_URL, default http://localhost:8080)
 ```
+### Retrieval query kinds
+The first 34 cases paraphrase abstracts with their distinctive keywords, and each targets a paper whose topic no other
+corpus paper shares. Every mode scored near 1.0 on them, so "hybrid + rerank beats BM25 and dense" depended on a single
+query's rank and flipped between machines. Cases h001–h044 are written the way scholars search a library they know:
+
+| `kind` | What it tests | Example |
+|---|---|---|
+| `abstract-paraphrase` | the original cases (r001–r034) | "masked language model pre-training of deep bidirectional transformers" |
+| `body-detail` | a fact from the method or experiments, not the abstract | "why are dot-product attention scores divided by the square root of the key dimension" |
+| `own-words` | the reader's vocabulary, not the paper's | "how to find the closest vectors quickly in a very large collection" |
+| `siblings` | picking the right paper among close neighbours (BERT/RoBERTa, Kaplan/Chinchilla, DDPM/LDM, InstructGPT/DPO) | "the original BERT was significantly undertrained" |
+| `multi` | questions that two or three corpus papers answer; recall needs all of them in the top 5 | "sinusoidal versus rotary encodings of token positions in transformers" |
+
+Every label was checked against the indexed text. Where another corpus paper legitimately answered a draft query
+(T5 and ViT on position encodings, BEIR on dense retrieval), the query was narrowed rather than the label widened.
+The per-kind MRR table is printed and saved as `by_kind` in the results JSON; it is information, not a gate.
+
 ### What the retrieval gate measures
 Decisions: [ADR-0006](https://github.com/MaheshPulivarthi18/arxivlens-agents/blob/main/docs/adr/0006-recall-at-5-definition.md)
 (metric definition) and [ADR-0010](https://github.com/MaheshPulivarthi18/arxivlens-agents/blob/main/docs/adr/0010-ask-sorts-by-rerank.md)
