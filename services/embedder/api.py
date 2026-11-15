@@ -5,6 +5,7 @@ Provides low-latency embedding and cross-encoder reranking over HTTP for the Go 
 Endpoints:
   POST /internal/embed   {"texts": [...], "is_query": bool} -> {"vectors": [[...]]}
   POST /internal/rerank  {"query": "...", "passages": [...]} -> {"scores": [...]}
+  POST /internal/verify  {"pairs": [{"claim": "...", "passage": "..."}]} -> {"scores": [...]} (P(entailment))
   GET  /healthz          -> {"status": "ok"}
 """
 
@@ -19,6 +20,7 @@ from pydantic import BaseModel
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from scripts.m0_skeleton import BGEEmbedder
+from services.embedder import verify as nli
 from services.common.config import config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -30,6 +32,12 @@ app = FastAPI(title="ArxivLens Embedder & Reranker API", version="1.0.0")
 embedder: Optional[BGEEmbedder] = None
 reranker_tokenizer = None
 reranker_model = None
+# NLI cross-encoder for citation support (/internal/verify). None: the endpoint answers 503 and the query
+# service fails closed (verification_unavailable).
+nli_tokenizer = None
+nli_model = None
+nli_entail_idx = None
+NLI_MODEL = os.getenv("ARXIVLENS_NLI_MODEL", nli.DEFAULT_NLI_MODEL)
 
 # Cross-encoder input limit. Lowering it changes scores and ranking, so it needs an ADR (AI-9).
 RERANK_MAX_LENGTH = 512
@@ -109,6 +117,23 @@ def _format_stats(stats: dict) -> str:
     return " ".join(f"{k}={v}" for k, v in stats.items())
 
 
+def _load_verifier(device) -> None:
+    """Load the NLI model; on failure leave it unset (verification fails closed), never stop start-up."""
+    global nli_tokenizer, nli_model, nli_entail_idx
+    try:
+        logger.info(f"Loading NLI verifier {NLI_MODEL}...")
+        tok = AutoTokenizer.from_pretrained(NLI_MODEL)
+        model = AutoModelForSequenceClassification.from_pretrained(NLI_MODEL)
+        model.to(device)
+        model.eval()
+        idx = nli.entailment_index(model)
+        nli.verify_pairs(tok, model, [("warm-up claim.", "Warm-up passage sentence one. Warm-up passage sentence two.")], idx)
+        nli_tokenizer, nli_model, nli_entail_idx = tok, model, idx
+        logger.info(f"NLI verifier loaded on {device}")
+    except Exception as e:
+        logger.error(f"NLI verifier unavailable ({e}); /internal/verify will answer 503")
+
+
 @app.on_event("startup")
 def load_models():
     global embedder, reranker_tokenizer, reranker_model
@@ -118,6 +143,7 @@ def load_models():
     logger.info(f"Loading embedding model {config.embedding_model} on device...")
     embedder = BGEEmbedder(model_name=config.embedding_model)
     logger.info(f"Model loaded successfully on {embedder.device}")
+    _load_verifier(embedder.device)
 
     try:
         logger.info("Loading Cross-Encoder Reranker BAAI/bge-reranker-base...")
@@ -160,9 +186,41 @@ class RerankResponse(BaseModel):
     scores: List[float]
 
 
+class VerifyPair(BaseModel):
+    claim: str
+    passage: str
+
+
+class VerifyRequest(BaseModel):
+    pairs: List[VerifyPair]
+
+
+class VerifyResponse(BaseModel):
+    scores: List[float]
+    model: str
+
+
 @app.get("/healthz")
 def healthz():
-    return {"status": "ok", "device": embedder.device if embedder else "uninitialized", "reranker": reranker_model is not None}
+    return {"status": "ok", "device": embedder.device if embedder else "uninitialized", "reranker": reranker_model is not None,
+            "verifier": nli_model is not None}
+
+
+@app.post("/internal/verify", response_model=VerifyResponse)
+def verify_endpoint(req: VerifyRequest):
+    """P(entailment) of each claim by its passage (max over sentence windows). No fallback: an unavailable
+    verifier is a 503, never a guessed score."""
+    if not req.pairs:
+        return VerifyResponse(scores=[], model=NLI_MODEL)
+    if nli_model is None or nli_tokenizer is None:
+        raise HTTPException(status_code=503, detail="NLI verifier not ready")
+    try:
+        scores, stats = nli.verify_pairs(nli_tokenizer, nli_model, [(p.claim, p.passage) for p in req.pairs], nli_entail_idx)
+        logger.info("verify " + " ".join(f"{k}={v}" for k, v in stats.items()))
+        return VerifyResponse(scores=scores, model=NLI_MODEL)
+    except Exception as e:
+        logger.error(f"Error in verify endpoint: {type(e).__name__}")
+        raise HTTPException(status_code=500, detail="verification failed")
 
 
 @app.post("/internal/embed", response_model=EmbedResponse)

@@ -65,7 +65,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-${{ runner.os }}-bge-base-en-v1.5-bge-reranker-base
+          key: hf-${{ runner.os }}-bge-base-en-v1.5-bge-reranker-base-nli-deberta-v3-small
 
       - name: Host Python deps (make setup-py, CPU torch)
         timeout-minutes: 10
@@ -76,10 +76,11 @@ jobs:
         run: |
           python - <<'EOF'
           from transformers import AutoModel, AutoModelForSequenceClassification, AutoTokenizer
-          for name in ("BAAI/bge-base-en-v1.5", "BAAI/bge-reranker-base"):
+          for name in ("BAAI/bge-base-en-v1.5", "BAAI/bge-reranker-base", "cross-encoder/nli-deberta-v3-small"):
               AutoTokenizer.from_pretrained(name)
           AutoModel.from_pretrained("BAAI/bge-base-en-v1.5")
           AutoModelForSequenceClassification.from_pretrained("BAAI/bge-reranker-base")
+          AutoModelForSequenceClassification.from_pretrained("cross-encoder/nli-deberta-v3-small")  # citation verifier
           EOF
 
       - name: Build Go CLI

@@ -115,3 +115,46 @@ func (c *EmbedClient) Rerank(ctx context.Context, query string, passages []strin
 
 	return res.Scores, nil
 }
+
+// VerifyPair is one (claim, cited passage) pair for /internal/verify.
+type VerifyPair struct {
+	Claim   string `json:"claim"`
+	Passage string `json:"passage"`
+}
+
+type verifyRequest struct {
+	Pairs []VerifyPair `json:"pairs"`
+}
+
+type verifyResponse struct {
+	Scores []float64 `json:"scores"`
+	Model  string    `json:"model"`
+}
+
+// VerifyClaims returns, for each pair, the probability that the passage entails the claim (NLI, max over
+// sentence windows of the passage). Any non-200, including 503 when the verifier is not loaded, is an error.
+func (c *EmbedClient) VerifyClaims(ctx context.Context, pairs []VerifyPair) ([]float64, error) {
+	reqBody, err := json.Marshal(verifyRequest{Pairs: pairs})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal verify request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/internal/verify", c.baseURL), bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create verify request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("verify http request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("verify service returned status %d: %s", resp.StatusCode, string(body))
+	}
+	var res verifyResponse
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return nil, fmt.Errorf("failed to decode verify response: %w", err)
+	}
+	return res.Scores, nil
+}
