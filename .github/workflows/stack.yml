@@ -105,7 +105,7 @@ jobs:
       - name: Prefetch arXiv responses into the replay store
         id: prefetch
         timeout-minutes: 20
-        run: python3 scripts/arxiv_replay.py prefetch --dir .arxiv-replay --search "cat:cs.LG" --limit 2 --budget-seconds 1020
+        run: python3 scripts/arxiv_replay.py prefetch --dir .arxiv-replay --search "cat:cs.LG" --limit 2 --id 2608.20331 --budget-seconds 1020
       # Saved whenever this run recorded something, even if the prefetch was incomplete: each run restores the
       # newest store (restore-keys prefix) and continues, so recording converges even while arXiv is slow.
       - name: Save arXiv replay store

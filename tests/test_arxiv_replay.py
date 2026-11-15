@@ -142,7 +142,8 @@ def test_prefetch_warms_store_then_serve_needs_no_upstream(env, tmp_path):
     up.script = {"api": [(200, FEED2, {})], "pdf": [(200, PDF, {})]}
     ids = tmp_path / "corpus.txt"
     ids.write_text("# comment\n2401.00001  # trailing comment\n\n")
-    assert rp.main(["prefetch", "--dir", str(tmp_path), "--ids", str(ids), "--search", "cat:cs.LG", "--limit", "2"]) == 0
+    assert rp.main(["prefetch", "--dir", str(tmp_path), "--ids", str(ids), "--search", "cat:cs.LG", "--limit", "2",
+                    "--id", "2401.00001"]) == 0  # --id repeats an --ids entry: fetched once
     n = len(up.requests)
     assert n == 4  # 2 feeds (id_list, search) + 2 PDFs; the search reuses the PDFs already stored
     # Second prefetch: everything is a hit.

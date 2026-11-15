@@ -23,7 +23,7 @@ id_list), and the services then only see hits.
 Usage:
   python3 scripts/arxiv_replay.py serve    --dir .arxiv-replay [--port 8099] [--record]
   python3 scripts/arxiv_replay.py prefetch --dir .arxiv-replay --ids evals/corpus.txt
-  python3 scripts/arxiv_replay.py prefetch --dir .arxiv-replay --search "cat:cs.LG" --limit 2
+  python3 scripts/arxiv_replay.py prefetch --dir .arxiv-replay --search "cat:cs.LG" --limit 2 --id 2608.20331
 GET /stats returns {"hits", "misses", "upstream_fetches", "upstream_failures", "saved"}.
 """
 
@@ -242,6 +242,7 @@ def main(argv=None) -> int:
     pf = sub.add_parser("prefetch")
     pf.add_argument("--dir", required=True)
     pf.add_argument("--ids", help="file of arXiv IDs (one per line, # comments), fetched as id_list=<id>")
+    pf.add_argument("--id", action="append", default=[], help="one arXiv ID (repeatable), fetched as id_list=<id>")
     pf.add_argument("--search", help="crawler search query; fetched as the crawler's first page")
     pf.add_argument("--limit", type=int, default=2)
     pf.add_argument("--budget-seconds", type=float, default=0,
@@ -256,7 +257,8 @@ def main(argv=None) -> int:
         return 0
 
     rec = Recorder(args.dir, True)
-    queries = [f"id_list={i}" for i in corpus_ids(args.ids)] if args.ids else []
+    ids = (corpus_ids(args.ids) if args.ids else []) + args.id
+    queries = [f"id_list={i}" for i in dict.fromkeys(ids)]
     if args.search:
         queries.append(search_query_string(args.search, args.limit))
     failed, deadline = [], time.monotonic() + args.budget_seconds if args.budget_seconds > 0 else None
