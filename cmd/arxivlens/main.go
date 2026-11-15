@@ -15,6 +15,7 @@ import (
 	"arxivlens/internal/dlq"
 	"arxivlens/internal/downloader"
 	"arxivlens/internal/kafka"
+	"arxivlens/internal/llm"
 	"arxivlens/internal/query"
 	"arxivlens/internal/storage"
 	"arxivlens/shared/events"
@@ -241,6 +242,18 @@ func newQueryCmd() *cobra.Command {
 			embedClient := query.NewEmbedClient(embedderURL)
 			searchEngine := query.NewSearchEngine(database, embedClient, modelName)
 			ragService := query.NewRAGService(searchEngine, embedClient)
+			// QA-8: LLM synthesis when LLM_MODEL is set (LLM_BASE_URL, LLM_API_KEY, LLM_TIMEOUT, LLM_MAX_TOKENS);
+			// otherwise extractive answers. A bad value is a startup error, never a silent default.
+			provider, err := llm.FromEnv(os.Getenv)
+			if err != nil {
+				return fmt.Errorf("LLM config: %w", err)
+			}
+			if provider != nil {
+				ragService.WithLLM(provider)
+				log.Printf("[Query] LLM synthesis enabled (%s, model %s)", provider.Name(), os.Getenv("LLM_MODEL"))
+			} else {
+				log.Printf("[Query] LLM synthesis off (LLM_MODEL unset): extractive answers")
+			}
 
 			server := query.NewServer(database, searchEngine, ragService, port)
 

@@ -160,7 +160,7 @@ CUDA in compose is untested: `TORCH_INDEX_URL=https://download.pytorch.org/whl/c
 | `GET` | `/healthz`, `/readyz` | Liveness / readiness |
 | `GET` | `/v1/stats` | Corpus counts (papers, chunks, embedded) |
 | `POST` | `/v1/search` | Hybrid search: `{query, categories?, limit?, rerank?}` → `{query, count, hits: [{chunk_id, arxiv_id, version, title, section, content, rrf_score, rerank_score?, page?}]}`. `version` is the arXiv version recorded for the chunk's paper; `page` is omitted until chunk pages are recorded reliably (ADR-0014) |
-| `POST` | `/v1/ask` | Cited answer: `{question, categories?, max_citations?}` → `{answer, citations, trace_id, refusal_reason?}`. When no citation is supported, the answer is withheld, `refusal_reason` is `all_citations_unsupported` or `verification_unavailable`, and `citations` lists every relevant passage as evidence (ADR-0003) |
+| `POST` | `/v1/ask` | Cited answer: `{question, categories?, max_citations?}` → `{answer, citations, trace_id, refusal_reason?}`. Every cited claim is verified against its passage: a verbatim quote by exact match, anything else by NLI entailment (`/internal/verify`); an LLM claim with no verified citation is dropped. When nothing is left, the answer is withheld, `refusal_reason` is `all_citations_unsupported`, `verification_unavailable` or (LLM only) `insufficient_evidence`, and `citations` lists the relevant passages as evidence (ADR-0003) |
 | `POST` | `/v1/papers/ingest` | On-demand ingest by arXiv ID or URL |
 | `POST` | `/v1/papers/discover` | Find the best-matching arXiv paper for a query and ingest it |
 | `GET` | `/v1/papers/{arxiv_id}` | Paper pipeline status |
@@ -201,6 +201,9 @@ All services read the same environment variables (defaults target the local Dock
 | `MINIO_USE_SSL` (Go) / `MINIO_SECURE` (Python) | `false` |
 | `EMBEDDING_MODEL` | `BAAI/bge-base-en-v1.5` |
 | `INGEST_TIMEOUT` (Go query service) | `5m`: limit for the synchronous chunk + embed call of `POST /v1/papers/ingest` (Go duration) |
+| `LLM_MODEL` (query service) | Enables LLM answer synthesis (QA-8) with this model; unset: extractive answers (quoted sentences). Also `LLM_BASE_URL` (default Ollama `http://localhost:11434/v1`, any OpenAI-compatible API), `LLM_API_KEY`, `LLM_TIMEOUT` (default 2s), `LLM_MAX_TOKENS` (default 256). On any LLM failure the answer falls back to the extractive path |
+| `ARXIVLENS_NLI_MODEL` (embedder API) | NLI model for citation verification (default `cross-encoder/nli-deberta-v3-small`) |
+| `ARXIV_API_URL`, `ARXIV_PDF_BASE` | Redirect arXiv fetches (CI points them at `scripts/arxiv_replay.py`); stored and displayed URLs stay canonical |
 | `EMBEDDER_TORCH_THREADS` (embedder API) | Cores available to the process: CPU threads for torch (`torch.set_num_threads`). Invalid or non-positive values fall back to the default. Logged at startup as `torch threads: A -> B` |
 
 > ⚠️ The default credentials are for local development only. Override them with your own values (e.g. a git-ignored `.env`) before deploying anywhere.
@@ -247,6 +250,6 @@ Product requirements, design decisions (ADRs), tickets and QA evidence live in
 
 ## Known limitations
 
-- `/v1/ask` builds its answer **from a template** over the top reranked chunks. It does not call an LLM yet, though the citation validation pipeline is in place for when one is added.
+- Without `LLM_MODEL`, `/v1/ask` answers by **quoting** the most relevant sentence of each top passage (verified by exact match). With an LLM, claims are verified by a small NLI model, which entailed 92% of verbatim sentences in a probe: expect some true paraphrases to be dropped.
 - The Go downloader and query service are not in `docker-compose.yml`; run them on the host. The Python workers in compose run on CPU (run them on the host for Apple-silicon MPS).
 - Tracing propagates `traceparent` but does not export spans to a collector.

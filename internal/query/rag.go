@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"arxivlens/internal/llm"
 )
 
 const (
@@ -28,6 +30,9 @@ const (
 const (
 	reasonAllUnsupported          = "all_citations_unsupported"
 	reasonVerificationUnavailable = "verification_unavailable"
+	// reasonInsufficientEvidence (QA-8): the LLM read the passages and said they do not answer the question.
+	reasonInsufficientEvidence = "insufficient_evidence"
+	refusalInsufficient        = "The passages found don't answer this question, so no answer is shown. They are listed below."
 
 	refusalUnsupported = "I couldn't verify any statement of a draft answer against the retrieved passages, so no answer is shown. The passages found are listed below."
 	refusalUnavailable = "Citation checking is unavailable right now, so no answer is shown. The passages found are listed below."
@@ -69,6 +74,14 @@ type RAGService struct {
 	verifier     verifier
 	// extractor scores candidate answer sentences against the question (the cross-encoder reranker).
 	extractor reranker
+	// llm writes the answer as cited claims (QA-8). nil: extractive answers only.
+	llm llm.Provider
+}
+
+// WithLLM enables LLM synthesis (QA-8); nil keeps extractive answers. It returns r for chaining.
+func (r *RAGService) WithLLM(p llm.Provider) *RAGService {
+	r.llm = p
+	return r
 }
 
 func NewRAGService(searchEngine *SearchEngine, embedClient *EmbedClient) *RAGService {
@@ -116,12 +129,152 @@ func (r *RAGService) Ask(
 	}
 	hits = relevantHits
 
-	// 4. Answer with cited sentences quoted from the passages (QA-8 replaces this with LLM synthesis), then
-	// verify every citation and refuse if none is supported.
+	// 4. QA-8: an LLM writes cited claims over the selected passages and each claim is verified against the
+	// passage text it was given. Without an LLM, or when it fails, quote the passages instead (also verified).
+	if r.llm != nil {
+		if resp := r.synthesize(ctx, traceID, question, hits); resp != nil {
+			return resp, nil
+		}
+	}
 	return r.finalize(ctx, traceID, r.buildExtractiveAnswer(ctx, question, hits), hits), nil
 }
 
-// Extractive answers (pre-QA-8). The previous fixed template ("... demonstrates relevant improvements [2]")
+// synthesisContextTokens bounds the estimated tokens of the passages sent to the LLM (selectContext).
+const synthesisContextTokens = 3000
+
+// synthesize asks the LLM for cited claims and verifies them. It returns nil when the answer should fall back to
+// the extractive path: no passage fits, the LLM call fails or times out, or the reply is not usable JSON. Logs
+// are counts, kinds and timings only, never question, passage or completion text.
+func (r *RAGService) synthesize(ctx context.Context, traceID, question string, hits []SearchHit) *AskResponse {
+	id, src := traceIDFrom(ctx)
+	fallback := func(reason string) *AskResponse {
+		log.Printf("[Query Service] synthesis fallback trace_id=%s trace_id_source=%s reason=%s provider=%s", id, src, reason, r.llm.Name())
+		return nil
+	}
+	passages := selectContext(hits, synthesisContextTokens)
+	if len(passages) == 0 {
+		return fallback("no_context")
+	}
+	system, user := buildSynthesisPrompt(question, passages)
+	res, err := r.llm.Complete(ctx, llm.Request{
+		System:      system,
+		Messages:    []llm.Message{{Role: llm.RoleUser, Content: user}},
+		Temperature: 0,
+		JSON:        true,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, llm.ErrTimeout):
+			return fallback("llm_timeout")
+		case errors.Is(err, llm.ErrRateLimited):
+			return fallback("llm_rate_limited")
+		case errors.Is(err, context.Canceled):
+			return fallback("canceled")
+		}
+		return fallback("llm_error")
+	}
+	parsed, perr := parseSynthesis(res.Text, len(passages))
+	switch {
+	case errors.Is(perr, errSynthesisNoClaims):
+		return fallback("no_claims")
+	case perr != nil:
+		return fallback("malformed_reply")
+	}
+	// Markers refer to passages in prompt order; verify against exactly the (possibly truncated) text sent.
+	phits := passageHits(passages)
+	log.Printf("[Query Service] synthesis trace_id=%s trace_id_source=%s provider=%s model=%s passages=%d claims=%d dropped_claims=%d dropped_markers=%d insufficient=%t prompt_tokens=%d completion_tokens=%d finish=%s llm_ms=%d prompt=%s",
+		id, src, r.llm.Name(), res.Model, len(passages), len(parsed.Claims), parsed.DroppedClaims, parsed.DroppedMarkers,
+		parsed.InsufficientEvidence, res.PromptTokens, res.CompletionTokens, res.FinishReason, res.Latency.Milliseconds(), synthesisPromptVersion)
+	if parsed.InsufficientEvidence {
+		evidence := make([]Citation, len(phits))
+		for i, h := range phits {
+			evidence[i] = newCitation(i+1, h, 0, false)
+		}
+		log.Printf("[Query Service] ask refused trace_id=%s trace_id_source=%s reason=%s citations=0 checked=0 unverified=0 evidence=%d",
+			id, src, reasonInsufficientEvidence, len(evidence))
+		return &AskResponse{Answer: refusalInsufficient, Citations: evidence, TraceID: traceID, RefusalReason: reasonInsufficientEvidence}
+	}
+	return r.finalizeClaims(ctx, traceID, parsed.Claims, phits)
+}
+
+// finalizeClaims verifies every (claim, cited passage) pair and keeps only claims with at least one supported
+// citation: an unverified LLM sentence is never shown. A kept claim lists all its citations, each with its own
+// score and flag. When no claim survives, it refuses exactly as finalize does (ADR-0003).
+func (r *RAGService) finalizeClaims(ctx context.Context, traceID string, claims []synthesisClaim, hits []SearchHit) *AskResponse {
+	type ref struct{ claim, marker int }
+	var refs []ref
+	var pairs []VerifyPair
+	for i, c := range claims {
+		for _, m := range c.Citations { // parseSynthesis guarantees 1..len(hits), distinct, non-empty
+			refs = append(refs, ref{i, m})
+			pairs = append(pairs, VerifyPair{Claim: c.Text, Passage: hits[m-1].Content})
+		}
+	}
+	scores, failed, verifyErrs := r.scorePairs(ctx, pairs)
+
+	check := citationCheck{hitScore: make([]float64, len(hits)), hitScored: make([]bool, len(hits))}
+	perClaim := make([][]Citation, len(claims))
+	keep := make([]bool, len(claims))
+	for j, rf := range refs {
+		h := rf.marker - 1
+		score, ok := labelScore(scores[j], failed[j])
+		if !ok {
+			check.unverified++
+			perClaim[rf.claim] = append(perClaim[rf.claim], newCitation(rf.marker, hits[h], 0, false))
+			continue
+		}
+		check.record(h, score)
+		supported := score >= SupportThreshold
+		keep[rf.claim] = keep[rf.claim] || supported
+		perClaim[rf.claim] = append(perClaim[rf.claim], newCitation(rf.marker, hits[h], score, supported))
+	}
+
+	var b strings.Builder
+	var cites []Citation
+	kept := 0
+	for i, c := range claims {
+		if !keep[i] {
+			continue
+		}
+		kept++
+		if b.Len() > 0 {
+			b.WriteString(" ")
+		}
+		b.WriteString(withMarkers(c.Text, c.Citations))
+		cites = append(cites, perClaim[i]...)
+	}
+	id, src := traceIDFrom(ctx)
+	if check.unverified > 0 {
+		log.Printf("[Query Service] citation support unverified trace_id=%s trace_id_source=%s unverified=%d citations=%d pairs=%d verify_errors=%d",
+			id, src, check.unverified, len(refs), len(pairs), verifyErrs)
+	}
+	if kept > 0 {
+		if kept < len(claims) {
+			log.Printf("[Query Service] synthesis dropped unsupported claims trace_id=%s trace_id_source=%s claims=%d kept=%d", id, src, len(claims), kept)
+		}
+		return &AskResponse{Answer: b.String(), Citations: cites, TraceID: traceID}
+	}
+	return refusal(ctx, traceID, len(refs), check, hits)
+}
+
+// withMarkers appends "[m]" markers before a claim's final punctuation: "X holds." -> "X holds [1][2]."
+func withMarkers(text string, markers []int) string {
+	text = strings.TrimSpace(text)
+	end := "."
+	if n := len(text); n > 0 && strings.ContainsRune(".!?", rune(text[n-1])) {
+		text, end = strings.TrimSpace(text[:n-1]), text[n-1:]
+	}
+	var b strings.Builder
+	b.WriteString(text)
+	b.WriteString(" ")
+	for _, m := range markers {
+		fmt.Fprintf(&b, "[%d]", m)
+	}
+	b.WriteString(end)
+	return b.String()
+}
+
+// Extractive answers: the path without an LLM, and the fallback when synthesis fails (QA-8). The old fixed template ("... demonstrates relevant improvements [2]")
 // asserted things no passage said; quoting the passage sentence most relevant to the question makes every
 // sentence of the answer checkable against its source.
 const (
@@ -244,7 +397,7 @@ func (r *RAGService) buildExtractiveAnswer(ctx context.Context, question string,
 	return b.String()
 }
 
-// --- LLM synthesis building blocks (AI-6, docs/design/QA-8.md). Not called by Ask yet; QA-8 wires them in.
+// --- LLM synthesis building blocks (AI-6, docs/design/QA-8.md); used by synthesize (QA-8).
 // The reply parser (parseSynthesis) follows in AI-6b (design condition 1, seam c). ---
 
 const (
@@ -303,7 +456,7 @@ func renderPassage(n int, h SearchHit, text string) string {
 // A hit whose content is empty after whitespace collapse is skipped (nothing to cite): no cap slot, no budget.
 // Papers are then grouped in order of their best hit, rerank order inside a paper, and numbered 1..K.
 //
-// An empty (non-nil) result means no prompt can be built: callers must take the template path.
+// An empty (non-nil) result means no prompt can be built: synthesize falls back to the extractive answer.
 func selectContext(hits []SearchHit, budgetTokens int) []contextPassage {
 	taken := []contextPassage{}
 	ids, contents, perPaper, used := map[int64]bool{}, map[string]bool{}, map[string]int{}, 0
@@ -379,7 +532,7 @@ func buildSynthesisPrompt(question string, passages []contextPassage) (system, u
 	return synthesisSystemPrompt, b.String()
 }
 
-// --- AI-6b: parser for the model's JSON reply (docs/design/QA-8.md §1, §5). Not called by Ask yet. ---
+// --- AI-6b: parser for the model's JSON reply (docs/design/QA-8.md §1, §5); used by synthesize (QA-8). ---
 
 // synthesisClaim is one factual statement from the model, with its validated citation numbers.
 type synthesisClaim struct {
@@ -404,7 +557,8 @@ var (
 // parseSynthesis turns the model's reply into claims citing passages 1..k. Only a ``` / ```json fence around
 // one JSON object is tolerated. insufficient_evidence: true wins over any claims (refusal signal). Out-of-range
 // citation numbers (array or inline [n]) are dropped and counted; claims left empty or uncited are dropped and
-// counted. If every claim is dropped the result has zero claims and a nil error (QA-8 refuses, not template).
+// counted. If every claim is dropped the result has zero claims and a nil error (synthesize refuses with all_citations_unsupported: the model asserted things it could not cite, so the
+// extractive answer must not paper over it).
 func parseSynthesis(raw string, k int) (synthesisResult, error) {
 	s := strings.TrimSpace(raw)
 	if strings.HasPrefix(s, "```") {
@@ -473,6 +627,12 @@ func (r *RAGService) finalize(ctx context.Context, traceID, answer string, hits 
 		}
 	}
 
+	return refusal(ctx, traceID, len(cites), check, hits)
+}
+
+// refusal is the ADR-0003 refusal: verification_unavailable when any citation could not be checked, else
+// all_citations_unsupported; every hit is returned as evidence with its best checked score, never supported.
+func refusal(ctx context.Context, traceID string, citations int, check citationCheck, hits []SearchHit) *AskResponse {
 	reason, text := reasonAllUnsupported, refusalUnsupported
 	if check.unverified > 0 {
 		reason, text = reasonVerificationUnavailable, refusalUnavailable
@@ -483,7 +643,7 @@ func (r *RAGService) finalize(ctx context.Context, traceID, answer string, hits 
 	}
 	id, src := traceIDFrom(ctx)
 	log.Printf("[Query Service] ask refused trace_id=%s trace_id_source=%s reason=%s citations=%d checked=%d unverified=%d evidence=%d",
-		id, src, reason, len(cites), check.checked, check.unverified, len(evidence))
+		id, src, reason, citations, check.checked, check.unverified, len(evidence))
 	return &AskResponse{Answer: text, Citations: evidence, TraceID: traceID, RefusalReason: reason}
 }
 
@@ -590,8 +750,40 @@ func (r *RAGService) checkCitations(ctx context.Context, answer string, hits []S
 			pairs = append(pairs, VerifyPair{Claim: sentTexts[c.sentIdx], Passage: hits[c.hitIdx].Content})
 		}
 	}
-	scores := make([]float64, len(pairs))
-	failed := make([]bool, len(pairs))
+	scores, failed, verifyErrs := r.scorePairs(ctx, pairs)
+
+	// 3. Label each citation (§9, QA-4). Fail closed (AI-2): no score, or a score outside [0, 1], leaves the
+	// citation unsupported with score 0.
+	validatedCitations := make([]Citation, 0, len(cited))
+	unverified := 0
+	for _, c := range cited {
+		hit := hits[c.hitIdx]
+		pi := pairIndex[pairKey{c.sentIdx, c.hitIdx}]
+		score, ok := labelScore(scores[pi], failed[pi])
+		if !ok {
+			unverified++
+			validatedCitations = append(validatedCitations, newCitation(c.hitIdx+1, hit, 0, false))
+			continue
+		}
+		check.record(c.hitIdx, score)
+		validatedCitations = append(validatedCitations, newCitation(c.hitIdx+1, hit, score, score >= SupportThreshold))
+	}
+	check.unverified = unverified
+	if unverified > 0 {
+		// One line per request; counts only, never passage or sentence text.
+		id, src := traceIDFrom(ctx)
+		log.Printf("[Query Service] citation support unverified trace_id=%s trace_id_source=%s unverified=%d citations=%d pairs=%d verify_errors=%d",
+			id, src, unverified, len(validatedCitations), len(pairs), verifyErrs)
+	}
+	return validatedCitations, check
+}
+
+// scorePairs scores each (claim, passage) pair: 1 for a verbatim quote of the passage, else the NLI verifier's
+// P(entailment), all non-quote pairs in one VerifyClaims call. failed[i] is true when pair i needed the verifier
+// and it was unavailable, errored, or returned the wrong number of scores; verifyErrs is 1 then, else 0.
+func (r *RAGService) scorePairs(ctx context.Context, pairs []VerifyPair) (scores []float64, failed []bool, verifyErrs int) {
+	scores = make([]float64, len(pairs))
+	failed = make([]bool, len(pairs))
 	var nliIdx []int
 	var nliPairs []VerifyPair
 	for i, p := range pairs {
@@ -602,59 +794,44 @@ func (r *RAGService) checkCitations(ctx context.Context, answer string, hits []S
 			nliPairs = append(nliPairs, p)
 		}
 	}
-	verifyErrs := 0
-	if len(nliPairs) > 0 {
-		var got []float64
-		var err error
-		if r.verifier == nil {
-			err = errors.New("no verifier configured")
-		} else if got, err = r.verifier.VerifyClaims(ctx, nliPairs); err == nil && len(got) != len(nliPairs) {
-			err = fmt.Errorf("verifier returned %d scores for %d pairs", len(got), len(nliPairs))
-		}
-		for j, i := range nliIdx {
-			if err != nil {
-				failed[i] = true
-			} else {
-				scores[i] = got[j]
-			}
-		}
+	if len(nliPairs) == 0 {
+		return scores, failed, 0
+	}
+	var got []float64
+	var err error
+	if r.verifier == nil {
+		err = errors.New("no verifier configured")
+	} else if got, err = r.verifier.VerifyClaims(ctx, nliPairs); err == nil && len(got) != len(nliPairs) {
+		err = fmt.Errorf("verifier returned %d scores for %d pairs", len(got), len(nliPairs))
+	}
+	for j, i := range nliIdx {
 		if err != nil {
-			verifyErrs = 1
+			failed[i] = true
+		} else {
+			scores[i] = got[j]
 		}
 	}
+	if err != nil {
+		verifyErrs = 1
+	}
+	return scores, failed, verifyErrs
+}
 
-	// 3. Label each citation (§9, QA-4). Fail closed (AI-2): no score, or a score outside [0, 1], leaves the
-	// citation unsupported with score 0.
-	validatedCitations := make([]Citation, 0, len(cited))
-	unverified := 0
-	for _, c := range cited {
-		hit := hits[c.hitIdx]
-		supported := false
-		score := 0.0
-		if pi := pairIndex[pairKey{c.sentIdx, c.hitIdx}]; !failed[pi] {
-			p := scores[pi]
-			if p >= 0 && p <= 1 { // also false for NaN
-				score = math.Round(p*10000) / 10000
-				supported = score >= SupportThreshold
-				check.checked++
-				if !check.hitScored[c.hitIdx] || score > check.hitScore[c.hitIdx] {
-					check.hitScore[c.hitIdx], check.hitScored[c.hitIdx] = score, true
-				}
-				validatedCitations = append(validatedCitations, newCitation(c.hitIdx+1, hit, score, supported))
-				continue
-			}
-		}
-		unverified++
-		validatedCitations = append(validatedCitations, newCitation(c.hitIdx+1, hit, score, supported))
+// labelScore turns a raw pair score into a citation score. ok is false (fail closed, AI-2) when the pair could not
+// be verified or the score is outside [0, 1] (including NaN).
+func labelScore(raw float64, failed bool) (score float64, ok bool) {
+	if failed || !(raw >= 0 && raw <= 1) {
+		return 0, false
 	}
-	check.unverified = unverified
-	if unverified > 0 {
-		// One line per request; counts only, never passage or sentence text.
-		id, src := traceIDFrom(ctx)
-		log.Printf("[Query Service] citation support unverified trace_id=%s trace_id_source=%s unverified=%d citations=%d pairs=%d verify_errors=%d",
-			id, src, unverified, len(validatedCitations), len(pairs), verifyErrs)
+	return math.Round(raw*10000) / 10000, true
+}
+
+// record notes a checked citation of hit i with score s (evidence keeps each hit's best checked score).
+func (c *citationCheck) record(i int, s float64) {
+	c.checked++
+	if !c.hitScored[i] || s > c.hitScore[i] {
+		c.hitScore[i], c.hitScored[i] = s, true
 	}
-	return validatedCitations, check
 }
 
 func splitIntoSentences(text string) []string {

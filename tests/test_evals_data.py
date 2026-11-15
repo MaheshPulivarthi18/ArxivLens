@@ -1107,3 +1107,13 @@ def test_review_committed_judgments_hold_ids_and_labels_only():
         assert {r["run_id"] for r in rows} == {name[:-len(".jsonl")]}, name
     other = [f for f in (os.listdir(d) if os.path.isdir(d) else []) if not f.endswith(".jsonl") and f != ".gitkeep"]
     assert not other, f"only <run-id>.jsonl judgments belong in evals/answer_judgments/: {other}"
+
+
+def test_classify_insufficient_evidence_is_a_refusal():
+    """QA-8: the LLM saying the passages do not answer is a correct refusal (with evidence), not an error."""
+    from scripts.evaluate_answers import classify
+
+    resp = {"answer": "The passages found don't answer this question.", "refusal_reason": "insufficient_evidence",
+            "citations": [{"marker": 1, "arxiv_id": "2401.00001", "chunk_id": 1, "supported": False, "score": 0}]}
+    assert classify(resp) == "refusal"
+    assert classify({**resp, "refusal_reason": "something_new"}) == "error"  # unknown reasons still fail closed

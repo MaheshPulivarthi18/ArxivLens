@@ -64,8 +64,11 @@ def percentile(values: List[float], pct: float) -> Optional[float]:
 
 
 # ADR-0003 refusal_reason values. Case A is a refusal that still carries its evidence passages; case B
-# (verification could not run) is an error, never a correct refusal. Any other value fails closed as an error.
-REFUSAL_REASONS = {"all_citations_unsupported": "refusal", "verification_unavailable": "error"}
+# (verification could not run) is an error, never a correct refusal. QA-8 adds insufficient_evidence: the LLM read
+# the passages and said they do not answer the question, a refusal with evidence. Any other value fails closed as
+# an error.
+REFUSAL_REASONS = {"all_citations_unsupported": "refusal", "verification_unavailable": "error",
+                   "insufficient_evidence": "refusal"}
 VERIFICATION_UNAVAILABLE = "verification_unavailable"
 
 
