@@ -8,3 +8,4 @@ pydantic>=2.5.0
 pytest>=8.0.0
 psycopg[binary]>=3.1.0
 confluent-kafka>=2.3.0
+sentencepiece>=0.1.99  # DeBERTa-v3 tokenizer for the NLI citation verifier (fallback when no tokenizer.json)

@@ -5,12 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"math"
 	"reflect"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -28,51 +28,65 @@ func (f *fakeSearcher) HybridSearch(_ context.Context, _ string, _ []string, lim
 	return f.hits, f.err
 }
 
-// fakeEmbedder maps each text to a vector via vec (nil = no vector returned) and records the texts.
-// err fails every call; failOn (optional) fails only calls containing a matching text.
-type fakeEmbedder struct {
-	vec    func(text string) []float32
-	err    error
-	failOn func(text string) bool
-	texts  []string
+// fakeVerifier scores each (claim, passage) pair with score and records every call. err fails every call;
+// reshape (optional) edits the returned scores to exercise the count-mismatch and out-of-range paths.
+type fakeVerifier struct {
+	score   func(claim, passage string) float64
+	err     error
+	reshape func([]float64) []float64
+	calls   [][]VerifyPair
 }
 
-func (f *fakeEmbedder) EmbedTexts(_ context.Context, texts []string, _ bool) ([][]float32, error) {
-	f.texts = append(f.texts, texts...)
+func (f *fakeVerifier) VerifyClaims(_ context.Context, pairs []VerifyPair) ([]float64, error) {
+	f.calls = append(f.calls, append([]VerifyPair(nil), pairs...))
 	if f.err != nil {
 		return nil, f.err
 	}
-	for _, t := range texts {
-		if f.failOn != nil && f.failOn(t) {
-			return nil, errors.New("embed failed")
-		}
+	out := make([]float64, len(pairs))
+	for i, p := range pairs {
+		out[i] = f.score(p.Claim, p.Passage)
 	}
-	var out [][]float32
-	for _, t := range texts {
-		if v := f.vec(t); v != nil {
-			out = append(out, v)
-		}
+	if f.reshape != nil {
+		out = f.reshape(out)
 	}
 	return out, nil
 }
 
-// simEmbedder embeds every chunk ("chunk ...") as [1, 0] and each sentence as a unit
-// vector whose cosine with [1, 0] is sim(sentence).
-func simEmbedder(sim func(sentence string) float64) *fakeEmbedder {
-	return &fakeEmbedder{vec: func(t string) []float32 {
-		if strings.HasPrefix(t, "chunk") {
-			return []float32{1, 0}
-		}
-		c := sim(t)
-		return []float32{float32(c), float32(math.Sqrt(1 - c*c))}
-	}}
+// simVerifier scores a pair by its claim only.
+func simVerifier(sim func(claim string) float64) *fakeVerifier {
+	return &fakeVerifier{score: func(c, _ string) float64 { return sim(c) }}
 }
 
 func constSim(c float64) func(string) float64 { return func(string) float64 { return c } }
 
+// hitContent is a chunk as the chunker stores it: "<title> — <section>" prefix, then two quotable sentences.
+func hitContent(section string) string {
+	return fmt.Sprintf("Paper — %s\n\nThe %s section shows that the proposed method improves accuracy on every benchmark. "+
+		"A second sentence in %s describes the training setup in some detail.", section, section, section)
+}
+
 func ragHit(id int64, section string, rerank float64) SearchHit {
 	return SearchHit{ChunkID: id, ArxivID: "2401.0000" + string(rune('0'+id)), Title: "Paper",
-		SectionTitle: section, Content: "chunk " + section, RerankScore: rerank}
+		SectionTitle: section, Content: hitContent(section), RerankScore: rerank}
+}
+
+// prefersImproves is an extractor that scores sentences mentioning "improves" above the rest.
+func prefersImproves() *fakeReranker {
+	return &fakeReranker{scores: func(ps []string) []float32 {
+		out := make([]float32, len(ps))
+		for i, p := range ps {
+			if strings.Contains(p, "improves") {
+				out[i] = 0.9
+			} else {
+				out[i] = 0.1
+			}
+		}
+		return out
+	}}
+}
+
+func newRAG(hits []SearchHit, v verifier) *RAGService {
+	return &RAGService{searchEngine: &fakeSearcher{hits: hits}, verifier: v, extractor: prefersImproves()}
 }
 
 func markers(cs []Citation) []int {
@@ -127,23 +141,23 @@ func TestAskRefusesWhenNothingPasses(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			emb := simEmbedder(constSim(1))
-			r := &RAGService{searchEngine: &fakeSearcher{hits: tc.hits}, embedClient: emb}
-			resp, err := r.Ask(context.Background(), "q", nil, 3)
+			v := simVerifier(constSim(1))
+			resp, err := newRAG(tc.hits, v).Ask(context.Background(), "q", nil, 3)
 			if err != nil || resp.Answer != "No indexed papers are relevant to this question." ||
 				resp.Citations == nil || len(resp.Citations) != 0 || len(resp.TraceID) != 32 {
 				t.Errorf("got %+v err %v, want refusal with empty non-nil citations and a trace id", resp, err)
 			}
-			if len(emb.texts) != 0 {
-				t.Errorf("refusal must not call the embedder, got %v", emb.texts)
+			if len(v.calls) != 0 {
+				t.Errorf("refusal must not call the verifier, got %v", v.calls)
 			}
 		})
 	}
 }
 
-func TestAskAnswersWithValidatedCitations(t *testing.T) {
+func TestAskAnswersWithExtractedCitations(t *testing.T) {
 	s := &fakeSearcher{hits: []SearchHit{ragHit(1, "Method", 0.9), ragHit(2, "Appendix", 0.3), ragHit(3, "Results", 0.8)}}
-	r := &RAGService{searchEngine: s, embedClient: simEmbedder(constSim(0.8))}
+	v := simVerifier(constSim(0.8))
+	r := &RAGService{searchEngine: s, verifier: v, extractor: prefersImproves()}
 	resp, err := r.Ask(context.Background(), "q", []string{"cs.LG"}, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -151,19 +165,28 @@ func TestAskAnswersWithValidatedCitations(t *testing.T) {
 	if s.gotLimit != 5 || !s.gotRerank {
 		t.Errorf("HybridSearch(limit=%d, rerank=%v), want default limit 5 and rerank", s.gotLimit, s.gotRerank)
 	}
+	want := "The Method section shows that the proposed method improves accuracy on every benchmark [1]. " +
+		"The Results section shows that the proposed method improves accuracy on every benchmark [2]."
+	if resp.Answer != want {
+		t.Fatalf("answer = %q, want %q", resp.Answer, want)
+	}
 	if got := markers(resp.Citations); !reflect.DeepEqual(got, []int{1, 2}) {
-		t.Fatalf("markers = %v, want [1 2] (answer %q)", got, resp.Answer)
+		t.Fatalf("markers = %v, want [1 2]", got)
 	}
 	// Marker 2 maps to the second *surviving* hit (chunk 3), not the dropped appendix.
 	c := resp.Citations[1]
 	if c.ChunkID != 3 || c.Section != "Results" || c.PDFURL != "https://arxiv.org/pdf/"+c.ArxivID+".pdf" {
 		t.Errorf("citation 2 = %+v", c)
 	}
-	if !c.Supported || c.Score != 0.8 {
-		t.Errorf("citation 2 score=%v supported=%v, want 0.8 true", c.Score, c.Supported)
+	// Each quoted sentence is verified by exact match against the chunk it came from: score 1, no NLI call.
+	if !c.Supported || c.Score != 1 {
+		t.Errorf("citation 2 score=%v supported=%v, want 1 true", c.Score, c.Supported)
+	}
+	if len(v.calls) != 0 {
+		t.Errorf("verify calls = %+v, want none (every claim is a verbatim quote)", v.calls)
 	}
 
-	// One surviving hit: the template emits only [1].
+	// One surviving hit: only [1].
 	s.hits = []SearchHit{ragHit(1, "Method", 0.9)}
 	if resp, err = r.Ask(context.Background(), "q", nil, 5); err != nil || strings.Contains(resp.Answer, "[2]") ||
 		!reflect.DeepEqual(markers(resp.Citations), []int{1}) {
@@ -178,25 +201,116 @@ func TestAskAnswersWithValidatedCitations(t *testing.T) {
 	}
 }
 
+func TestAnswerCandidates(t *testing.T) {
+	long := strings.Repeat("word ", 90) + "end."
+	content := "Some Title — Intro\n\n" +
+		"Short one. " + // < 40 bytes
+		"Transformers rely entirely on attention mechanisms [12] to draw global dependencies [3, 4]. " +
+		"| 0.12 | 0.34 | 0.56 | 0.78 | 0.91 | 1.23 | 4.56 | 7.89 | 0.11 |. " + // mostly digits
+		"Incomprehensibilities notwithstanding, characterizations persist undeniably. " + // 5 words
+		long + " " + // > 400 bytes
+		"Transformers rely entirely on attention mechanisms to draw global dependencies. " + // duplicate after ref removal
+		"We train on   8 GPUs\nfor three days with the Adam optimizer."
+	got := answerCandidates(content)
+	want := []string{
+		"Transformers rely entirely on attention mechanisms to draw global dependencies.",
+		"We train on 8 GPUs for three days with the Adam optimizer.",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("candidates = %q, want %q", got, want)
+	}
+	// No title prefix: the text is used as is.
+	if got := answerCandidates("A plain chunk without any prefix says something useful here."); len(got) != 1 {
+		t.Errorf("no-prefix candidates = %q", got)
+	}
+	if got := answerCandidates("T — S\n\n"); len(got) != 0 {
+		t.Errorf("empty body candidates = %q", got)
+	}
+}
+
+func TestBuildExtractiveAnswer(t *testing.T) {
+	hits := []SearchHit{ragHit(1, "A", 0.9), ragHit(2, "B", 0.9), ragHit(3, "C", 0.9), ragHit(4, "D", 0.9)}
+	first := func(sec string) string {
+		return "The " + sec + " section shows that the proposed method improves accuracy on every benchmark"
+	}
+	second := func(sec string) string {
+		return "A second sentence in " + sec + " describes the training setup in some detail"
+	}
+
+	// The highest-scoring sentence of each of the top 3 hits, in hit order; hit 4 is not used.
+	prefersSecond := &fakeReranker{scores: func(ps []string) []float32 {
+		out := make([]float32, len(ps))
+		for i, p := range ps {
+			if strings.HasPrefix(p, "A second") {
+				out[i] = 0.7
+			}
+		}
+		return out
+	}}
+	r := &RAGService{extractor: prefersSecond}
+	want := second("A") + " [1]. " + second("B") + " [2]. " + second("C") + " [3]."
+	if got := r.buildExtractiveAnswer(context.Background(), "q", hits); got != want {
+		t.Errorf("answer = %q, want %q", got, want)
+	}
+	if len(prefersSecond.passages) != 6 {
+		t.Errorf("scored %d sentences in one call, want 6 (2 per hit, top 3 hits)", len(prefersSecond.passages))
+	}
+
+	// Scoring unavailable (error, wrong count, no extractor): first sentence of each hit, one log line.
+	for name, ex := range map[string]reranker{
+		"error":       &fakeReranker{err: errors.New("down")},
+		"wrong count": &fakeReranker{scores: func(ps []string) []float32 { return []float32{1} }},
+		"none":        nil,
+	} {
+		buf := captureLog(t)
+		r := &RAGService{extractor: ex}
+		want := first("A") + " [1]. " + first("B") + " [2]."
+		if got := r.buildExtractiveAnswer(withTraceID(context.Background(), "t-ex"), "q", hits[:2]); got != want {
+			t.Errorf("%s: answer = %q, want %q", name, got, want)
+		}
+		if !strings.Contains(buf.String(), "sentence scoring unavailable") || !strings.Contains(buf.String(), "trace_id=t-ex ") ||
+			strings.Contains(buf.String(), "proposed method") {
+			t.Errorf("%s: log = %q, want one counts-only fallback line", name, buf.String())
+		}
+	}
+
+	// A sentence without final punctuation gets "." after its marker; a hit with no quotable sentence is skipped.
+	odd := []SearchHit{
+		{ChunkID: 1, Content: "T — S\n\nNo terminal punctuation but enough words to quote here"},
+		{ChunkID: 2, Content: "T — S\n\nToo short."},
+		{ChunkID: 3, Content: "T — S\n\nThe third hit has a perfectly quotable sentence in it!"},
+	}
+	r = &RAGService{extractor: prefersImproves()}
+	if got, want := r.buildExtractiveAnswer(context.Background(), "q", odd),
+		"No terminal punctuation but enough words to quote here [1]. The third hit has a perfectly quotable sentence in it [3]!"; got != want {
+		t.Errorf("answer = %q, want %q", got, want)
+	}
+	if got := r.buildExtractiveAnswer(context.Background(), "q", odd[1:2]); got != "" {
+		t.Errorf("no quotable sentence: answer = %q, want empty", got)
+	}
+}
+
 func TestValidateCitationsMarkers(t *testing.T) {
 	hits := []SearchHit{ragHit(1, "A", 0.9), ragHit(2, "B", 0.9)}
 	tests := []struct {
 		name, answer string
 		want         []int
+		wantPairs    int
 	}{
-		{"in range", "Claim [1]. Other claim [2].", []int{1, 2}},
-		{"marker above K discarded", "Claim [3]. Other [2].", []int{2}},
-		{"marker zero discarded", "Claim [0].", []int{}},
-		{"overflowing marker discarded", "Claim [99999999999999999999].", []int{}},
-		{"multiple markers per sentence", "Both agree [1][2].", []int{1, 2}},
-		{"multiple markers mixed valid and fabricated", "X [2] and Y [7] and Z [1].", []int{2, 1}},
-		{"repeated marker across sentences", "First [1]. Again [1].", []int{1, 1}},
-		{"non-numeric brackets ignored", "See [a] and [-1] and [ 1 ].", []int{}},
+		{"in range", "Claim [1]. Other claim [2].", []int{1, 2}, 2},
+		{"marker above K discarded", "Claim [3]. Other [2].", []int{2}, 1},
+		{"marker zero discarded", "Claim [0].", []int{}, 0},
+		{"overflowing marker discarded", "Claim [99999999999999999999].", []int{}, 0},
+		{"multiple markers per sentence", "Both agree [1][2].", []int{1, 2}, 2},
+		{"multiple markers mixed valid and fabricated", "X [2] and Y [7] and Z [1].", []int{2, 1}, 2},
+		{"repeated marker across sentences", "First [1]. Again [1].", []int{1, 1}, 2},
+		{"identical sentence and hit verified once", "Same [1]. Same [2]. Same [1].", []int{1, 2, 1}, 2},
+		{"non-numeric brackets ignored", "See [a] and [-1] and [ 1 ].", []int{}, 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			emb := simEmbedder(constSim(0.9))
-			got := (&RAGService{embedClient: emb}).validateCitations(context.Background(), tc.answer, hits)
+			v := simVerifier(constSim(0.9))
+			got := (&RAGService{verifier: v}).validateCitations(context.Background(), tc.answer, hits)
 			if m := markers(got); !reflect.DeepEqual(m, tc.want) {
 				t.Errorf("markers = %v, want %v", m, tc.want)
 			}
@@ -205,9 +319,18 @@ func TestValidateCitationsMarkers(t *testing.T) {
 					t.Errorf("marker %d mapped to chunk %d", c.Marker, c.ChunkID)
 				}
 			}
-			for _, txt := range emb.texts {
-				if markerRegex.MatchString(txt) {
-					t.Errorf("embedded text %q still contains a marker", txt)
+			calls := 0
+			if tc.wantPairs > 0 {
+				calls = 1
+			}
+			if len(v.calls) != calls || (calls == 1 && len(v.calls[0]) != tc.wantPairs) {
+				t.Fatalf("verify calls = %+v, want %d call(s) with %d pairs", v.calls, calls, tc.wantPairs)
+			}
+			for _, call := range v.calls {
+				for _, p := range call {
+					if markerRegex.MatchString(p.Claim) {
+						t.Errorf("verified claim %q still contains a marker", p.Claim)
+					}
 				}
 			}
 		})
@@ -220,26 +343,27 @@ func TestValidateCitationsSupportThreshold(t *testing.T) {
 	}
 	tests := []struct {
 		name    string
-		sim     float64
+		p       float64
 		wantSup bool
 	}{
 		{"0.49 unsupported", 0.49, false},
 		{"0.4999 unsupported", 0.4999, false},
 		{"0.50 supported", 0.50, true},
-		{"negative unsupported", -0.3, false},
+		{"1.0 supported", 1.0, true},
+		{"0 unsupported", 0, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			r := &RAGService{embedClient: simEmbedder(constSim(tc.sim))}
+			r := &RAGService{verifier: simVerifier(constSim(tc.p))}
 			got := r.validateCitations(context.Background(), "Claim [1].", []SearchHit{ragHit(1, "A", 0.9)})
-			if len(got) != 1 || got[0].Score != tc.sim || got[0].Supported != tc.wantSup {
-				t.Errorf("got %+v, want score %v supported %v", got, tc.sim, tc.wantSup)
+			if len(got) != 1 || got[0].Score != tc.p || got[0].Supported != tc.wantSup {
+				t.Errorf("got %+v, want score %v supported %v", got, tc.p, tc.wantSup)
 			}
 		})
 	}
 
 	// Support is judged per sentence, even for the same marker.
-	r := &RAGService{embedClient: simEmbedder(func(s string) float64 {
+	r := &RAGService{verifier: simVerifier(func(s string) float64 {
 		if strings.HasPrefix(s, "Strong") {
 			return 0.9
 		}
@@ -249,44 +373,41 @@ func TestValidateCitationsSupportThreshold(t *testing.T) {
 	if len(got) != 2 || !got[0].Supported || got[1].Supported {
 		t.Errorf("per-sentence: got %+v, want first supported, second unsupported", got)
 	}
+
+	// Support is judged per (sentence, passage): the same sentence can be entailed by one chunk and not another.
+	r = &RAGService{verifier: &fakeVerifier{score: func(_, passage string) float64 {
+		if passage == hitContent("A") {
+			return 0.95
+		}
+		return 0.05
+	}}}
+	got = r.validateCitations(context.Background(), "Both say so [1][2].", []SearchHit{ragHit(1, "A", 0.9), ragHit(2, "B", 0.9)})
+	if len(got) != 2 || !got[0].Supported || got[1].Supported || got[1].Score != 0.05 {
+		t.Errorf("per-passage: got %+v, want [1] supported, [2] unsupported 0.05", got)
+	}
 }
 
 // AI-2 (QA-4): when support cannot be verified, the citation fails closed (Score 0, Supported false)
 // and the request logs exactly one line with counts only (no sentence or passage text).
 func TestValidateCitationsFailClosedWhenUnverifiable(t *testing.T) {
-	isChunk := func(t string) bool { return strings.HasPrefix(t, "chunk") }
-	// vecs builds a fake that returns chunkVec for chunks and sentVec for sentences (nil = no vector).
-	vecs := func(chunkVec, sentVec []float32) func(string) []float32 {
-		return func(t string) []float32 {
-			if isChunk(t) {
-				return chunkVec
-			}
-			return sentVec
-		}
-	}
-	ok := []float32{1, 0}
+	ok := func(string, string) float64 { return 0.9 }
 	tests := []struct {
 		name string
-		emb  *fakeEmbedder
+		v    verifier
 	}{
-		{"embedder down for every call", &fakeEmbedder{err: errors.New("down")}},
-		{"sentence embed error", &fakeEmbedder{vec: vecs(ok, ok), failOn: func(t string) bool { return !isChunk(t) }}},
-		{"chunk embed error", &fakeEmbedder{vec: vecs(ok, ok), failOn: isChunk}},
-		{"sentence returns no vector", &fakeEmbedder{vec: vecs(ok, nil)}},
-		{"sentence returns empty vector", &fakeEmbedder{vec: vecs(ok, []float32{})}},
-		{"chunk returns no vector", &fakeEmbedder{vec: vecs(nil, ok)}},
-		{"chunk returns empty vector", &fakeEmbedder{vec: vecs([]float32{}, ok)}},
+		{"verifier down", &fakeVerifier{score: ok, err: errors.New("down")}},
+		{"no verifier configured", nil},
+		{"fewer scores than pairs", &fakeVerifier{score: ok, reshape: func(s []float64) []float64 { return s[:len(s)-1] }}},
+		{"more scores than pairs", &fakeVerifier{score: ok, reshape: func(s []float64) []float64 { return append(s, 0.9) }}},
+		{"NaN score", &fakeVerifier{score: func(string, string) float64 { return math.NaN() }}},
+		{"negative score", &fakeVerifier{score: func(string, string) float64 { return -0.1 }}},
+		{"score above 1", &fakeVerifier{score: func(string, string) float64 { return 1.5 }}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var buf bytes.Buffer
-			prevOut, prevFlags := log.Writer(), log.Flags()
-			log.SetOutput(&buf)
-			log.SetFlags(0)
-			t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
-
+			buf := captureLog(t)
 			ctx := withTraceID(context.Background(), "t-ai2")
-			got := (&RAGService{embedClient: tc.emb}).validateCitations(ctx, "Claim one [1]. Claim two [1].", []SearchHit{ragHit(1, "A", 0.9)})
+			got := (&RAGService{verifier: tc.v}).validateCitations(ctx, "Claim one [1]. Claim two [1].", []SearchHit{ragHit(1, "A", 0.9)})
 			if len(got) != 2 {
 				t.Fatalf("got %d citations, want 2 (markers are kept, only support is withheld): %+v", len(got), got)
 			}
@@ -297,10 +418,10 @@ func TestValidateCitationsFailClosedWhenUnverifiable(t *testing.T) {
 			}
 			lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
 			if len(lines) != 1 || !strings.Contains(lines[0], "citation support unverified trace_id=t-ai2 ") ||
-				!strings.Contains(lines[0], "unverified=2 citations=2") {
+				!strings.Contains(lines[0], "unverified=2 citations=2 pairs=2") {
 				t.Errorf("want exactly one unverified log line with counts, got %q", buf.String())
 			}
-			for _, secret := range []string{"Claim", "chunk A"} {
+			for _, secret := range []string{"Claim", "section shows"} {
 				if strings.Contains(buf.String(), secret) {
 					t.Errorf("log leaks text %q: %q", secret, buf.String())
 				}
@@ -309,11 +430,8 @@ func TestValidateCitationsFailClosedWhenUnverifiable(t *testing.T) {
 	}
 
 	// Verified citations log nothing.
-	var buf bytes.Buffer
-	prevOut := log.Writer()
-	log.SetOutput(&buf)
-	defer log.SetOutput(prevOut)
-	got := (&RAGService{embedClient: simEmbedder(constSim(0.9))}).validateCitations(context.Background(), "Claim [1].", []SearchHit{ragHit(1, "A", 0.9)})
+	buf := captureLog(t)
+	got := (&RAGService{verifier: simVerifier(constSim(0.9))}).validateCitations(context.Background(), "Claim [1].", []SearchHit{ragHit(1, "A", 0.9)})
 	if len(got) != 1 || !got[0].Supported || buf.Len() != 0 {
 		t.Errorf("verified path: got %+v log %q, want supported and no log", got, buf.String())
 	}
@@ -346,30 +464,6 @@ func TestSplitIntoSentences(t *testing.T) {
 	}
 }
 
-func TestCosineSimilarity(t *testing.T) {
-	tests := []struct {
-		name string
-		a, b []float32
-		want float32
-	}{
-		{"both zero", []float32{0, 0, 0}, []float32{0, 0, 0}, 0},
-		{"one zero", []float32{0, 0}, []float32{1, 2}, 0},
-		{"empty", []float32{}, []float32{}, 0},
-		{"length mismatch", []float32{1, 0}, []float32{1, 0, 0}, 0},
-		{"identical", []float32{3, 4}, []float32{3, 4}, 1},
-		{"orthogonal", []float32{1, 0}, []float32{0, 1}, 0},
-		{"opposite", []float32{1, 2}, []float32{-1, -2}, -1},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := cosineSimilarity(tc.a, tc.b)
-			if math.IsNaN(float64(got)) || math.Abs(float64(got-tc.want)) > 1e-6 {
-				t.Errorf("got %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 func sortedKeys(raw []byte) (out []string) {
 	var m map[string]json.RawMessage
 	_ = json.Unmarshal(raw, &m)
@@ -397,245 +491,25 @@ func TestAskResponseShapeAndConstructor(t *testing.T) {
 		t.Errorf("refusal response keys %v, want %v", got, want)
 	}
 	se, ec := &SearchEngine{}, &EmbedClient{}
-	if r := NewRAGService(se, ec); r.searchEngine != searcher(se) || r.embedClient != embedder(ec) {
+	if r := NewRAGService(se, ec); r.searchEngine != searcher(se) || r.verifier != verifier(ec) || r.extractor != reranker(ec) {
 		t.Errorf("dependencies not wired: %+v", r)
 	}
 }
 
-// countingEmbedder wraps an embedder, records the texts of every EmbedTexts call, and can fail or
-// reshape a given call (1-based call number) to exercise AI-3's batch fail-closed paths.
-type countingEmbedder struct {
-	inner    embedder
-	calls    [][]string
-	failCall map[int]error
-	reshape  map[int]func([][]float32) [][]float32
-}
-
-func (c *countingEmbedder) EmbedTexts(ctx context.Context, texts []string, isQuery bool) ([][]float32, error) {
-	c.calls = append(c.calls, append([]string(nil), texts...))
-	n := len(c.calls)
-	if err := c.failCall[n]; err != nil {
-		return nil, err
-	}
-	vecs, err := c.inner.EmbedTexts(ctx, texts, isQuery)
-	if f := c.reshape[n]; f != nil && err == nil {
-		vecs = f(vecs)
-	}
-	return vecs, err
-}
-
-// batchHits are three relevant hits whose chunk vectors differ, so a batch result applied to the
-// wrong input index changes the scores.
+// batchHits are three relevant hits with distinct content.
 func batchHits() []SearchHit {
 	return []SearchHit{ragHit(1, "Method", 0.9), ragHit(2, "Results", 0.8), ragHit(3, "Discussion", 0.7)}
-}
-
-func batchVectors() *fakeEmbedder {
-	return &fakeEmbedder{vec: func(t string) []float32 {
-		switch {
-		case t == "chunk Method":
-			return []float32{1, 0}
-		case t == "chunk Results":
-			return []float32{0, 1}
-		case t == "chunk Discussion":
-			return []float32{0.6, 0.8}
-		case strings.HasPrefix(t, "Furthermore"):
-			return []float32{0.6, 0.8} // cos 0.8 with chunk Results
-		default:
-			return []float32{0.9, 0.1}
-		}
-	}}
-}
-
-// perItemCitations is the pre-AI-3 algorithm: one EmbedTexts call per chunk and per cited sentence.
-// It is the reference the batched implementation must match.
-func perItemCitations(t *testing.T, emb embedder, answer string, hits []SearchHit) []Citation {
-	t.Helper()
-	embedOne := func(text string) []float32 {
-		v, err := emb.EmbedTexts(context.Background(), []string{text}, false)
-		if err != nil || len(v) == 0 {
-			return nil
-		}
-		return v[0]
-	}
-	var out []Citation
-	for _, sent := range splitIntoSentences(answer) {
-		for _, m := range markerRegex.FindAllStringSubmatch(sent, -1) {
-			n, _ := strconv.Atoi(m[1])
-			if n < 1 || n > len(hits) {
-				continue
-			}
-			sv := embedOne(strings.TrimSpace(markerRegex.ReplaceAllString(sent, "")))
-			cv := embedOne(hits[n-1].Content)
-			score := 0.0
-			if len(sv) > 0 && len(cv) > 0 {
-				score = math.Round(float64(cosineSimilarity(sv, cv))*10000) / 10000
-			}
-			out = append(out, Citation{Marker: n, ChunkID: hits[n-1].ChunkID, Score: score, Supported: score >= SupportThreshold})
-		}
-	}
-	return out
-}
-
-type labelScore struct {
-	Marker    int
-	ChunkID   int64
-	Score     float64
-	Supported bool
-}
-
-func labelsAndScores(cs []Citation) []labelScore {
-	out := []labelScore{}
-	for _, c := range cs {
-		out = append(out, labelScore{c.Marker, c.ChunkID, c.Score, c.Supported})
-	}
-	return out
-}
-
-// AI-3 AC1/AC5: an answer over 3 hits with 2 cited sentences costs at most 2 EmbedTexts calls
-// (all chunks, then all sentences), and the labels/scores equal the one-call-per-item results.
-func TestAskBatchesEmbeddingCalls(t *testing.T) {
-	emb := &countingEmbedder{inner: batchVectors()}
-	r := &RAGService{searchEngine: &fakeSearcher{hits: batchHits()}, embedClient: emb}
-	resp, err := r.Ask(context.Background(), "q", nil, 3)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got := markers(resp.Citations); !reflect.DeepEqual(got, []int{1, 2}) {
-		t.Fatalf("markers = %v, want [1 2] (answer %q)", got, resp.Answer)
-	}
-	if len(emb.calls) > 2 {
-		t.Fatalf("EmbedTexts called %d times, want <= 2 (one per batch): %q", len(emb.calls), emb.calls)
-	}
-	if len(emb.calls) != 2 || !reflect.DeepEqual(emb.calls[0], []string{"chunk Method", "chunk Results", "chunk Discussion"}) ||
-		len(emb.calls[1]) != 2 {
-		t.Errorf("calls = %q, want [all 3 chunks in hit order] then [2 sentences]", emb.calls)
-	}
-
-	want := perItemCitations(t, batchVectors(), resp.Answer, batchHits())
-	if got := labelsAndScores(resp.Citations); !reflect.DeepEqual(got, labelsAndScores(want)) {
-		t.Errorf("batched %+v, per-item %+v", got, labelsAndScores(want))
-	}
-	if c := resp.Citations[1]; c.Score != 0.8 || !c.Supported {
-		t.Errorf("citation 2 = %+v, want score 0.8 supported (chunk vectors kept in input order)", c)
-	}
-}
-
-// AI-3: batched validateCitations matches the per-item reference on the existing AI-1/AI-2 inputs,
-// deduplicates sentences, and never exceeds 2 calls.
-func TestValidateCitationsBatchMatchesPerItem(t *testing.T) {
-	hits := []SearchHit{ragHit(1, "A", 0.9), ragHit(2, "B", 0.9)}
-	perSentence := simEmbedder(func(s string) float64 {
-		if strings.HasPrefix(s, "Strong") {
-			return 0.9
-		}
-		return 0.2
-	})
-	tests := []struct {
-		name, answer string
-		inner        *fakeEmbedder
-		wantSentence []string // texts of the sentence batch; nil = no sentence call expected
-		wantCalls    int
-	}{
-		{"per-sentence support", "Strong claim [1]. Weak claim [1].", perSentence, []string{"Strong claim .", "Weak claim ."}, 2},
-		{"multiple markers one sentence embedded once", "X [2] and Y [7] and Z [1].", simEmbedder(constSim(0.9)), []string{"X  and Y  and Z ."}, 2},
-		{"repeated identical sentence embedded once", "Same [1]. Same [2]. Same [1].", perSentence, []string{"Same ."}, 2},
-		{"threshold edge", "Claim [1]. Other [2].", simEmbedder(constSim(0.4999)), []string{"Claim .", "Other ."}, 2},
-		{"no in-range marker makes no call", "Claim [0]. Other [3].", simEmbedder(constSim(0.9)), nil, 0},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			emb := &countingEmbedder{inner: tc.inner}
-			got := (&RAGService{embedClient: emb}).validateCitations(context.Background(), tc.answer, hits)
-			want := perItemCitations(t, tc.inner, tc.answer, hits)
-			if !reflect.DeepEqual(labelsAndScores(got), labelsAndScores(want)) {
-				t.Errorf("batched %+v, per-item %+v", labelsAndScores(got), labelsAndScores(want))
-			}
-			if len(emb.calls) != tc.wantCalls {
-				t.Fatalf("calls = %d (%q), want %d", len(emb.calls), emb.calls, tc.wantCalls)
-			}
-			if tc.wantCalls == 2 && !reflect.DeepEqual(emb.calls[1], tc.wantSentence) {
-				t.Errorf("sentence batch = %q, want %q", emb.calls[1], tc.wantSentence)
-			}
-		})
-	}
-}
-
-// AI-3 AC4: a failed or mis-sized batch fails closed for every citation that depends on it,
-// never panics, still makes at most 2 calls, and keeps the AI-2 log counters' meaning.
-func TestAskBatchFailClosed(t *testing.T) {
-	drop := func(v [][]float32) [][]float32 { return v[:len(v)-1] }
-	extra := func(v [][]float32) [][]float32 { return append(v, []float32{1, 0}) }
-	tests := []struct {
-		name     string
-		failCall map[int]error
-		reshape  map[int]func([][]float32) [][]float32
-		wantLog  string
-	}{
-		{"(a) chunk batch errors", map[int]error{1: errors.New("down")}, nil,
-			"unverified=2 citations=2 chunks_without_vector=3/3 sentence_embed_errors=0"},
-		{"(b) sentence batch errors", map[int]error{2: errors.New("down")}, nil,
-			"unverified=2 citations=2 chunks_without_vector=0/3 sentence_embed_errors=2"},
-		{"(c) chunk batch returns fewer vectors", nil, map[int]func([][]float32) [][]float32{1: drop},
-			"unverified=2 citations=2 chunks_without_vector=3/3 sentence_embed_errors=0"},
-		{"(c) sentence batch returns fewer vectors", nil, map[int]func([][]float32) [][]float32{2: drop},
-			"unverified=2 citations=2 chunks_without_vector=0/3 sentence_embed_errors=0"},
-		{"chunk batch returns more vectors", nil, map[int]func([][]float32) [][]float32{1: extra},
-			"unverified=2 citations=2 chunks_without_vector=3/3 sentence_embed_errors=0"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var buf bytes.Buffer
-			prevOut, prevFlags := log.Writer(), log.Flags()
-			log.SetOutput(&buf)
-			log.SetFlags(0)
-			t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
-
-			emb := &countingEmbedder{inner: batchVectors(), failCall: tc.failCall, reshape: tc.reshape}
-			r := &RAGService{searchEngine: &fakeSearcher{hits: batchHits()}, embedClient: emb}
-			resp, err := r.Ask(context.Background(), "q", nil, 3)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(resp.Citations) != 3 {
-				t.Fatalf("got %d citations, want 3 (ADR-0003: every relevant hit as evidence, support withheld)", len(resp.Citations))
-			}
-			if resp.RefusalReason != reasonVerificationUnavailable || resp.Answer != refusalUnavailable ||
-				!reflect.DeepEqual(markers(resp.Citations), []int{1, 2, 3}) {
-				t.Errorf("reason=%q answer=%q markers=%v, want verification_unavailable, the B sentence, [1 2 3]",
-					resp.RefusalReason, resp.Answer, markers(resp.Citations))
-			}
-			for _, c := range resp.Citations {
-				if c.Score != 0 || c.Supported {
-					t.Errorf("marker %d score=%v supported=%v, want 0 false", c.Marker, c.Score, c.Supported)
-				}
-			}
-			if len(emb.calls) != 2 {
-				t.Errorf("EmbedTexts called %d times, want 2", len(emb.calls))
-			}
-			lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
-			if len(lines) != 2 || !strings.Contains(lines[0], tc.wantLog) ||
-				!strings.Contains(lines[1], "reason=verification_unavailable") || !strings.Contains(lines[1], "trace_id="+resp.TraceID+" ") {
-				t.Errorf("log = %q, want the unverified line containing %q, then the refusal line", buf.String(), tc.wantLog)
-			}
-		})
-	}
 }
 
 // AI-4 AC1: when reranking falls back during Ask, the fallback log line carries the TraceID
 // returned to the caller (trace_id_source=ctx), and Ask still answers from the RRF order.
 func TestAskRerankFallbackLogsResponseTraceID(t *testing.T) {
-	var buf bytes.Buffer
-	prevOut, prevFlags := log.Writer(), log.Flags()
-	log.SetOutput(&buf)
-	log.SetFlags(0)
-	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
-
+	buf := captureLog(t)
 	rr := &fakeReranker{err: errors.New("reranker down")}
 	engine := &SearchEngine{rr: rr, fetch: func(_ context.Context, _ string, _ []string, n int) ([]SearchHit, error) {
 		return []SearchHit{ragHit(1, "Method", 0), ragHit(2, "Results", 0)}[:min(n, 2)], nil
 	}}
-	r := &RAGService{searchEngine: engine, embedClient: simEmbedder(constSim(0.8))}
+	r := &RAGService{searchEngine: engine, verifier: simVerifier(constSim(0.8)), extractor: prefersImproves()}
 	resp, err := r.Ask(context.Background(), "q", nil, 5)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -719,7 +593,7 @@ func checkRefusalLog(t *testing.T, buf *bytes.Buffer, traceID string, wantCounts
 			t.Errorf("refusal log %q missing %q", lines[0], want)
 		}
 	}
-	for _, secret := range []string{"secret question", "Based on", "Furthermore", "chunk Method", "chunk Results", "chunk Discussion", "Paper", "couldn't", "unavailable right now"} {
+	for _, secret := range []string{"secret question", "section shows", "second sentence", "Paper", "couldn't", "unavailable right now"} {
 		if strings.Contains(buf.String(), secret) {
 			t.Errorf("log leaks text %q: %q", secret, buf.String())
 		}
@@ -727,142 +601,146 @@ func checkRefusalLog(t *testing.T, buf *bytes.Buffer, traceID string, wantCounts
 }
 
 // AI-7 AC1 + AC6: every checked citation < 0.50 → all_citations_unsupported, the A sentence, all hits as evidence.
+// Paraphrased (non-verbatim) claims, as LLM synthesis produces, go to the NLI verifier.
 func TestAskRefusesAllUnsupported(t *testing.T) {
 	buf := captureLog(t)
-	r := &RAGService{searchEngine: &fakeSearcher{hits: batchHits()}, embedClient: simEmbedder(constSim(0.3))}
-	resp, err := r.Ask(context.Background(), "secret question", nil, 3)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	v := simVerifier(constSim(0.3))
+	resp := (&RAGService{verifier: v}).finalize(withTraceID(context.Background(), "t-a"), "t-a", "The proposed method is reported to raise benchmark accuracy [1]. Training follows the described setup [2]. Results are discussed further [3].", batchHits())
+	if resp.RefusalReason != reasonAllUnsupported || resp.Answer != refusalUnsupported || resp.TraceID != "t-a" {
+		t.Errorf("reason=%q answer=%q trace=%q, want all_citations_unsupported, the A sentence, t-a", resp.RefusalReason, resp.Answer, resp.TraceID)
 	}
-	if resp.RefusalReason != reasonAllUnsupported || resp.Answer != refusalUnsupported {
-		t.Errorf("reason=%q answer=%q, want all_citations_unsupported and the A sentence", resp.RefusalReason, resp.Answer)
+	if len(v.calls) != 1 || len(v.calls[0]) != 3 {
+		t.Errorf("verify calls = %+v, want one call with 3 pairs", v.calls)
 	}
-	if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(resp.TraceID) {
-		t.Errorf("TraceID = %q, want 32 hex chars", resp.TraceID)
-	}
-	// The template cites hits 1 and 2 (score 0.3); hit 3 is uncited (score 0).
-	checkEvidence(t, resp.Citations, batchHits(), []float64{0.3, 0.3, 0})
+	checkEvidence(t, resp.Citations, batchHits(), []float64{0.3, 0.3, 0.3})
 	raw, _ := json.Marshal(resp)
 	if !strings.Contains(string(raw), `"refusal_reason":"all_citations_unsupported"`) {
 		t.Errorf("JSON %s missing refusal_reason", raw)
 	}
-	checkRefusalLog(t, buf, resp.TraceID, "reason=all_citations_unsupported citations=2 checked=2 unverified=0 evidence=3")
+	checkRefusalLog(t, buf, "t-a", "reason=all_citations_unsupported citations=3 checked=3 unverified=0 evidence=3")
 	if strings.Contains(buf.String(), "citation support unverified") {
 		t.Errorf("case A must not log the unverified line: %q", buf.String())
 	}
 }
 
-// AI-7: an evidence score is the highest computed score among the checked citations of that hit,
-// including negative scores; uncited hits stay 0.
+// AI-7: an evidence score is the highest computed score among the checked citations of that hit;
+// uncited hits stay 0.
 func TestFinalizeEvidenceKeepsBestComputedScore(t *testing.T) {
 	captureLog(t)
 	hits := batchHits()
-	r := &RAGService{embedClient: simEmbedder(func(s string) float64 {
+	r := &RAGService{verifier: simVerifier(func(s string) float64 {
 		switch {
 		case strings.HasPrefix(s, "Weak claim"):
 			return 0.4
-		case strings.HasPrefix(s, "Neg"):
-			return -0.3
+		case strings.HasPrefix(s, "Mid"):
+			return 0.3
 		}
 		return 0.2
 	})}
-	resp := r.finalize(withTraceID(context.Background(), "t-ai7"), "t-ai7", "Weak claim [1]. Weaker claim [1]. Neg [2].", hits)
+	resp := r.finalize(withTraceID(context.Background(), "t-ai7"), "t-ai7", "Weak claim [1]. Weaker claim [1]. Mid [2].", hits)
 	if resp.RefusalReason != reasonAllUnsupported || resp.TraceID != "t-ai7" {
 		t.Errorf("reason=%q trace=%q, want all_citations_unsupported t-ai7", resp.RefusalReason, resp.TraceID)
 	}
-	checkEvidence(t, resp.Citations, hits, []float64{0.4, -0.3, 0})
+	checkEvidence(t, resp.Citations, hits, []float64{0.4, 0.3, 0})
 }
 
 // AI-7 AC2 + AC6: support could not be checked for at least one citation and none is supported →
 // verification_unavailable, the B sentence, evidence with score 0 for every unverified citation.
 func TestAskRefusesVerificationUnavailable(t *testing.T) {
-	drop := func(v [][]float32) [][]float32 { return v[:len(v)-1] }
-	// mixed: hit 1 is checked at 0.3; hit 2's chunk has an empty vector, so citation [2] is unverified.
-	mixed := &fakeEmbedder{vec: func(t string) []float32 {
-		switch {
-		case t == "chunk Results":
-			return []float32{}
-		case strings.HasPrefix(t, "chunk"):
-			return []float32{1, 0}
-		case strings.HasPrefix(t, "Based on"):
-			return []float32{0.3, float32(math.Sqrt(1 - 0.09))}
-		}
-		return []float32{1, 0}
-	}}
+	low := func(string, string) float64 { return 0.3 }
 	tests := []struct {
 		name       string
-		emb        *countingEmbedder
+		v          *fakeVerifier
 		wantScores []float64
 		wantCounts string
 	}{
-		{"chunk batch errors", &countingEmbedder{inner: batchVectors(), failCall: map[int]error{1: errors.New("down")}},
-			[]float64{0, 0, 0}, "citations=2 checked=0 unverified=2 evidence=3"},
-		{"sentence batch errors", &countingEmbedder{inner: batchVectors(), failCall: map[int]error{2: errors.New("down")}},
-			[]float64{0, 0, 0}, "citations=2 checked=0 unverified=2 evidence=3"},
-		{"sentence batch count mismatch", &countingEmbedder{inner: batchVectors(), reshape: map[int]func([][]float32) [][]float32{2: drop}},
-			[]float64{0, 0, 0}, "citations=2 checked=0 unverified=2 evidence=3"},
-		{"mixed checked-unsupported and unverified", &countingEmbedder{inner: mixed},
-			[]float64{0.3, 0, 0}, "citations=2 checked=1 unverified=1 evidence=3"},
+		{"verifier errors", &fakeVerifier{score: low, err: errors.New("down")},
+			[]float64{0, 0, 0}, "citations=3 checked=0 unverified=3 evidence=3"},
+		{"score count mismatch", &fakeVerifier{score: low, reshape: func(s []float64) []float64 { return s[:1] }},
+			[]float64{0, 0, 0}, "citations=3 checked=0 unverified=3 evidence=3"},
+		{"mixed checked-unsupported and unverified", &fakeVerifier{score: func(_, passage string) float64 {
+			if passage == hitContent("Results") {
+				return math.NaN()
+			}
+			return 0.3
+		}}, []float64{0.3, 0, 0.3}, "citations=3 checked=2 unverified=1 evidence=3"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			buf := captureLog(t)
-			r := &RAGService{searchEngine: &fakeSearcher{hits: batchHits()}, embedClient: tc.emb}
-			resp, err := r.Ask(context.Background(), "secret question", nil, 3)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
+			resp := (&RAGService{verifier: tc.v}).finalize(withTraceID(context.Background(), "t-b"), "t-b", "The proposed method is reported to raise benchmark accuracy [1]. Training follows the described setup [2]. Results are discussed further [3].", batchHits())
 			if resp.RefusalReason != reasonVerificationUnavailable || resp.Answer != refusalUnavailable {
 				t.Errorf("reason=%q answer=%q, want verification_unavailable and the B sentence", resp.RefusalReason, resp.Answer)
 			}
+			if len(tc.v.calls) != 1 {
+				t.Errorf("VerifyClaims called %d times, want 1", len(tc.v.calls))
+			}
 			checkEvidence(t, resp.Citations, batchHits(), tc.wantScores)
-			checkRefusalLog(t, buf, resp.TraceID, "reason=verification_unavailable "+tc.wantCounts)
+			checkRefusalLog(t, buf, "t-b", "reason=verification_unavailable "+tc.wantCounts)
 		})
+	}
+
+	// A verbatim quote needs no verifier: with the verifier down it is still supported and the answer is kept.
+	buf := captureLog(t)
+	quote := "The Method section shows that the proposed method improves accuracy on every benchmark [1]. " +
+		"A paraphrase that only NLI could check [2]."
+	resp := (&RAGService{verifier: &fakeVerifier{score: low, err: errors.New("down")}}).finalize(withTraceID(context.Background(), "t-q"), "t-q", quote, batchHits())
+	if resp.RefusalReason != "" || resp.Answer != quote || !resp.Citations[0].Supported || resp.Citations[0].Score != 1 ||
+		resp.Citations[1].Supported || resp.Citations[1].Score != 0 {
+		t.Errorf("quote with verifier down: %+v", resp)
+	}
+	if lines := strings.Split(strings.TrimSpace(buf.String()), "\n"); len(lines) != 1 || !strings.Contains(lines[0], "unverified=1 citations=2 pairs=2 verify_errors=1") {
+		t.Errorf("log = %q, want one unverified line for the paraphrase only", buf.String())
 	}
 }
 
-// AI-7 AC4: an answer with no in-range marker (only [9] with K = 3, or none) → all_citations_unsupported,
-// with no embedder call.
+// AI-7 AC4: an answer with no in-range marker (only [9] with K = 3, or none, or empty because no hit had a
+// quotable sentence) → all_citations_unsupported, with no verifier call.
 func TestAskRefusesNoInRangeMarker(t *testing.T) {
 	for _, answer := range []string{"Claim [9].", "No markers at all.", ""} {
 		t.Run(answer, func(t *testing.T) {
 			buf := captureLog(t)
-			emb := &countingEmbedder{inner: batchVectors()}
-			r := &RAGService{embedClient: emb}
-			resp := r.finalize(withTraceID(context.Background(), "t-ai7"), "t-ai7", answer, batchHits())
+			v := simVerifier(constSim(0.9))
+			resp := (&RAGService{verifier: v}).finalize(withTraceID(context.Background(), "t-ai7"), "t-ai7", answer, batchHits())
 			if resp.RefusalReason != reasonAllUnsupported || resp.Answer != refusalUnsupported || resp.TraceID != "t-ai7" {
 				t.Errorf("reason=%q answer=%q trace=%q, want all_citations_unsupported, the A sentence, t-ai7",
 					resp.RefusalReason, resp.Answer, resp.TraceID)
 			}
-			if len(emb.calls) != 0 {
-				t.Errorf("EmbedTexts called %d times, want 0", len(emb.calls))
+			if len(v.calls) != 0 {
+				t.Errorf("VerifyClaims called %d times, want 0", len(v.calls))
 			}
 			checkEvidence(t, resp.Citations, batchHits(), []float64{0, 0, 0})
 			checkRefusalLog(t, buf, "t-ai7", "reason=all_citations_unsupported citations=0 checked=0 unverified=0 evidence=3")
 		})
 	}
+
+	// End to end: relevant hits whose chunks have no quotable sentence produce no answer and are refused.
+	buf := captureLog(t)
+	bare := []SearchHit{{ChunkID: 1, ArxivID: "2401.00001", Title: "Paper", SectionTitle: "Method", Content: "T — Method\n\nToo short.", RerankScore: 0.9}}
+	v := simVerifier(constSim(0.9))
+	resp, err := newRAG(bare, v).Ask(context.Background(), "q", nil, 3)
+	if err != nil || resp.RefusalReason != reasonAllUnsupported || len(v.calls) != 0 || len(refusedLines(buf)) != 1 {
+		t.Errorf("no quotable sentence: resp=%+v err=%v verify calls=%d", resp, err, len(v.calls))
+	}
 }
 
 // AI-7 AC3: one supported citation is enough; the answer and per-citation flags are returned as today,
-// with no refusal_reason key and no refusal log line.
+// with no refusal_reason key and no log line.
 func TestAskKeepsAnswerWithOneSupportedCitation(t *testing.T) {
 	buf := captureLog(t)
-	r := &RAGService{searchEngine: &fakeSearcher{hits: batchHits()}, embedClient: simEmbedder(func(s string) float64 {
-		if strings.HasPrefix(s, "Based on") {
+	v := &fakeVerifier{score: func(_, passage string) float64 {
+		if passage == hitContent("Method") {
 			return 0.9
 		}
 		return 0.2
-	})}
-	resp, err := r.Ask(context.Background(), "q", nil, 3)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	}}
+	resp := (&RAGService{verifier: v}).finalize(withTraceID(context.Background(), "t-c"), "t-c", "The proposed method is reported to raise benchmark accuracy [1]. Training follows the described setup [2]. Results are discussed further [3].", batchHits())
+	if resp.Answer != "The proposed method is reported to raise benchmark accuracy [1]. Training follows the described setup [2]. Results are discussed further [3]." || resp.RefusalReason != "" {
+		t.Errorf("answer=%q reason=%q, want the answer kept and no reason", resp.Answer, resp.RefusalReason)
 	}
-	if resp.Answer != buildTemplateAnswer(batchHits()) || resp.RefusalReason != "" {
-		t.Errorf("answer=%q reason=%q, want the template answer and no reason", resp.Answer, resp.RefusalReason)
-	}
-	if len(resp.Citations) != 2 || resp.Citations[0].Marker != 1 || !resp.Citations[0].Supported || resp.Citations[0].Score != 0.9 ||
-		resp.Citations[1].Marker != 2 || resp.Citations[1].Supported || resp.Citations[1].Score != 0.2 {
-		t.Errorf("citations %+v, want [1] supported 0.9 and [2] unsupported 0.2", resp.Citations)
+	if got := markers(resp.Citations); !reflect.DeepEqual(got, []int{1, 2, 3}) || !resp.Citations[0].Supported || resp.Citations[0].Score != 0.9 ||
+		resp.Citations[1].Supported || resp.Citations[1].Score != 0.2 || resp.Citations[2].Supported {
+		t.Errorf("citations %+v, want [1] supported 0.9, [2] and [3] unsupported 0.2", resp.Citations)
 	}
 	raw, _ := json.Marshal(resp)
 	if got, want := sortedKeys(raw), []string{"answer", "citations", "trace_id"}; !reflect.DeepEqual(got, want) {
@@ -873,10 +751,43 @@ func TestAskKeepsAnswerWithOneSupportedCitation(t *testing.T) {
 	}
 }
 
+// End to end: Ask quotes one sentence per top hit; each is verified by exact match, the verifier is never called,
+// and nothing is logged.
+func TestAskExtractiveAnswerVerifiedByQuote(t *testing.T) {
+	buf := captureLog(t)
+	v := simVerifier(constSim(0))
+	resp, err := newRAG(batchHits(), v).Ask(context.Background(), "q", nil, 3)
+	if err != nil || resp.RefusalReason != "" || !reflect.DeepEqual(markers(resp.Citations), []int{1, 2, 3}) {
+		t.Fatalf("resp=%+v err=%v", resp, err)
+	}
+	for _, c := range resp.Citations {
+		if !c.Supported || c.Score != 1 {
+			t.Errorf("citation %d score=%v supported=%v, want 1 true", c.Marker, c.Score, c.Supported)
+		}
+	}
+	if len(v.calls) != 0 || buf.Len() != 0 {
+		t.Errorf("verify calls=%d log=%q, want none", len(v.calls), buf.String())
+	}
+}
+
+func TestIsVerbatimQuote(t *testing.T) {
+	passage := "Title — Sec\n\nTransformers rely entirely on attention mechanisms [12] to draw global\ndependencies. Short one."
+	for claim, want := range map[string]bool{
+		"Transformers rely entirely on attention mechanisms to draw global dependencies .":     true, // marker removed, ref stripped
+		"Transformers rely entirely on attention mechanisms [12] to draw global dependencies.": true,
+		"transformers rely entirely on attention mechanisms to draw global dependencies.":      false, // case differs
+		"Transformers rely mostly on attention mechanisms to draw global dependencies.":        false,
+		"Short one.": false, // too short to count as a quote; goes to NLI
+	} {
+		if got := isVerbatimQuote(claim, passage); got != want {
+			t.Errorf("isVerbatimQuote(%q) = %v, want %v", claim, got, want)
+		}
+	}
+}
+
 // AI-7 AC5: the early relevance refusal (QA-5) carries no refusal_reason.
 func TestAskEarlyRefusalHasNoRefusalReason(t *testing.T) {
-	r := &RAGService{searchEngine: &fakeSearcher{hits: []SearchHit{ragHit(1, "Method", 0.2)}}, embedClient: simEmbedder(constSim(1))}
-	resp, err := r.Ask(context.Background(), "q", nil, 3)
+	resp, err := newRAG([]SearchHit{ragHit(1, "Method", 0.2)}, simVerifier(constSim(1))).Ask(context.Background(), "q", nil, 3)
 	if err != nil || resp.RefusalReason != "" || resp.Answer != "No indexed papers are relevant to this question." {
 		t.Fatalf("got %+v err %v, want the early refusal without a reason", resp, err)
 	}

@@ -13,11 +13,15 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 const (
 	EarlyRefusalThreshold = 0.015 // Minimum RRF score required to attempt answer
-	SupportThreshold      = 0.50  // Minimum cosine similarity to mark citation supported (§9)
+	// SupportThreshold is the minimum NLI P(entailment) of a cited sentence by its passage (max over sentence
+	// windows, /internal/verify) to mark the citation supported. 0.50 = entailment is the most likely reading;
+	// calibrate on the EVAL-7 human judgments before changing it.
+	SupportThreshold = 0.50
 )
 
 // ADR-0003: when no citation is supported, /v1/ask refuses with evidence and says why.
@@ -55,20 +59,23 @@ type searcher interface {
 	HybridSearch(ctx context.Context, queryString string, categories []string, limit int, rerank bool) ([]SearchHit, error)
 }
 
-// embedder is the part of *EmbedClient that citation validation uses; tests substitute a fake.
-type embedder interface {
-	EmbedTexts(ctx context.Context, texts []string, isQuery bool) ([][]float32, error)
+// verifier is the part of *EmbedClient that checks citation support (NLI entailment); tests substitute a fake.
+type verifier interface {
+	VerifyClaims(ctx context.Context, pairs []VerifyPair) ([]float64, error)
 }
 
 type RAGService struct {
 	searchEngine searcher
-	embedClient  embedder
+	verifier     verifier
+	// extractor scores candidate answer sentences against the question (the cross-encoder reranker).
+	extractor reranker
 }
 
 func NewRAGService(searchEngine *SearchEngine, embedClient *EmbedClient) *RAGService {
 	return &RAGService{
 		searchEngine: searchEngine,
-		embedClient:  embedClient,
+		verifier:     embedClient,
+		extractor:    embedClient,
 	}
 }
 
@@ -109,26 +116,132 @@ func (r *RAGService) Ask(
 	}
 	hits = relevantHits
 
-	// 4. Synthesize a cited answer, then validate it and refuse if nothing is supported.
-	return r.finalize(ctx, traceID, buildTemplateAnswer(hits), hits), nil
+	// 4. Answer with cited sentences quoted from the passages (QA-8 replaces this with LLM synthesis), then
+	// verify every citation and refuse if none is supported.
+	return r.finalize(ctx, traceID, r.buildExtractiveAnswer(ctx, question, hits), hits), nil
 }
 
-// buildTemplateAnswer is the templated synthesis over the relevant hits (QA-8 replaces it with an LLM).
-func buildTemplateAnswer(hits []SearchHit) string {
-	topHit := hits[0]
-	answer := fmt.Sprintf(
-		"Based on the indexed research, the paper %q addresses this in the %s section [1].",
-		topHit.Title, topHit.SectionTitle,
-	)
-	if len(hits) > 1 {
-		secondHit := hits[1]
-		answer += fmt.Sprintf(
-			" Furthermore, experimental evaluation in %s demonstrates relevant improvements [2].",
-			secondHit.SectionTitle,
-		)
-	}
+// Extractive answers (pre-QA-8). The previous fixed template ("... demonstrates relevant improvements [2]")
+// asserted things no passage said; quoting the passage sentence most relevant to the question makes every
+// sentence of the answer checkable against its source.
+const (
+	maxAnswerHits       = 3   // sentences come from at most this many top relevant hits, one each
+	minAnswerSentence   = 40  // bytes; shorter fragments are page furniture or captions
+	maxAnswerSentence   = 400 // bytes; longer "sentences" are tables or run-on extraction
+	minAnswerSentWords  = 6
+	minAnswerAlphaRatio = 0.6 // letters / non-space bytes; drops tables, equations and reference lists
+)
 
-	return answer
+// inlineRefRegex matches a paper's own bracketed citations ("[12]", "[3, 4]", "[5–7]"); they are removed from a
+// quoted sentence so they cannot be read as answer markers.
+var inlineRefRegex = regexp.MustCompile(`\s*\[\d+(?:\s*[,–-]\s*\d+)*\]`)
+
+var spaceBeforePunct = regexp.MustCompile(`\s+([.,;:!?])`)
+
+// normQuote normalizes text for quote matching: inline references removed, whitespace collapsed, no space
+// before punctuation (a removed answer marker leaves "claim ." behind).
+func normQuote(s string) string {
+	s = strings.Join(strings.Fields(inlineRefRegex.ReplaceAllString(s, "")), " ")
+	return spaceBeforePunct.ReplaceAllString(s, "$1")
+}
+
+// isVerbatimQuote reports whether claim (at least minAnswerSentence bytes) occurs verbatim in passage.
+func isVerbatimQuote(claim, passage string) bool {
+	c := normQuote(claim)
+	return len(c) >= minAnswerSentence && strings.Contains(normQuote(passage), c)
+}
+
+// answerCandidates returns the quotable sentences of a chunk, in order, with inline references removed.
+func answerCandidates(content string) []string {
+	body := content
+	if head, rest, ok := strings.Cut(content, "\n\n"); ok && strings.Contains(head, " — ") && strings.TrimSpace(rest) != "" {
+		body = rest // drop the chunker's "<title> — <section>" prefix
+	}
+	body = strings.Join(strings.Fields(body), " ")
+	var out []string
+	seen := map[string]bool{}
+	for _, s := range splitIntoSentences(body) {
+		s = strings.TrimSpace(inlineRefRegex.ReplaceAllString(s, ""))
+		if len(s) < minAnswerSentence || len(s) > maxAnswerSentence || len(strings.Fields(s)) < minAnswerSentWords ||
+			markerRegex.MatchString(s) || seen[s] {
+			continue
+		}
+		letters, nonSpace := 0, 0
+		for _, ch := range s {
+			if ch != ' ' {
+				nonSpace++
+			}
+			if unicode.IsLetter(ch) {
+				letters++
+			}
+		}
+		if nonSpace == 0 || float64(letters)/float64(nonSpace) < minAnswerAlphaRatio {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+// buildExtractiveAnswer quotes, for each of the top maxAnswerHits hits, the candidate sentence the cross-encoder
+// scores most relevant to the question, followed by that hit's marker. If scoring fails, each hit's first
+// candidate is used. Returns "" when no hit has a quotable sentence (finalize then refuses).
+func (r *RAGService) buildExtractiveAnswer(ctx context.Context, question string, hits []SearchHit) string {
+	type cand struct {
+		hit  int
+		text string
+	}
+	var cands []cand
+	for i, h := range hits[:min(len(hits), maxAnswerHits)] {
+		for _, s := range answerCandidates(h.Content) {
+			cands = append(cands, cand{i, s})
+		}
+	}
+	if len(cands) == 0 {
+		return ""
+	}
+	best := map[int]int{} // hit index -> index into cands
+	var scores []float32
+	var err error
+	if r.extractor != nil {
+		texts := make([]string, len(cands))
+		for i, c := range cands {
+			texts[i] = c.text
+		}
+		scores, err = r.extractor.Rerank(ctx, question, texts)
+	}
+	if r.extractor == nil || err != nil || len(scores) != len(cands) {
+		id, src := traceIDFrom(ctx)
+		log.Printf("[Query Service] extractive answer: sentence scoring unavailable, using first sentences trace_id=%s trace_id_source=%s candidates=%d",
+			id, src, len(cands))
+		scores = nil
+	}
+	for i, c := range cands {
+		j, ok := best[c.hit]
+		if !ok || (scores != nil && scores[i] > scores[j]) {
+			best[c.hit] = i
+		}
+	}
+	var b strings.Builder
+	for i := range hits[:min(len(hits), maxAnswerHits)] {
+		j, ok := best[i]
+		if !ok {
+			continue
+		}
+		text := cands[j].text
+		end := ""
+		if n := len(text); n > 0 && strings.ContainsRune(".!?", rune(text[n-1])) {
+			text, end = text[:n-1], text[n-1:]
+		} else {
+			end = "."
+		}
+		if b.Len() > 0 {
+			b.WriteString(" ")
+		}
+		fmt.Fprintf(&b, "%s [%d]%s", strings.TrimSpace(text), i+1, end)
+	}
+	return b.String()
 }
 
 // --- LLM synthesis building blocks (AI-6, docs/design/QA-8.md). Not called by Ask yet; QA-8 wires them in.
@@ -409,12 +522,13 @@ func filterRelevantHits(hits []SearchHit) []SearchHit {
 
 var markerRegex = regexp.MustCompile(`\[(\d+)\]`)
 
-// validateCitations extracts [n] markers from answer, discards markers outside 1..len(hits),
-// and labels each citation supported when sentence/chunk cosine similarity >= SupportThreshold.
-// A citation whose support cannot be computed (embed error or missing vector) is unsupported with score 0.
+// validateCitations extracts [n] markers from answer, discards markers outside 1..len(hits), and labels each
+// citation supported when the marker-free sentence is a verbatim quote of the cited chunk (score 1), or else when
+// the NLI verifier's P(entailment) of the sentence by the chunk is >= SupportThreshold. A citation whose support cannot be computed (verifier error, wrong score count, or a
+// score outside [0, 1]) is unsupported with score 0.
 //
-// Embeddings are fetched in at most two EmbedTexts calls (AI-3): one for every hit's chunk, then one for
-// the distinct marker-free cited sentences. No call is made when the answer has no in-range marker.
+// All distinct non-quote (sentence, chunk) pairs are verified in one VerifyClaims call. No call is made when the
+// answer has no in-range marker or every cited sentence is a verbatim quote.
 func (r *RAGService) validateCitations(ctx context.Context, answer string, hits []SearchHit) []Citation {
 	cites, _ := r.checkCitations(ctx, answer, hits)
 	return cites
@@ -463,74 +577,84 @@ func (r *RAGService) checkCitations(ctx context.Context, answer string, hits []S
 		return nil, check
 	}
 
-	// 2. One call for all chunks, one for all distinct sentences.
-	chunkTexts := make([]string, k)
-	for i, h := range hits {
-		chunkTexts[i] = h.Content
-	}
-	chunkEmbeddings, _ := r.embedBatch(ctx, chunkTexts)
-	chunkMissing := 0
-	for _, v := range chunkEmbeddings {
-		if len(v) == 0 {
-			chunkMissing++
+	// 2. Distinct (sentence, hit) pairs in first-cited order. A verbatim quote of its passage is supported by
+	// exact match (score 1); NLI is for claims that are not verbatim and cannot certify a quote any better (the
+	// NLI model entailed only 92% of verbatim sentences by their own chunk). The rest go to one verifier call.
+	type pairKey struct{ sentIdx, hitIdx int }
+	pairIndex := map[pairKey]int{}
+	var pairs []VerifyPair
+	for _, c := range cited {
+		key := pairKey{c.sentIdx, c.hitIdx}
+		if _, ok := pairIndex[key]; !ok {
+			pairIndex[key] = len(pairs)
+			pairs = append(pairs, VerifyPair{Claim: sentTexts[c.sentIdx], Passage: hits[c.hitIdx].Content})
 		}
 	}
-	sentEmbeddings, sentErr := r.embedBatch(ctx, sentTexts)
+	scores := make([]float64, len(pairs))
+	failed := make([]bool, len(pairs))
+	var nliIdx []int
+	var nliPairs []VerifyPair
+	for i, p := range pairs {
+		if isVerbatimQuote(p.Claim, p.Passage) {
+			scores[i] = 1
+		} else {
+			nliIdx = append(nliIdx, i)
+			nliPairs = append(nliPairs, p)
+		}
+	}
+	verifyErrs := 0
+	if len(nliPairs) > 0 {
+		var got []float64
+		var err error
+		if r.verifier == nil {
+			err = errors.New("no verifier configured")
+		} else if got, err = r.verifier.VerifyClaims(ctx, nliPairs); err == nil && len(got) != len(nliPairs) {
+			err = fmt.Errorf("verifier returned %d scores for %d pairs", len(got), len(nliPairs))
+		}
+		for j, i := range nliIdx {
+			if err != nil {
+				failed[i] = true
+			} else {
+				scores[i] = got[j]
+			}
+		}
+		if err != nil {
+			verifyErrs = 1
+		}
+	}
 
-	// 3. Verify support (§9) per citation. Fail closed (QA-4, AI-2): if either vector is missing,
-	// the citation stays unsupported with score 0.
+	// 3. Label each citation (§9, QA-4). Fail closed (AI-2): no score, or a score outside [0, 1], leaves the
+	// citation unsupported with score 0.
 	validatedCitations := make([]Citation, 0, len(cited))
-	unverified, sentenceErrs := 0, 0
+	unverified := 0
 	for _, c := range cited {
 		hit := hits[c.hitIdx]
 		supported := false
 		score := 0.0
-
-		sentVec, chunkVec := sentEmbeddings[c.sentIdx], chunkEmbeddings[c.hitIdx]
-		if len(sentVec) > 0 && len(chunkVec) > 0 {
-			sim := cosineSimilarity(sentVec, chunkVec)
-			score = math.Round(float64(sim)*10000) / 10000
-			supported = score >= SupportThreshold
-			check.checked++
-			if !check.hitScored[c.hitIdx] || score > check.hitScore[c.hitIdx] {
-				check.hitScore[c.hitIdx], check.hitScored[c.hitIdx] = score, true
-			}
-		} else {
-			unverified++
-			if sentErr != nil {
-				sentenceErrs++
+		if pi := pairIndex[pairKey{c.sentIdx, c.hitIdx}]; !failed[pi] {
+			p := scores[pi]
+			if p >= 0 && p <= 1 { // also false for NaN
+				score = math.Round(p*10000) / 10000
+				supported = score >= SupportThreshold
+				check.checked++
+				if !check.hitScored[c.hitIdx] || score > check.hitScore[c.hitIdx] {
+					check.hitScore[c.hitIdx], check.hitScored[c.hitIdx] = score, true
+				}
+				validatedCitations = append(validatedCitations, newCitation(c.hitIdx+1, hit, score, supported))
+				continue
 			}
 		}
-
+		unverified++
 		validatedCitations = append(validatedCitations, newCitation(c.hitIdx+1, hit, score, supported))
 	}
 	check.unverified = unverified
 	if unverified > 0 {
 		// One line per request; counts only, never passage or sentence text.
 		id, src := traceIDFrom(ctx)
-		log.Printf("[Query Service] citation support unverified trace_id=%s trace_id_source=%s unverified=%d citations=%d chunks_without_vector=%d/%d sentence_embed_errors=%d",
-			id, src, unverified, len(validatedCitations), chunkMissing, k, sentenceErrs)
+		log.Printf("[Query Service] citation support unverified trace_id=%s trace_id_source=%s unverified=%d citations=%d pairs=%d verify_errors=%d",
+			id, src, unverified, len(validatedCitations), len(pairs), verifyErrs)
 	}
 	return validatedCitations, check
-}
-
-// embedBatch embeds texts (documents, not queries) in a single EmbedTexts call and returns exactly
-// one slot per input, in input order; an empty slot means no vector. If the call errors, or returns a
-// different number of vectors than inputs (so vectors cannot be matched to inputs), every slot is empty.
-func (r *RAGService) embedBatch(ctx context.Context, texts []string) ([][]float32, error) {
-	out := make([][]float32, len(texts))
-	if len(texts) == 0 {
-		return out, nil
-	}
-	vecs, err := r.embedClient.EmbedTexts(ctx, texts, false)
-	if err != nil {
-		return out, err
-	}
-	if len(vecs) != len(texts) {
-		return out, nil
-	}
-	copy(out, vecs)
-	return out, nil
 }
 
 func splitIntoSentences(text string) []string {
@@ -577,20 +701,4 @@ func endsWithAbbreviation(s string) bool {
 		}
 	}
 	return false
-}
-
-func cosineSimilarity(a, b []float32) float32 {
-	if len(a) != len(b) || len(a) == 0 {
-		return 0
-	}
-	var dot, normA, normB float32
-	for i := 0; i < len(a); i++ {
-		dot += a[i] * b[i]
-		normA += a[i] * a[i]
-		normB += b[i] * b[i]
-	}
-	if normA == 0 || normB == 0 {
-		return 0
-	}
-	return dot / (float32(math.Sqrt(float64(normA))) * float32(math.Sqrt(float64(normB))))
 }
