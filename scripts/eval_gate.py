@@ -16,6 +16,8 @@ import datetime as _dt
 import json
 import os
 import sys
+import urllib.error
+import urllib.request
 from typing import Any, Dict, List, Optional
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -33,6 +35,34 @@ GATED_MODE = er.RERANK_MODE
 BASELINE_MODES = ("BM25 Keyword", "Dense Vector")
 # Printed by print_table, never read by check_thresholds (EVAL-6). Definitions: evals/README.md.
 REPORT_ONLY_KEYS = ("citation_coverage", "near_miss_correct_refusal_rate", "verification_unavailable_count")
+
+
+# Technical PRD §9 "Reference hardware" (Accepted 2026-11-15): latency targets are gated on the reference profile, a
+# GPU machine (Apple silicon with PyTorch MPS, or CUDA), which is what self-hosting scholars run. On a CPU-only machine
+# (e.g. a GitHub runner) latency is measured and reported but cannot pass or fail the gate. The profile comes from the
+# device the embedder reports; when it cannot be determined the latency gate applies (fail closed).
+GPU_PROFILE = "gpu"
+CPU_PROFILE = "cpu-only"
+LATENCY_GATES = ("ask_p95_ms",)
+
+
+def hardware_profile(device: Optional[str]) -> Optional[str]:
+    d = (device or "").strip().lower()
+    if d.startswith(("mps", "cuda")):
+        return GPU_PROFILE
+    if d == "cpu":
+        return CPU_PROFILE
+    return None
+
+
+def embedder_device(embedder_url: str, timeout_s: float = 10.0) -> Optional[str]:
+    """The device the embedder API serves on (GET /healthz), or None if it cannot be read."""
+    try:
+        with urllib.request.urlopen(embedder_url.rstrip("/") + "/healthz", timeout=timeout_s) as r:
+            device = json.loads(r.read().decode("utf-8")).get("device")
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError, AttributeError):
+        return None
+    return device if isinstance(device, str) else None
 
 
 def load_thresholds(path: str = os.path.join(EVALS_DIR, "thresholds.json")) -> Dict[str, Any]:
@@ -55,7 +85,11 @@ def _check(name: str, value: Optional[float], op: str, target: Any) -> Dict[str,
 
 
 def check_thresholds(results: Dict[str, Any], thresholds: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Compare results {"retrieval": ..., "answers": ...} (either may be None) to thresholds."""
+    """Compare results {"retrieval": ..., "answers": ..., "hardware": ...} (any may be None) to thresholds.
+
+    A latency check measured on the CPU-only profile is marked informational: it keeps its value and target, is never
+    failed, and is labelled with the profile. Every other check, and latency on a GPU or unknown machine, is gated.
+    """
     checks: List[Dict[str, Any]] = []
     retrieval = results.get("retrieval")
     answers = results.get("answers")
@@ -84,6 +118,11 @@ def check_thresholds(results: Dict[str, Any], thresholds: Dict[str, Any]) -> Lis
     checks.append(_check("ask_p95_ms", a.get("ask_p95_ms"), "<", thresholds["ask_p95_latency_ms_max"]))
     # Failed/timed-out calls would otherwise only dilute the rates; any failure fails the gate.
     checks.append(_check("ask_errors (answer + refusal sets)", a.get("ask_error_count"), "==", 0))
+    profile = (results.get("hardware") or {}).get("profile")
+    for c in checks:
+        if c["metric"] in LATENCY_GATES and profile == CPU_PROFILE and c["value"] is not None:
+            c["informational"] = profile
+            c["passed"] = True
     return checks
 
 
@@ -94,7 +133,10 @@ def print_table(checks: List[Dict[str, Any]], answers: Optional[Dict[str, Any]],
     print("-" * 78)
     for c in checks:
         val = "n/a" if c["value"] is None else f"{c['value']:.4f}"
-        result = "PASS" if c["passed"] else ("NOT RUN" if c["value"] is None else "FAIL")
+        if c.get("informational"):
+            result = f"INFO ({c['informational']}; not gated)"
+        else:
+            result = "PASS" if c["passed"] else ("NOT RUN" if c["value"] is None else "FAIL")
         print(f"{c['metric']:<48} | {val:>9} | {c['op'] + ' ' + str(c['target']):>10} | {result}")
     cp = ((retrieval or {}).get("modes", {}).get(GATED_MODE) or {}).get("chunk_precision@5")
     if cp is not None:
@@ -130,7 +172,10 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     thresholds = load_thresholds(args.thresholds)
-    results: Dict[str, Any] = {"retrieval": None, "answers": None}
+    device = embedder_device(args.embedder_url)
+    results: Dict[str, Any] = {"retrieval": None, "answers": None,
+                               "hardware": {"device": device, "profile": hardware_profile(device)}}
+    print(f"hardware: embedder device={device or 'unknown'} profile={hardware_profile(device) or 'unknown (latency gated)'}")
 
     try:
         if not args.skip_retrieval:
