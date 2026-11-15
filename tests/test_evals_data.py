@@ -265,6 +265,28 @@ def test_adr0010_parity_pool_one_call_stable_ties_top5():
     assert evaluate_retrieval.RRF_POOL_SIZE == 20 and evaluate_retrieval.RESULT_LIMIT == 5
 
 
+@pytest.mark.parametrize("papers,want", [
+    ("AAAABAC", [1, 2, 5, 7, 3, 4, 6]),
+    ("ABCDEF", [1, 2, 3, 4, 5, 6]),
+    ("AAAAAA", [1, 2, 3, 4, 5, 6]),
+    ("AAABBB", [1, 2, 4, 5, 3, 6]),
+    ("AAA", [1, 2, 3]),
+    ("", []),
+])
+def test_diversify_matches_search_go_cases(papers, want):
+    # Same cases as TestDiversify in internal/query/search_test.go (ADR-0016).
+    hits = [(i + 1, p) for i, p in enumerate(papers)]
+    assert [c for c, _ in evaluate_retrieval.diversify(hits)] == want
+
+
+def test_diversity_constants_match_search_go():
+    go = os.path.join(os.path.dirname(EVALS), "internal", "query", "search.go")
+    src = open(go, encoding="utf-8").read()
+    assert re.search(rf"DiversityWindow\s*=\s*{evaluate_retrieval.DIVERSITY_WINDOW}\b", src)
+    assert re.search(rf"PaperCap\s*=\s*{evaluate_retrieval.PAPER_CAP}\b", src)
+    assert "hits = diversify(hits, DiversityWindow, PaperCap)" in src
+
+
 def test_rerank_pool_empty_makes_no_call():
     assert evaluate_retrieval.rerank_pool("q", [], lambda q, p: pytest.fail("rerank called")) == []
 
