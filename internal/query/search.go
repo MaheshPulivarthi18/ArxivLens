@@ -27,6 +27,13 @@ const (
 	PaperCap        = 2
 )
 
+// FusionK is the rank-fusion constant (ADR-0017). Each candidate's order key is
+// 1/(FusionK + rerank rank) + 1/(FusionK + first-stage RRF rank), so a passage the cross-encoder scores low but
+// the first stage ranks at the top is not discarded. That happens on questions in the reader's own words, which
+// share few terms with the passage. Measured on the 78-case eval with bge-reranker-base: MRR 0.964 -> 0.976,
+// NDCG@5 0.961 -> 0.971, own-words MRR 0.69 -> 0.89, Recall@5 unchanged (0.985), no extra latency.
+const FusionK = 10
+
 type SearchHit struct {
 	ChunkID      int64   `json:"chunk_id"`
 	ArxivID      string  `json:"arxiv_id"`
@@ -205,8 +212,8 @@ func (s *SearchEngine) fetchCandidates(ctx context.Context, queryString string, 
 	return hits, nil
 }
 
-// rerankAndSort scores hits with one Rerank call, stable-sorts by RerankScore descending
-// (ties keep RRF order) and truncates to limit. On a rerank error, a score-count mismatch
+// rerankAndSort scores hits with one Rerank call, orders them by fused rerank and RRF rank (ADR-0017; ties keep
+// RRF order), applies the top-5 paper cap (ADR-0016) and truncates to limit. On a rerank error, a score-count mismatch
 // or a NaN score it keeps RRF order, leaves RerankScore at 0 and logs the trace ID.
 func rerankAndSort(ctx context.Context, rr reranker, query string, hits []SearchHit, limit int) []SearchHit {
 	if len(hits) == 0 {
@@ -247,9 +254,36 @@ func rerankAndSort(ctx context.Context, rr reranker, query string, hits []Search
 	for i := range hits {
 		hits[i].RerankScore = float64(scores[i])
 	}
-	sort.SliceStable(hits, func(i, j int) bool { return hits[i].RerankScore > hits[j].RerankScore })
+	hits = fuseRanks(hits)
 	hits = diversify(hits, DiversityWindow, PaperCap)
 	return hits[:min(limit, len(hits))]
+}
+
+// fuseRanks orders hits (given in first-stage RRF order, RerankScore set) by
+// 1/(FusionK + rerank rank) + 1/(FusionK + RRF rank), both ranks 1-based. Rerank ranks come from a stable sort by
+// RerankScore, so equal scores keep RRF order; equal fused keys also keep RRF order. RerankScore is unchanged: the
+// /v1/ask relevance cutoff still reads the cross-encoder's own probability.
+func fuseRanks(hits []SearchHit) []SearchHit {
+	n := len(hits)
+	byScore := make([]int, n)
+	for i := range byScore {
+		byScore[i] = i
+	}
+	sort.SliceStable(byScore, func(a, b int) bool { return hits[byScore[a]].RerankScore > hits[byScore[b]].RerankScore })
+	key := make([]float64, n)
+	for rank, i := range byScore {
+		key[i] = 1/float64(FusionK+rank+1) + 1/float64(FusionK+i+1)
+	}
+	order := make([]int, n)
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool { return key[order[a]] > key[order[b]] })
+	out := make([]SearchHit, n)
+	for pos, i := range order {
+		out[pos] = hits[i]
+	}
+	return out
 }
 
 // diversify reorders a ranked list so that its first window entries hold at most perPaper hits from any one paper

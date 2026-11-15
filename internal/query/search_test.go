@@ -87,27 +87,49 @@ func runOrderCases(t *testing.T, cases []orderCase) {
 			if got := ids(hits); !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("order = %v, want %v", got, tc.want)
 			}
-			for i := 1; i < len(hits); i++ {
-				if hits[i-1].RerankScore < hits[i].RerankScore {
-					t.Fatalf("not sorted by rerank score desc at %d", i)
-				}
-			}
 		})
 	}
 }
 
-// AC1
-func TestHybridSearchRerankOrdersByScore(t *testing.T) {
+// AC1, as amended by ADR-0017: order by 1/(FusionK + rerank rank) + 1/(FusionK + RRF rank), k = 10.
+func TestHybridSearchRerankOrdersByFusedRank(t *testing.T) {
 	runOrderCases(t, []orderCase{
+		// Chunk 8: 1/11 + 1/18 = 0.147 sits behind chunks 1-3 (0.174, 0.160, 0.148) and ahead of chunk 4 (0.138).
 		{"rrf rank 8 has top score", 5, func(r int) float32 {
 			if r == 8 {
 				return 0.99
 			}
 			return 0.5 - float32(r)*0.01
-		}, []int64{8, 1, 2, 3, 4}},
-		{"fully reversed scores", 5, func(r int) float32 { return float32(r) }, []int64{20, 19, 18, 17, 16}},
+		}, []int64{1, 2, 3, 8, 4}},
+		// Chunks r and 21-r tie at 1/(10+r) + 1/(31-r); ties keep RRF order.
+		{"fully reversed scores", 5, func(r int) float32 { return float32(r) }, []int64{1, 20, 2, 19, 3}},
 		{"already sorted scores", 5, func(r int) float32 { return 1 - float32(r)*0.01 }, []int64{1, 2, 3, 4, 5}},
+		// Agreement wins: chunk 3 (rerank 4, RRF 3: 0.148) beats chunk 12 (rerank 1, RRF 12: 0.091 + 0.045 = 0.136).
+		{"one strong rerank vote does not override the first stage", 3, func(r int) float32 {
+			if r == 12 {
+				return 0.99
+			}
+			return 0.9 - float32(r)*0.01
+		}, []int64{1, 2, 3}},
 	})
+}
+
+// fuseRanks keeps RerankScore as the cross-encoder probability (the /v1/ask relevance cutoff reads it).
+func TestFuseRanksKeepsRerankScores(t *testing.T) {
+	hits := paperHits("A", "B", "C")
+	for i, s := range []float64{0.1, 0.9, 0.5} {
+		hits[i].RerankScore = s
+	}
+	got := fuseRanks(hits)
+	// keys: c1 1/13+1/11=0.168, c2 1/11+1/12=0.174, c3 1/12+1/13=0.160
+	if !reflect.DeepEqual(ids(got), []int64{2, 1, 3}) {
+		t.Fatalf("order = %v", ids(got))
+	}
+	for _, h := range got {
+		if want := map[int64]float64{1: 0.1, 2: 0.9, 3: 0.5}[h.ChunkID]; h.RerankScore != want {
+			t.Errorf("chunk %d RerankScore = %v, want %v", h.ChunkID, h.RerankScore, want)
+		}
+	}
 }
 
 // AC4
@@ -115,12 +137,13 @@ func TestHybridSearchRerankTiesKeepRRFOrder(t *testing.T) {
 	tiers := map[int]float32{2: 0.9, 5: 0.9, 3: 0.8, 7: 0.8, 1: 0.7} // all other ranks 0.1
 	runOrderCases(t, []orderCase{
 		{"all equal", 5, func(int) float32 { return 0.5 }, []int64{1, 2, 3, 4, 5}},
+		// rerank ranks 2,5,3,7,1,4,6,... fused: c2 .174, c1 .158, c3 .154, c5 .150, c4 .134, c7 .130
 		{"tied pairs interleaved", 6, func(r int) float32 {
 			if s, ok := tiers[r]; ok {
 				return s
 			}
 			return 0.1
-		}, []int64{2, 5, 3, 7, 1, 4}},
+		}, []int64{2, 1, 3, 5, 4, 7}},
 	})
 }
 

@@ -72,13 +72,13 @@ func TestSearchHitProvenanceTravelsWithHit(t *testing.T) {
 		want   []int64
 	}{
 		{"no rerank", false, nil, nil, []int64{1, 2, 3, 4, 5}},
-		{"rerank reversed", true, nil, byRank(func(r int) float32 { return float32(r) }), []int64{20, 19, 18, 17, 16}},
-		{"rerank rank 8 first", true, nil, byRank(func(r int) float32 {
+		{"rerank reversed", true, nil, byRank(func(r int) float32 { return float32(r) }), []int64{1, 20, 2, 19, 3}},
+		{"rerank rank 8 top score", true, nil, byRank(func(r int) float32 {
 			if r == 8 {
 				return 1
 			}
 			return 0.5 - float32(r)*0.01
-		}), []int64{8, 1, 2, 3, 4}},
+		}), []int64{1, 2, 3, 8, 4}},
 		{"fallback rerank error", true, errors.New("boom"), nil, []int64{1, 2, 3, 4, 5}},
 		{"fallback timeout", true, fmt.Errorf("w: %w", context.DeadlineExceeded), nil, []int64{1, 2, 3, 4, 5}},
 		{"fallback count mismatch", true, nil, func(p []string) []float32 { return make([]float32, len(p)-1) }, []int64{1, 2, 3, 4, 5}},
