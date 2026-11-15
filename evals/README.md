@@ -69,6 +69,12 @@ Every failed `/v1/ask` call (HTTP error, timeout, bad JSON) fails the gate via t
 also recorded in the p50/p95 latency at its elapsed time (a timeout counts as at least `--timeout`), and never counts
 as a refusal, hit, or supported citation. If every call fails, the gate exits 2 (could not run).
 
+**Latency is gated on the reference hardware only** (Technical PRD §9, Accepted 2026-11-15). The gate reads the
+embedder's device from `GET /healthz`. On `mps` or `cuda` (the GPU profile self-hosters run) `ask_p95_ms < 3000` is
+gated. On `cpu`, such as a GitHub runner, the p95 is still measured, saved and printed, labelled
+`INFO (cpu-only; not gated)`, and it can neither pass nor fail the run. If the device can't be read, the latency gate
+applies. Every quality check is gated on every machine, and so is a missing p95.
+
 ### What the answer eval measures (EVAL-6)
 **ADR-0003 classification** of each `/v1/ask` response (`classify()` in `scripts/evaluate_answers.py`):
 

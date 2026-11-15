@@ -123,6 +123,35 @@ def test_gate_fails_when_hybrid_does_not_beat_baselines():
     assert not all(c["passed"] for c in eval_gate.check_thresholds(res, eval_gate.load_thresholds()))
 
 
+@pytest.mark.parametrize("device,gated", [
+    ("mps", True), ("cuda", True), ("cuda:0", True), ("cpu", False), (None, True), ("tpu", True),
+])
+def test_latency_gate_follows_reference_hardware(device, gated):
+    res = _results(p95=16185.0)
+    res["hardware"] = {"device": device, "profile": eval_gate.hardware_profile(device)}
+    checks = {c["metric"]: c for c in eval_gate.check_thresholds(res, eval_gate.load_thresholds())}
+    p95 = checks["ask_p95_ms"]
+    assert p95["value"] == 16185.0 and p95["target"] == 3000  # measured and recorded either way
+    assert p95["passed"] is (not gated) and ("informational" in p95) is (not gated)
+    # Only latency is scoped by hardware: quality gates still fail on a CPU machine.
+    res["answers"]["supported_citation_rate"] = 0.5
+    assert not all(c["passed"] for c in eval_gate.check_thresholds(res, eval_gate.load_thresholds()))
+
+
+def test_cpu_profile_does_not_excuse_missing_latency():
+    res = _results()
+    res["answers"]["ask_p95_ms"] = None
+    res["hardware"] = {"device": "cpu", "profile": eval_gate.CPU_PROFILE}
+    assert not all(c["passed"] for c in eval_gate.check_thresholds(res, eval_gate.load_thresholds()))
+
+
+def test_print_table_labels_informational_latency(capsys):
+    res = _results(p95=16185.0)
+    res["hardware"] = {"device": "cpu", "profile": eval_gate.CPU_PROFILE}
+    eval_gate.print_table(eval_gate.check_thresholds(res, eval_gate.load_thresholds()), res["answers"])
+    assert "INFO (cpu-only; not gated)" in capsys.readouterr().out
+
+
 def test_gate_fails_on_partial_run():
     res = _results()
     res["answers"] = None
