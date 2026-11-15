@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -53,6 +52,7 @@ type Crawler struct {
 	producer  *kafka.Producer
 	client    *http.Client
 	rateLimit time.Duration
+	retry     arxiv.Retry // per-page retry on 429/5xx/timeouts (arxiv.DefaultRetry)
 }
 
 func NewCrawler(database *db.DB, producer *kafka.Producer, rateLimit time.Duration) *Crawler {
@@ -64,6 +64,7 @@ func NewCrawler(database *db.DB, producer *kafka.Producer, rateLimit time.Durati
 		producer:  producer,
 		client:    &http.Client{Timeout: 30 * time.Second},
 		rateLimit: rateLimit,
+		retry:     arxiv.DefaultRetry,
 	}
 }
 
@@ -71,7 +72,7 @@ func NewCrawler(database *db.DB, producer *kafka.Producer, rateLimit time.Durati
 func (c *Crawler) Crawl(ctx context.Context, searchQuery string, limit int) (int, error) {
 	log.Printf("[Crawler] Starting crawl query=%q limit=%d (rate-limit=%v)", searchQuery, limit, c.rateLimit)
 
-	baseURL := "http://export.arxiv.org/api/query"
+	baseURL := arxiv.APIURL()
 	pageSize := 20
 	if limit < pageSize {
 		pageSize = limit
@@ -101,25 +102,10 @@ func (c *Crawler) Crawl(ctx context.Context, searchQuery string, limit int) (int
 		reqURL := fmt.Sprintf("%s?%s", baseURL, params.Encode())
 		log.Printf("[Crawler] Fetching page start=%d size=%d URL=%s", start, currLimit, reqURL)
 
-		req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+		// Retries 429/5xx/timeouts with backoff (honouring Retry-After); a non-200 is never parsed.
+		body, err := arxiv.GetAPI(ctx, c.client, nil, reqURL, arxiv.UserAgent("Research Pipeline"), c.retry)
 		if err != nil {
-			return totalDiscovered, fmt.Errorf("failed to create request: %w", err)
-		}
-		req.Header.Set("User-Agent", "ArxivLens/1.0 (Research Pipeline; mailto:contact@arxivlens.local)")
-
-		resp, err := c.client.Do(req)
-		if err != nil {
-			return totalDiscovered, fmt.Errorf("http request failed: %w", err)
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return totalDiscovered, fmt.Errorf("failed to read response body: %w", err)
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			return totalDiscovered, fmt.Errorf("arxiv API returned status: %d", resp.StatusCode)
+			return totalDiscovered, fmt.Errorf("arxiv page start=%d: %w", start, err)
 		}
 
 		papers, err := parseAtomFeed(body)

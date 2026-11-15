@@ -1,11 +1,18 @@
 package crawler
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"arxivlens/internal/arxiv"
 )
 
 func TestParseAtomFeed(t *testing.T) {
@@ -107,5 +114,37 @@ func TestParseAtomFeedEdgeCases(t *testing.T) {
 				t.Errorf("got %d papers, want %d", len(papers), tt.wantCount)
 			}
 		})
+	}
+}
+
+// CI fix: a 429 from arXiv (shared runner IPs) is retried with backoff instead of failing the crawl, and the
+// crawler fetches from ARXIV_API_URL.
+func TestCrawlRetriesRateLimit(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte(`<feed xmlns="http://www.w3.org/2005/Atom"></feed>`)) // no entries: crawl ends
+	}))
+	defer srv.Close()
+	t.Setenv("ARXIV_API_URL", srv.URL)
+	c := NewCrawler(nil, nil, time.Millisecond)
+	c.retry = arxiv.Retry{Attempts: 3, Base: time.Millisecond}
+	n, err := c.Crawl(context.Background(), "cat:cs.LG", 2)
+	if err != nil || n != 0 || hits.Load() != 2 {
+		t.Fatalf("Crawl = %d, %v after %d requests; want 0, nil after one retry", n, err, hits.Load())
+	}
+
+	// Retries exhausted: the error names the status instead of a parse failure.
+	always := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer always.Close()
+	t.Setenv("ARXIV_API_URL", always.URL)
+	c.retry = arxiv.NoRetry
+	if _, err := c.Crawl(context.Background(), "cat:cs.LG", 2); err == nil || !strings.Contains(err.Error(), "status 429") {
+		t.Errorf("err = %v, want a status 429 error", err)
 	}
 }

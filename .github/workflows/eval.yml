@@ -1,6 +1,7 @@
 name: Eval
 
-# Full stack, make eval-seed (31 corpus IDs = 62 arXiv requests), make eval. No secrets. Design: arxivlens-agents EVAL-3.
+# Full stack, make eval-seed (31 corpus IDs), make eval. No secrets. Design: arxivlens-agents EVAL-3. arXiv is replayed
+# from the Actions cache (scripts/arxiv_replay.py, keyed on evals/corpus.txt): 0 arXiv requests once recorded, 62 to record.
 on:
   workflow_dispatch:
   schedule:
@@ -8,6 +9,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/eval.yml
+      - scripts/arxiv_replay.py
 
 permissions:
   contents: read
@@ -25,6 +27,11 @@ jobs:
     env:
       ARXIVLENS_HF_CACHE: /home/runner/.cache/huggingface
       PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
+      # arXiv rate-limits shared runner IPs (429s, timeouts, empty bodies), which failed jobs for reasons unrelated
+      # to the code. Every Go arXiv fetch goes to scripts/arxiv_replay.py instead; its store lives in the Actions
+      # cache, so once recorded a run makes no arXiv requests. Stored source URLs and user-facing links stay canonical.
+      ARXIV_API_URL: http://127.0.0.1:8099/api/query
+      ARXIV_PDF_BASE: http://127.0.0.1:8099/pdf
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -71,6 +78,30 @@ jobs:
       - name: Build Go CLI, make stack-up, migrate
         timeout-minutes: 32
         run: make build-go && make stack-up && make migrate
+      # arXiv record/replay: restore, prefetch whatever is missing (the only step that may contact arXiv), save only
+      # after a complete prefetch, then serve replay-only so an unexpected arXiv request fails loudly (404).
+      - name: Restore arXiv replay store
+        id: replay
+        uses: actions/cache/restore@v4
+        with:
+          path: .arxiv-replay
+          key: arxiv-replay-${{ runner.os }}-eval-${{ hashFiles('evals/corpus.txt') }}
+      - name: Prefetch arXiv responses into the replay store
+        timeout-minutes: 45
+        run: python3 scripts/arxiv_replay.py prefetch --dir .arxiv-replay --ids evals/corpus.txt
+      - name: Save arXiv replay store
+        if: steps.replay.outputs.cache-hit != 'true'
+        timeout-minutes: 5
+        uses: actions/cache/save@v4
+        with:
+          path: .arxiv-replay
+          key: arxiv-replay-${{ runner.os }}-eval-${{ hashFiles('evals/corpus.txt') }}
+      - name: Start the arXiv replay proxy (replay-only)
+        timeout-minutes: 1
+        run: |
+          nohup python3 scripts/arxiv_replay.py serve --dir .arxiv-replay --port 8099 > arxiv-replay.log 2>&1 &
+          for _ in $(seq 20); do curl -fsS localhost:8099/healthz && exit 0; sleep 0.5; done
+          echo "::error::arXiv replay proxy not up"; cat arxiv-replay.log; exit 1
       - name: Start the query service on the host
         timeout-minutes: 2
         run: |
@@ -89,7 +120,7 @@ jobs:
           echo "OK: make eval-seed failed (make exit $rc) after 3 attempts"
       # Worst observed seed 37.8 min x ~1.6 = ~60, + ~1.5 for ING-9's per-process 3 s waits -> 70. Needing more is a signal
       # to cache the seeded DB/MinIO state (Backlog), not to raise this. Seed time is reported every run; >= 75% warns.
-      - name: make eval-seed (31 corpus IDs from arXiv)
+      - name: make eval-seed (31 corpus IDs, arXiv replayed from the cache)
         timeout-minutes: 70
         run: |
           set +e; make eval-seed 2>&1 | tee seed.log

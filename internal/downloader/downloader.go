@@ -43,6 +43,8 @@ type Downloader struct {
 	client   *http.Client
 	// limiter spaces this process's arXiv PDF requests (Technical PRD §9).
 	limiter *arxiv.Limiter
+	// retry re-fetches on 429/5xx/timeouts/stalls before the Kafka-level retry; zero value: one attempt.
+	retry arxiv.Retry
 }
 
 func NewDownloader(database *db.DB, storage *storage.Storage, producer *kafka.Producer) *Downloader {
@@ -57,6 +59,7 @@ func NewDownloader(database *db.DB, storage *storage.Storage, producer *kafka.Pr
 		producer: producer,
 		client:   &http.Client{}, // timeouts come from arxiv.DefaultPDFLimits in fetchPDF
 		limiter:  arxiv.NewLimiter(arxiv.DefaultInterval),
+		retry:    arxiv.DefaultRetry,
 	}
 }
 
@@ -144,9 +147,15 @@ func (d *Downloader) HandleRecord(ctx context.Context, record *kgo.Record) error
 
 // fetchPDF waits for the arXiv limiter and GETs pdfURL with the identifying User-Agent.
 func (d *Downloader) fetchPDF(ctx context.Context, pdfURL string) ([]byte, error) {
-	if err := d.limiter.Wait(ctx); err != nil {
-		return nil, err
-	}
-	// Stall-based limits instead of a total client timeout: large PDFs arrive slowly but steadily.
-	return arxiv.FetchPDF(ctx, d.client, pdfURL, arxiv.UserAgent("Downloader Pipeline"), arxiv.DefaultPDFLimits)
+	var body []byte
+	err := d.retry.Do(ctx, func() error {
+		if err := d.limiter.Wait(ctx); err != nil {
+			return err
+		}
+		// Stall-based limits instead of a total client timeout: large PDFs arrive slowly but steadily.
+		var ferr error
+		body, ferr = arxiv.FetchPDF(ctx, d.client, arxiv.FetchURL(pdfURL), arxiv.UserAgent("Downloader Pipeline"), arxiv.DefaultPDFLimits)
+		return ferr
+	})
+	return body, err
 }

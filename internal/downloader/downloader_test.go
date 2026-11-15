@@ -35,7 +35,11 @@ func TestFetchPDFIsSpacedAndIdentified(t *testing.T) {
 	const interval, slack = 50 * time.Millisecond, 10 * time.Millisecond
 	stub := &pdfStub{status: http.StatusOK}
 	d.client = &http.Client{Transport: stub, Timeout: 5 * time.Second}
+	if d.retry.Attempts != arxiv.DefaultRetry.Attempts {
+		t.Fatalf("NewDownloader retry = %+v, want arxiv.DefaultRetry", d.retry)
+	}
 	d.limiter = arxiv.NewLimiter(interval)
+	d.retry = arxiv.NoRetry // counts requests; retry behaviour is tested in internal/arxiv
 	for i := 0; i < 2; i++ {
 		if body, err := d.fetchPDF(context.Background(), "https://arxiv.org/pdf/2307.08691.pdf"); err != nil || string(body) != "%PDF-1.4" {
 			t.Fatalf("fetchPDF %d = %q, %v", i, body, err)

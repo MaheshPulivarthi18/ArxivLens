@@ -57,15 +57,14 @@ type PaperIngester struct {
 	limiter *arxiv.Limiter
 	// pdfLimits bounds PDF downloads (stall/total/size); httpClient's Timeout applies to metadata only.
 	pdfLimits arxiv.PDFLimits
+	// retry is applied to every arXiv request (429/5xx/timeouts/stalls); the zero value makes one attempt.
+	retry arxiv.Retry
 }
 
-// doArxiv waits for the arXiv limiter, sets the identifying User-Agent and sends req.
-func (ing *PaperIngester) doArxiv(req *http.Request) (*http.Response, error) {
-	if err := ing.limiter.Wait(req.Context()); err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", arxiv.UserAgent("Query Ingester"))
-	return ing.httpClient.Do(req)
+// getAPI GETs an arXiv API URL through the limiter with the ingester's User-Agent and retry policy; a
+// non-200 (e.g. 429) is an error, never parsed as a feed.
+func (ing *PaperIngester) getAPI(ctx context.Context, reqURL string) ([]byte, error) {
+	return arxiv.GetAPI(ctx, ing.httpClient, ing.limiter, reqURL, arxiv.UserAgent("Query Ingester"), ing.retry)
 }
 
 // NewPaperIngester builds an on-demand ingester. ingestTimeout bounds the /internal/ingest call;
@@ -87,6 +86,7 @@ func NewPaperIngester(database *db.DB, minioClient *minio.Client, minioBucket, e
 		ingestClient: &http.Client{Timeout: ingestTimeout},
 		limiter:      arxiv.NewLimiter(arxiv.DefaultInterval),
 		pdfLimits:    arxiv.DefaultPDFLimits,
+		retry:        arxiv.DefaultRetry,
 	}
 	if minioClient != nil { // a nil *minio.Client must stay a nil interface
 		ing.minioClient = minioClient
@@ -142,21 +142,9 @@ func (ing *PaperIngester) IngestPaper(ctx context.Context, input string) (*Inges
 	log.Printf("[Ingester] Initiating on-demand ingestion for arXiv ID: %s", arxivID)
 
 	// Step 1: Query arXiv Atom API for metadata
-	queryURL := fmt.Sprintf("http://export.arxiv.org/api/query?id_list=%s", arxivID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, queryURL, nil)
+	bodyBytes, err := ing.getAPI(ctx, fmt.Sprintf("%s?id_list=%s", arxiv.APIURL(), arxivID))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create arxiv request: %w", err)
-	}
-
-	resp, err := ing.doArxiv(req)
-	if err != nil {
-		return nil, fmt.Errorf("arxiv API request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read arxiv response: %w", err)
+		return nil, fmt.Errorf("arxiv metadata for %s: %w", arxivID, err)
 	}
 
 	var feed atomFeed
@@ -204,11 +192,17 @@ func (ing *PaperIngester) IngestPaper(ctx context.Context, input string) (*Inges
 
 	// Step 2: Download PDF and Stream to MinIO
 	log.Printf("[Ingester] Downloading PDF from %s...", sourceURL)
-	if err := ing.limiter.Wait(ctx); err != nil {
-		return nil, err
-	}
-	// Stall-based limits, not httpClient's 45 s total: large PDFs arrive slowly but steadily.
-	pdfBytes, err := arxiv.FetchPDF(ctx, ing.httpClient, sourceURL, arxiv.UserAgent("Query Ingester"), ing.pdfLimits)
+	// Stall-based limits, not httpClient's 45 s total: large PDFs arrive slowly but steadily. Fetched via
+	// arxiv.FetchURL (a replay proxy in CI); sourceURL, stored below, stays the canonical arXiv URL.
+	var pdfBytes []byte
+	err = ing.retry.Do(ctx, func() error {
+		if err := ing.limiter.Wait(ctx); err != nil {
+			return err
+		}
+		var ferr error
+		pdfBytes, ferr = arxiv.FetchPDF(ctx, ing.httpClient, arxiv.FetchURL(sourceURL), arxiv.UserAgent("Query Ingester"), ing.pdfLimits)
+		return ferr
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -293,22 +287,10 @@ func (ing *PaperIngester) IngestPaper(ctx context.Context, input string) (*Inges
 
 func (ing *PaperIngester) DiscoverAndIngest(ctx context.Context, query string) (*IngestResult, error) {
 	encodedQuery := url.QueryEscape(query)
-	searchURL := fmt.Sprintf("http://export.arxiv.org/api/query?search_query=all:%s&sortBy=relevance&sortOrder=descending&max_results=1", encodedQuery)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create search request: %w", err)
-	}
-
-	resp, err := ing.doArxiv(req)
+	searchURL := fmt.Sprintf("%s?search_query=all:%s&sortBy=relevance&sortOrder=descending&max_results=1", arxiv.APIURL(), encodedQuery)
+	bodyBytes, err := ing.getAPI(ctx, searchURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search arXiv: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	var feed atomFeed

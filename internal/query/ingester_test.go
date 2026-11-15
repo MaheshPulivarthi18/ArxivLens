@@ -89,6 +89,9 @@ func TestNewPaperIngesterTimeouts(t *testing.T) {
 			if ing.pdfLimits != arxiv.DefaultPDFLimits {
 				t.Fatalf("pdfLimits = %+v, want arxiv.DefaultPDFLimits", ing.pdfLimits)
 			}
+			if ing.retry.Attempts != arxiv.DefaultRetry.Attempts || ing.retry.Base != arxiv.DefaultRetry.Base {
+				t.Fatalf("retry = %+v, want arxiv.DefaultRetry", ing.retry)
+			}
 			if ing.limiter == nil || ing.limiter.Interval() != arxiv.DefaultInterval {
 				t.Fatalf("arXiv limiter not set to DefaultInterval")
 			}
@@ -128,6 +131,7 @@ func newStubIngester(stub *arxivStub) *PaperIngester {
 	ing := NewPaperIngester(nil, nil, "bucket", "", 0)
 	ing.httpClient = &http.Client{Transport: stub, Timeout: 5 * time.Second}
 	ing.limiter = arxiv.NewLimiter(testInterval)
+	ing.retry = arxiv.NoRetry // these tests count requests; retry behaviour is tested in internal/arxiv
 	return ing
 }
 
@@ -224,6 +228,7 @@ func newFakeIngester(t *testing.T, f *ingestFakes, payloads *[]map[string]any) *
 	ing.database, ing.minioClient = f, f
 	ing.httpClient = &http.Client{Transport: f, Timeout: 5 * time.Second}
 	ing.limiter = arxiv.NewLimiter(time.Millisecond)
+	ing.retry = arxiv.NoRetry
 	return ing
 }
 
