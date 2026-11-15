@@ -160,3 +160,17 @@ def test_prefetch_reports_failures(env, tmp_path):
     ids = tmp_path / "c.txt"
     ids.write_text("2401.00001\n")
     assert rp.main(["prefetch", "--dir", str(tmp_path / "store"), "--ids", str(ids)]) == 1
+
+
+def test_prefetch_budget_stops_early_and_reports_saved(env, tmp_path, monkeypatch):
+    up, _ = env
+    up.script = {"api": [(200, FEED, {})], "pdf": [(200, PDF, {})]}
+    ids = tmp_path / "c.txt"
+    ids.write_text("2401.00001\n2401.00002\n2401.00003\n")
+    out = tmp_path / "gh_output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    # A budget already spent after the first query: the rest are reported, what was fetched is kept.
+    clock = iter([0.0, 0.0, 100.0, 100.0, 100.0])
+    monkeypatch.setattr(rp.time, "monotonic", lambda: next(clock, 100.0))
+    assert rp.main(["prefetch", "--dir", str(tmp_path / "s"), "--ids", str(ids), "--budget-seconds", "10"]) == 1
+    assert out.read_text() == "saved=2\n"  # the first query only: its feed and its one PDF (entry "x" -> x.pdf)

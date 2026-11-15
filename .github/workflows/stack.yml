@@ -94,24 +94,27 @@ jobs:
         timeout-minutes: 5
         run: make build-go
 
-      # arXiv record/replay: restore, prefetch whatever is missing (the only step that may contact arXiv), save only
-      # after a complete prefetch, then serve replay-only so an unexpected arXiv request fails loudly (404).
+      # arXiv record/replay: restore the newest store, prefetch whatever is missing (the only step that may contact
+      # arXiv), save if anything was added, then serve replay-only so an unexpected arXiv request fails loudly (404).
       - name: Restore arXiv replay store
-        id: replay
         uses: actions/cache/restore@v4
         with:
           path: .arxiv-replay
-          key: arxiv-replay-${{ runner.os }}-stack-v1
+          key: arxiv-replay-${{ runner.os }}-stack-v1-${{ github.run_id }}
+          restore-keys: arxiv-replay-${{ runner.os }}-stack-v1-
       - name: Prefetch arXiv responses into the replay store
+        id: prefetch
         timeout-minutes: 20
-        run: python3 scripts/arxiv_replay.py prefetch --dir .arxiv-replay --search "cat:cs.LG" --limit 2
+        run: python3 scripts/arxiv_replay.py prefetch --dir .arxiv-replay --search "cat:cs.LG" --limit 2 --budget-seconds 1020
+      # Saved whenever this run recorded something, even if the prefetch was incomplete: each run restores the
+      # newest store (restore-keys prefix) and continues, so recording converges even while arXiv is slow.
       - name: Save arXiv replay store
-        if: steps.replay.outputs.cache-hit != 'true'
+        if: always() && steps.prefetch.outputs.saved != '' && steps.prefetch.outputs.saved != '0'
         timeout-minutes: 5
         uses: actions/cache/save@v4
         with:
           path: .arxiv-replay
-          key: arxiv-replay-${{ runner.os }}-stack-v1
+          key: arxiv-replay-${{ runner.os }}-stack-v1-${{ github.run_id }}
       - name: Start the arXiv replay proxy (replay-only)
         timeout-minutes: 1
         run: |

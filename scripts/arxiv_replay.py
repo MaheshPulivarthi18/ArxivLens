@@ -244,6 +244,8 @@ def main(argv=None) -> int:
     pf.add_argument("--ids", help="file of arXiv IDs (one per line, # comments), fetched as id_list=<id>")
     pf.add_argument("--search", help="crawler search query; fetched as the crawler's first page")
     pf.add_argument("--limit", type=int, default=2)
+    pf.add_argument("--budget-seconds", type=float, default=0,
+                    help="stop starting new queries after this long (0: no limit); progress so far is kept")
     args = ap.parse_args(argv)
 
     if args.cmd == "serve":
@@ -257,10 +259,17 @@ def main(argv=None) -> int:
     queries = [f"id_list={i}" for i in corpus_ids(args.ids)] if args.ids else []
     if args.search:
         queries.append(search_query_string(args.search, args.limit))
-    failed = []
-    for q in queries:
+    failed, deadline = [], time.monotonic() + args.budget_seconds if args.budget_seconds > 0 else None
+    for i, q in enumerate(queries):
+        if deadline is not None and time.monotonic() > deadline:
+            failed += [f"api?{x} (time budget)" for x in queries[i:]]
+            break
         failed += prefetch_query(rec, q)
     print(f"[replay] prefetch: {len(queries)} queries, stats={json.dumps(rec.stats)}", flush=True)
+    # CI saves the store whenever this run added to it, even if incomplete, so recording converges across runs.
+    if os.environ.get("GITHUB_OUTPUT"):
+        with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+            f.write(f"saved={rec.stats['saved']}\n")
     if failed:
         print(f"[replay] prefetch FAILED for {len(failed)}: {' '.join(failed)} "
               "(arXiv unreachable or rate-limiting, and not in the cache)", file=sys.stderr, flush=True)
