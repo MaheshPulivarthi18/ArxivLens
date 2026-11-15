@@ -243,7 +243,9 @@ def test_gated_mode_calls_production_rerank_endpoint(monkeypatch):
     assert calls == [("http://embedder:8081/internal/rerank", "POST",
                       {"query": "what is attention?", "passages": [f"chunk {i}" for i in range(1, 21)]}, 7.0)]
     assert [c for c, _ in out["Hybrid RRF"][0]] == [1, 2, 3, 4, 5]
-    assert [c for c, _ in out[eval_gate.GATED_MODE][0]] == [20, 19, 18, 17, 16]  # ordered by the endpoint's scores
+    # The endpoint's scores drive the order: reversed scores fuse (ADR-0017) to 1/(10+r) + 1/(31-r), so chunks r and
+    # 21-r tie and keep RRF order. Without the scores the gated mode would equal Hybrid RRF ([1, 2, 3, 4, 5]).
+    assert [c for c, _ in out[eval_gate.GATED_MODE][0]] == [1, 20, 2, 19, 3]
 
 
 # --- R3-4 (ADR-0010 parity): pool of 20, one rerank call, stable sort, top 5; SQL mirrors search.go ---
@@ -261,7 +263,9 @@ def test_adr0010_parity_pool_one_call_stable_ties_top5():
     pool_params = [p for sql, p in cur.executed if sql == evaluate_retrieval.RRF_POOL_SQL]
     assert pool_params == [{"vec": "[0.1]", "model": "BAAI/bge-base-en-v1.5", "query": "q", "pool": 20}]
     assert len(calls) == 1 and len(calls[0]) == 20
-    assert [c for c, _ in out[evaluate_retrieval.RERANK_MODE][0]] == [7, 12, 1, 2, 3]
+    # ADR-0017 fused order (k=10): 1 .168, 2 .155, 7 .150, 3 .144, 4 .134, 12 .129, ...; then the ADR-0016 cap
+    # (odd chunks = one paper, even = the other): 3 is the third chunk of its paper, so 4 moves up and 3 fills slot 5.
+    assert [c for c, _ in out[evaluate_retrieval.RERANK_MODE][0]] == [1, 2, 7, 4, 3]
     assert evaluate_retrieval.RRF_POOL_SIZE == 20 and evaluate_retrieval.RESULT_LIMIT == 5
 
 
@@ -279,12 +283,26 @@ def test_diversify_matches_search_go_cases(papers, want):
     assert [c for c, _ in evaluate_retrieval.diversify(hits)] == want
 
 
+@pytest.mark.parametrize("scores,want", [
+    # Same cases as TestHybridSearchRerankOrdersByFusedRank / TestFuseRanksKeepsRerankScores in search_test.go.
+    ([0.99 if r == 8 else 0.5 - r * 0.01 for r in range(1, 21)], [1, 2, 3, 8, 4]),
+    ([float(r) for r in range(1, 21)], [1, 20, 2, 19, 3]),
+    ([1 - r * 0.01 for r in range(1, 21)], [1, 2, 3, 4, 5]),
+    ([0.99 if r == 12 else 0.9 - r * 0.01 for r in range(1, 21)], [1, 2, 3]),
+    ([0.1, 0.9, 0.5], [2, 1, 3]),
+])
+def test_fuse_ranks_matches_search_go_cases(scores, want):
+    assert [i + 1 for i in evaluate_retrieval.fuse_ranks(scores)][:len(want)] == want
+
+
 def test_diversity_constants_match_search_go():
     go = os.path.join(os.path.dirname(EVALS), "internal", "query", "search.go")
     src = open(go, encoding="utf-8").read()
     assert re.search(rf"DiversityWindow\s*=\s*{evaluate_retrieval.DIVERSITY_WINDOW}\b", src)
     assert re.search(rf"PaperCap\s*=\s*{evaluate_retrieval.PAPER_CAP}\b", src)
     assert "hits = diversify(hits, DiversityWindow, PaperCap)" in src
+    assert re.search(rf"FusionK\s*=\s*{evaluate_retrieval.FUSION_K}\b", src)
+    assert "hits = fuseRanks(hits)" in src
 
 
 def test_rerank_pool_empty_makes_no_call():

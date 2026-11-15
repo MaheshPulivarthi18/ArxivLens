@@ -107,6 +107,18 @@ def require_cross_encoder(embedder_url: str = DEFAULT_EMBEDDER_URL, timeout_s: f
 # Mirrors DiversityWindow / PaperCap in internal/query/search.go (ADR-0016); a test checks the values match.
 DIVERSITY_WINDOW = 5
 PAPER_CAP = 2
+# Mirrors FusionK in internal/query/search.go (ADR-0017).
+FUSION_K = 10
+
+
+def fuse_ranks(scores: Sequence[float], k: int = FUSION_K) -> List[int]:
+    """Mirror of fuseRanks() in search.go. `scores` are rerank scores in RRF order; returns pool indices ordered by
+    1/(k + rerank rank) + 1/(k + RRF rank), 1-based ranks, ties keeping RRF order (Python's sort is stable)."""
+    by_score = sorted(range(len(scores)), key=lambda i: -scores[i])
+    key = [0.0] * len(scores)
+    for rank, i in enumerate(by_score):
+        key[i] = 1 / (k + rank + 1) + 1 / (k + i + 1)
+    return sorted(range(len(scores)), key=lambda i: -key[i])
 
 
 def diversify(hits: Sequence[Hit], window: int = DIVERSITY_WINDOW, per_paper: int = PAPER_CAP) -> List[Hit]:
@@ -127,15 +139,16 @@ def diversify(hits: Sequence[Hit], window: int = DIVERSITY_WINDOW, per_paper: in
 
 def rerank_pool(query: str, pool: Sequence[Tuple[int, str, str]], rerank: RerankFn,
                 limit: int = RESULT_LIMIT) -> List[Hit]:
-    """ADR-0010 ordering: one rerank call over the whole (chunk_id, arxiv_id, content) RRF pool, stable sort by
-    score descending (ties keep RRF order), ADR-0016 paper diversity in the first 5, truncate to `limit`. A rerank failure raises (production falls back
+    """ADR-0010 ordering: one rerank call over the whole (chunk_id, arxiv_id, content) RRF pool, ordered by the
+    ADR-0017 fusion of rerank and RRF rank (ties keep RRF order), ADR-0016 paper diversity in the first 5, truncate
+    to `limit`. A rerank failure raises (production falls back
     to RRF order; the eval must fail closed instead of measuring that fallback as the reranker)."""
     if not pool:
         return []
     scores = rerank(query, [c[2] for c in pool])
     if len(scores) != len(pool):
         raise RerankError(f"rerank returned {len(scores)} scores for {len(pool)} passages")
-    order = sorted(range(len(pool)), key=lambda i: -scores[i])  # sorted() is stable
+    order = fuse_ranks(scores)
     return diversify([(pool[i][0], pool[i][1]) for i in order])[:limit]
 
 
