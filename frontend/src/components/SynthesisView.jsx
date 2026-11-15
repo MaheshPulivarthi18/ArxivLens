@@ -4,7 +4,12 @@ import { Card, CardHeader, CardTitle, CardContent, CardFooter } from './ui/card'
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 
-export default function SynthesisView({ answer, traceId, citations, onCitationClick, onCopy }) {
+const SUBTITLES = {
+  quoted: 'Quoted from the papers — every sentence appears verbatim in a cited passage',
+  synthesized: 'Written answer — each claim checked against the passage it cites',
+};
+
+export default function SynthesisView({ answer, traceId, citations, onCitationClick, onCopy, answerKind, refusalReason, writing }) {
   // Parse answer text to render clickable [1], [2] citation badges
   const renderFormattedAnswer = (text) => {
     const parts = [];
@@ -64,7 +69,12 @@ export default function SynthesisView({ answer, traceId, citations, onCitationCl
             <CardTitle className="text-base font-title text-foreground">
               Clinical Literature Synthesis
             </CardTitle>
-            <p className="text-xs text-muted-foreground">Multi-paper grounded answer</p>
+            <p className="text-xs text-muted-foreground">
+              {refusalReason ? 'No verified answer — the passages are shown as evidence' : (SUBTITLES[answerKind] || 'Grounded answer')}
+            </p>
+            {writing && (
+              <p className="text-xs text-emerald-400/80 mt-0.5 animate-pulse" role="status">Writing a summary from these passages…</p>
+            )}
           </div>
         </div>
 

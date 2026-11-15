@@ -11,17 +11,19 @@ import (
 
 // Defaults for the environment config.
 //
-// DefaultTimeout and DefaultMaxTokens are a budget, not a measurement. The
-// /v1/ask p95 target is 3 s (Product PRD §8); search, rerank and citation
-// validation are budgeted at ≤ 1 s, which leaves 2 s for the whole LLM call
-// (both attempts and the backoff). 256 output tokens fits a 4–6 sentence cited
-// answer from a hosted small-tier model in that time. They are a starting
-// point: EVAL-8 measures the real p95. A local 7–8B model on a laptop decodes
-// at roughly 20–30 tok/s and will usually time out at 2 s and fall back to the
-// template answer; raise LLM_TIMEOUT if you accept the slower answer.
+// DefaultTimeout and DefaultMaxTokens are a budget for the second stage of a
+// two-stage answer. A client asks /v1/ask with quick=true and shows the quoted
+// answer (the 3 s p95 target, Product PRD §8), then asks again for the
+// synthesized one; the LLM is never on the path to the first visible answer.
+// The budget therefore fits the default deployment, a local model on the
+// reader's own machine: qwen2.5:3b-instruct on an M-series Mac spends ~6 s
+// reading 1–2k tokens of passages and writes 35–80 output tokens, so 30 s
+// covers slower machines and larger models without hanging forever. A hosted
+// model returns well inside it. Lower LLM_TIMEOUT to fail over to the quoted
+// answer sooner.
 const (
 	DefaultBaseURL   = "http://localhost:11434/v1" // Ollama's OpenAI-compatible API
-	DefaultTimeout   = 2 * time.Second
+	DefaultTimeout   = 30 * time.Second
 	DefaultMaxTokens = 256
 	maxMaxTokens     = 8192
 )

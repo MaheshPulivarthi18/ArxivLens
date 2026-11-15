@@ -50,6 +50,8 @@ type AskRequest struct {
 	Question     string   `json:"question"`
 	Categories   []string `json:"categories,omitempty"`
 	MaxCitations int      `json:"max_citations,omitempty"`
+	// Quick returns the quoted answer without LLM synthesis (first stage of a two-stage answer).
+	Quick bool `json:"quick,omitempty"`
 }
 
 type IngestAPIRequest struct {
@@ -133,7 +135,7 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := s.ragService.Ask(r.Context(), req.Question, req.Categories, req.MaxCitations)
+	resp, err := s.ragService.AskWith(r.Context(), req.Question, req.Categories, req.MaxCitations, AskOptions{Quick: req.Quick})
 	if err != nil {
 		http.Error(w, fmt.Sprintf("rag ask failed: %v", err), http.StatusInternalServerError)
 		return

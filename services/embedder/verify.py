@@ -11,6 +11,13 @@ passed when the whole chunk was the premise). The chunk is therefore split into 
 WINDOW_SENTENCES consecutive sentences and the claim's support is the highest P(entailment) over the
 windows (SummaC-style). On a hand-written probe this gave true claims >= 0.987 and contradictions,
 claim-free sentences, unrelated sentences and other papers' chunks <= 0.051.
+
+Model choice (QA-8, local qwen2.5:3b answers, 31-paper eval corpus). nli-deberta-v3-base looked better on 49
+hand-labelled (claim, passage) pairs (precision 0.93 / recall 0.83 vs 0.91 / 0.70), but end to end it wrongly
+refused 32% of in-corpus questions (small: 9%) and rejected plainly supported paraphrases, e.g. "Latent diffusion
+models run the diffusion process in a compressed latent space to lower computational demands" against the LDM
+Method passage: small 0.981, base 0.002. Both MNLI-trained models are brittle on scientific paraphrase; the next
+step is a grounding-specific verifier (e.g. MiniCheck) calibrated on the EVAL-7 human judgments.
 """
 
 import re
