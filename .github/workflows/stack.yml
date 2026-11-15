@@ -1,7 +1,8 @@
 name: Full stack
 
 # Brings up infra + Python workers in compose, runs the Go downloader and query service on the host,
-# crawls 2 papers to `embedded` and runs `make test-full`. No secrets. 5 arXiv requests per run.
+# crawls 2 papers to `embedded` and runs `make test-full`. No secrets. arXiv is replayed from the Actions cache
+# (scripts/arxiv_replay.py): 0 arXiv requests per run once recorded, ~5 on the recording run.
 on:
   workflow_dispatch:
   pull_request:
@@ -21,6 +22,7 @@ on:
       - go.mod
       - go.sum
       - tests/**
+      - scripts/arxiv_replay.py
 
 permissions:
   contents: read
@@ -43,6 +45,11 @@ jobs:
         tests/test_m3_query.py::test_rag_early_refusal_on_unrelated_query
         tests/test_m3_query.py::test_hybrid_search_with_rrf_and_rerank
       PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
+      # arXiv rate-limits shared runner IPs (429s, timeouts, empty bodies), which failed jobs for reasons unrelated
+      # to the code. Every Go arXiv fetch goes to scripts/arxiv_replay.py instead; its store lives in the Actions
+      # cache, so once recorded a run makes no arXiv requests. Stored source URLs and user-facing links stay canonical.
+      ARXIV_API_URL: http://127.0.0.1:8099/api/query
+      ARXIV_PDF_BASE: http://127.0.0.1:8099/pdf
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -86,6 +93,34 @@ jobs:
       - name: Build Go CLI
         timeout-minutes: 5
         run: make build-go
+
+      # arXiv record/replay: restore the newest store, prefetch whatever is missing (the only step that may contact
+      # arXiv), save if anything was added, then serve replay-only so an unexpected arXiv request fails loudly (404).
+      - name: Restore arXiv replay store
+        uses: actions/cache/restore@v4
+        with:
+          path: .arxiv-replay
+          key: arxiv-replay-${{ runner.os }}-stack-v1-${{ github.run_id }}
+          restore-keys: arxiv-replay-${{ runner.os }}-stack-v1-
+      - name: Prefetch arXiv responses into the replay store
+        id: prefetch
+        timeout-minutes: 20
+        run: python3 scripts/arxiv_replay.py prefetch --dir .arxiv-replay --search "cat:cs.LG" --limit 2 --id 2608.20331 --budget-seconds 1020
+      # Saved whenever this run recorded something, even if the prefetch was incomplete: each run restores the
+      # newest store (restore-keys prefix) and continues, so recording converges even while arXiv is slow.
+      - name: Save arXiv replay store
+        if: always() && steps.prefetch.outputs.saved != '' && steps.prefetch.outputs.saved != '0'
+        timeout-minutes: 5
+        uses: actions/cache/save@v4
+        with:
+          path: .arxiv-replay
+          key: arxiv-replay-${{ runner.os }}-stack-v1-${{ github.run_id }}
+      - name: Start the arXiv replay proxy (replay-only)
+        timeout-minutes: 1
+        run: |
+          nohup python3 scripts/arxiv_replay.py serve --dir .arxiv-replay --port 8099 > arxiv-replay.log 2>&1 &
+          for _ in $(seq 20); do curl -fsS localhost:8099/healthz && exit 0; sleep 0.5; done
+          echo "::error::arXiv replay proxy not up"; cat arxiv-replay.log; exit 1
 
       - name: "AC1: plain docker compose up -d starts infra only"
         timeout-minutes: 5
@@ -251,6 +286,14 @@ jobs:
           [ -s "$t" ] || echo "no embedder rerank timing lines (embedder predates AI-9)" > "$t" || true
           { echo "### Embedder rerank timing"; echo '```'; head -n 200 "$t"; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY" || true
           ls -l stack-logs || true
+
+      - name: arXiv replay stats
+        if: always()
+        timeout-minutes: 1
+        run: |
+          stats="$(curl -fsS localhost:8099/stats || echo unavailable)"; echo "arXiv replay: $stats"
+          echo "arXiv replay: \`$stats\` (misses mean a request the prefetch did not cover)" >> "$GITHUB_STEP_SUMMARY"
+          grep -E ' -> (4|5)[0-9][0-9]' arxiv-replay.log || true
 
       - name: Diagnostics
         if: "failure()"

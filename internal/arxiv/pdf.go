@@ -63,7 +63,7 @@ func FetchPDF(ctx context.Context, client *http.Client, pdfURL, userAgent string
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("arxiv pdf download failed with status %d", resp.StatusCode)
+		return nil, newStatusError(resp)
 	}
 
 	body, err := io.ReadAll(&stallReader{r: io.LimitReader(resp.Body, lim.MaxBytes+1), t: watchdog, d: lim.Stall})
