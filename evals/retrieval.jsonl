@@ -1,34 +1,78 @@
-{"id": "r001", "query": "grounded checklist reward learning medical report interpretation", "relevant_arxiv_ids": ["2608.20331"]}
-{"id": "r002", "query": "active data collection travel behavior weather demand prediction", "relevant_arxiv_ids": ["2608.20320"]}
-{"id": "r003", "query": "patient-oriented multimodal generation clinical factuality", "relevant_arxiv_ids": ["2608.20331"]}
-{"id": "r004", "query": "reinforcement learning multi-agent travel simulation", "relevant_arxiv_ids": ["2608.20320"]}
-{"id": "r005", "query": "sequence transduction model based solely on attention mechanisms without recurrence or convolutions", "relevant_arxiv_ids": ["1706.03762"]}
-{"id": "r006", "query": "masked language model pre-training of deep bidirectional transformers", "relevant_arxiv_ids": ["1810.04805"]}
-{"id": "r007", "query": "robustly optimized BERT pretraining dynamic masking without next sentence prediction", "relevant_arxiv_ids": ["1907.11692"]}
-{"id": "r008", "query": "unified text-to-text framework for transfer learning Colossal Clean Crawled Corpus", "relevant_arxiv_ids": ["1910.10683"]}
-{"id": "r009", "query": "175 billion parameter language model few-shot in-context learning", "relevant_arxiv_ids": ["2005.14165"]}
-{"id": "r010", "query": "combining parametric seq2seq generator with non-parametric dense Wikipedia index for knowledge-intensive tasks", "relevant_arxiv_ids": ["2005.11401"]}
-{"id": "r011", "query": "dual-encoder dense passage retrieval outperforming BM25 for open-domain question answering", "relevant_arxiv_ids": ["2004.04906"]}
-{"id": "r012", "query": "late interaction contextualized embeddings MaxSim efficient passage search", "relevant_arxiv_ids": ["2004.12832"]}
-{"id": "r013", "query": "heterogeneous zero-shot benchmark for evaluating information retrieval models", "relevant_arxiv_ids": ["2104.08663"]}
-{"id": "r014", "query": "general Chinese text embedding benchmark and BGE embedding models", "relevant_arxiv_ids": ["2309.07597"]}
-{"id": "r015", "query": "hierarchical navigable small world graphs approximate nearest neighbor search", "relevant_arxiv_ids": ["1603.09320"]}
-{"id": "r016", "query": "low-rank adaptation freezing pretrained weights injecting trainable rank decomposition matrices", "relevant_arxiv_ids": ["2106.09685"]}
-{"id": "r017", "query": "prompting with intermediate reasoning steps improves arithmetic and commonsense reasoning", "relevant_arxiv_ids": ["2201.11903"]}
-{"id": "r018", "query": "fine-tuning language models with human feedback reward model to follow instructions", "relevant_arxiv_ids": ["2203.02155"]}
-{"id": "r019", "query": "preference optimization without explicit reward model or reinforcement learning", "relevant_arxiv_ids": ["2305.18290"]}
-{"id": "r020", "query": "clipped surrogate objective policy gradient reinforcement learning", "relevant_arxiv_ids": ["1707.06347"]}
-{"id": "r021", "query": "power-law relationship between language model loss and model size dataset size and compute", "relevant_arxiv_ids": ["2001.08361"]}
-{"id": "r022", "query": "compute-optimal training model size and number of tokens should scale equally", "relevant_arxiv_ids": ["2203.15556"]}
-{"id": "r023", "query": "IO-aware exact attention algorithm using tiling to reduce GPU high bandwidth memory reads", "relevant_arxiv_ids": ["2205.14135"]}
-{"id": "r024", "query": "rotary position embedding encoding absolute position with rotation matrix", "relevant_arxiv_ids": ["2104.09864"]}
-{"id": "r025", "query": "residual learning framework with identity shortcut connections for very deep networks", "relevant_arxiv_ids": ["1512.03385"]}
-{"id": "r026", "query": "pure transformer applied to sequences of image patches for image classification", "relevant_arxiv_ids": ["2010.11929"]}
-{"id": "r027", "query": "contrastive pre-training of image and text encoders enabling zero-shot transfer", "relevant_arxiv_ids": ["2103.00020"]}
-{"id": "r028", "query": "denoising diffusion probabilistic model image synthesis weighted variational bound", "relevant_arxiv_ids": ["2006.11239"]}
-{"id": "r029", "query": "diffusion in the latent space of a pretrained autoencoder with cross-attention conditioning", "relevant_arxiv_ids": ["2112.10752"]}
-{"id": "r030", "query": "stochastic optimization with adaptive estimates of first and second moments", "relevant_arxiv_ids": ["1412.6980"]}
-{"id": "r031", "query": "reducing internal covariate shift by normalizing layer inputs over mini-batches", "relevant_arxiv_ids": ["1502.03167"]}
-{"id": "r032", "query": "adversarial minimax game between generator and discriminator networks", "relevant_arxiv_ids": ["1406.2661"]}
-{"id": "r033", "query": "interleaving reasoning traces and task-specific actions in language model agents", "relevant_arxiv_ids": ["2210.03629"]}
-{"id": "r034", "query": "dense retrieval models compared with BM25 for passage retrieval", "relevant_arxiv_ids": ["2004.04906", "2004.12832", "2104.08663"]}
+{"id": "r001", "kind": "abstract-paraphrase", "query": "grounded checklist reward learning medical report interpretation", "relevant_arxiv_ids": ["2608.20331"]}
+{"id": "r002", "kind": "abstract-paraphrase", "query": "active data collection travel behavior weather demand prediction", "relevant_arxiv_ids": ["2608.20320"]}
+{"id": "r003", "kind": "abstract-paraphrase", "query": "patient-oriented multimodal generation clinical factuality", "relevant_arxiv_ids": ["2608.20331"]}
+{"id": "r004", "kind": "abstract-paraphrase", "query": "reinforcement learning multi-agent travel simulation", "relevant_arxiv_ids": ["2608.20320"]}
+{"id": "r005", "kind": "abstract-paraphrase", "query": "sequence transduction model based solely on attention mechanisms without recurrence or convolutions", "relevant_arxiv_ids": ["1706.03762"]}
+{"id": "r006", "kind": "abstract-paraphrase", "query": "masked language model pre-training of deep bidirectional transformers", "relevant_arxiv_ids": ["1810.04805"]}
+{"id": "r007", "kind": "abstract-paraphrase", "query": "robustly optimized BERT pretraining dynamic masking without next sentence prediction", "relevant_arxiv_ids": ["1907.11692"]}
+{"id": "r008", "kind": "abstract-paraphrase", "query": "unified text-to-text framework for transfer learning Colossal Clean Crawled Corpus", "relevant_arxiv_ids": ["1910.10683"]}
+{"id": "r009", "kind": "abstract-paraphrase", "query": "175 billion parameter language model few-shot in-context learning", "relevant_arxiv_ids": ["2005.14165"]}
+{"id": "r010", "kind": "abstract-paraphrase", "query": "combining parametric seq2seq generator with non-parametric dense Wikipedia index for knowledge-intensive tasks", "relevant_arxiv_ids": ["2005.11401"]}
+{"id": "r011", "kind": "abstract-paraphrase", "query": "dual-encoder dense passage retrieval outperforming BM25 for open-domain question answering", "relevant_arxiv_ids": ["2004.04906"]}
+{"id": "r012", "kind": "abstract-paraphrase", "query": "late interaction contextualized embeddings MaxSim efficient passage search", "relevant_arxiv_ids": ["2004.12832"]}
+{"id": "r013", "kind": "abstract-paraphrase", "query": "heterogeneous zero-shot benchmark for evaluating information retrieval models", "relevant_arxiv_ids": ["2104.08663"]}
+{"id": "r014", "kind": "abstract-paraphrase", "query": "general Chinese text embedding benchmark and BGE embedding models", "relevant_arxiv_ids": ["2309.07597"]}
+{"id": "r015", "kind": "abstract-paraphrase", "query": "hierarchical navigable small world graphs approximate nearest neighbor search", "relevant_arxiv_ids": ["1603.09320"]}
+{"id": "r016", "kind": "abstract-paraphrase", "query": "low-rank adaptation freezing pretrained weights injecting trainable rank decomposition matrices", "relevant_arxiv_ids": ["2106.09685"]}
+{"id": "r017", "kind": "abstract-paraphrase", "query": "prompting with intermediate reasoning steps improves arithmetic and commonsense reasoning", "relevant_arxiv_ids": ["2201.11903"]}
+{"id": "r018", "kind": "abstract-paraphrase", "query": "fine-tuning language models with human feedback reward model to follow instructions", "relevant_arxiv_ids": ["2203.02155"]}
+{"id": "r019", "kind": "abstract-paraphrase", "query": "preference optimization without explicit reward model or reinforcement learning", "relevant_arxiv_ids": ["2305.18290"]}
+{"id": "r020", "kind": "abstract-paraphrase", "query": "clipped surrogate objective policy gradient reinforcement learning", "relevant_arxiv_ids": ["1707.06347"]}
+{"id": "r021", "kind": "abstract-paraphrase", "query": "power-law relationship between language model loss and model size dataset size and compute", "relevant_arxiv_ids": ["2001.08361"]}
+{"id": "r022", "kind": "abstract-paraphrase", "query": "compute-optimal training model size and number of tokens should scale equally", "relevant_arxiv_ids": ["2203.15556"]}
+{"id": "r023", "kind": "abstract-paraphrase", "query": "IO-aware exact attention algorithm using tiling to reduce GPU high bandwidth memory reads", "relevant_arxiv_ids": ["2205.14135"]}
+{"id": "r024", "kind": "abstract-paraphrase", "query": "rotary position embedding encoding absolute position with rotation matrix", "relevant_arxiv_ids": ["2104.09864"]}
+{"id": "r025", "kind": "abstract-paraphrase", "query": "residual learning framework with identity shortcut connections for very deep networks", "relevant_arxiv_ids": ["1512.03385"]}
+{"id": "r026", "kind": "abstract-paraphrase", "query": "pure transformer applied to sequences of image patches for image classification", "relevant_arxiv_ids": ["2010.11929"]}
+{"id": "r027", "kind": "abstract-paraphrase", "query": "contrastive pre-training of image and text encoders enabling zero-shot transfer", "relevant_arxiv_ids": ["2103.00020"]}
+{"id": "r028", "kind": "abstract-paraphrase", "query": "denoising diffusion probabilistic model image synthesis weighted variational bound", "relevant_arxiv_ids": ["2006.11239"]}
+{"id": "r029", "kind": "abstract-paraphrase", "query": "diffusion in the latent space of a pretrained autoencoder with cross-attention conditioning", "relevant_arxiv_ids": ["2112.10752"]}
+{"id": "r030", "kind": "abstract-paraphrase", "query": "stochastic optimization with adaptive estimates of first and second moments", "relevant_arxiv_ids": ["1412.6980"]}
+{"id": "r031", "kind": "abstract-paraphrase", "query": "reducing internal covariate shift by normalizing layer inputs over mini-batches", "relevant_arxiv_ids": ["1502.03167"]}
+{"id": "r032", "kind": "abstract-paraphrase", "query": "adversarial minimax game between generator and discriminator networks", "relevant_arxiv_ids": ["1406.2661"]}
+{"id": "r033", "kind": "abstract-paraphrase", "query": "interleaving reasoning traces and task-specific actions in language model agents", "relevant_arxiv_ids": ["2210.03629"]}
+{"id": "r034", "kind": "abstract-paraphrase", "query": "dense retrieval models compared with BM25 for passage retrieval", "relevant_arxiv_ids": ["2004.04906", "2004.12832", "2104.08663"]}
+{"id": "h001", "kind": "body-detail", "query": "what fraction of selected tokens are replaced with a random token instead of the mask token during masked LM pre-training", "relevant_arxiv_ids": ["1810.04805"]}
+{"id": "h002", "kind": "body-detail", "query": "why are dot-product attention scores divided by the square root of the key dimension", "relevant_arxiv_ids": ["1706.03762"]}
+{"id": "h003", "kind": "body-detail", "query": "label smoothing and learning rate warmup schedule used to train the translation model", "relevant_arxiv_ids": ["1706.03762"]}
+{"id": "h004", "kind": "body-detail", "query": "corrupting contiguous spans of tokens with mean span length 3 as the unsupervised objective", "relevant_arxiv_ids": ["1910.10683"]}
+{"id": "h005", "kind": "body-detail", "query": "measuring overlap between the pretraining data and benchmark test sets to check for contamination", "relevant_arxiv_ids": ["2005.14165"]}
+{"id": "h006", "kind": "body-detail", "query": "recomputing attention in the backward pass instead of storing the large intermediate matrix", "relevant_arxiv_ids": ["2205.14135"]}
+{"id": "h007", "kind": "body-detail", "query": "which attention weight matrices are best to adapt under a limited parameter budget, query and value projections", "relevant_arxiv_ids": ["2106.09685"]}
+{"id": "h008", "kind": "body-detail", "query": "mixing pretraining gradients into the PPO updates to reduce performance regressions on public NLP datasets", "relevant_arxiv_ids": ["2203.02155"]}
+{"id": "h009", "kind": "body-detail", "query": "adaptive KL penalty coefficient as an alternative to clipping", "relevant_arxiv_ids": ["1707.06347"]}
+{"id": "h010", "kind": "body-detail", "query": "neighbor selection heuristic that keeps the graph connected for clustered data", "relevant_arxiv_ids": ["1603.09320"]}
+{"id": "h011", "kind": "body-detail", "query": "padding queries with mask tokens as a form of query augmentation", "relevant_arxiv_ids": ["2004.12832"]}
+{"id": "h012", "kind": "body-detail", "query": "in-batch negatives combined with one BM25 hard negative per question during training", "relevant_arxiv_ids": ["2004.04906"]}
+{"id": "h013", "kind": "body-detail", "query": "marginalizing over retrieved documents per output token versus once per sequence", "relevant_arxiv_ids": ["2005.11401"]}
+{"id": "h014", "kind": "body-detail", "query": "bottleneck building block with 1x1, 3x3 and 1x1 convolutions for deeper networks", "relevant_arxiv_ids": ["1512.03385"]}
+{"id": "h015", "kind": "body-detail", "query": "prompt ensembling with templates like a photo of a label to improve zero-shot classification", "relevant_arxiv_ids": ["2103.00020"]}
+{"id": "h016", "kind": "body-detail", "query": "comparing KL and vector-quantization regularization of the autoencoder and the downsampling factor", "relevant_arxiv_ids": ["2112.10752"]}
+{"id": "h017", "kind": "body-detail", "query": "correcting the bias of moment estimates initialized at zero", "relevant_arxiv_ids": ["1412.6980"]}
+{"id": "h018", "kind": "body-detail", "query": "variant of the update rule based on the infinity norm", "relevant_arxiv_ids": ["1412.6980"]}
+{"id": "h019", "kind": "body-detail", "query": "using population statistics instead of mini-batch statistics at inference time", "relevant_arxiv_ids": ["1502.03167"]}
+{"id": "h020", "kind": "body-detail", "query": "generator gradients saturate early in training so maximize log D of generated samples instead", "relevant_arxiv_ids": ["1406.2661"]}
+{"id": "h021", "kind": "body-detail", "query": "reasoning ability only emerges with sufficiently large models around 100 billion parameters", "relevant_arxiv_ids": ["2201.11903"]}
+{"id": "h022", "kind": "body-detail", "query": "long-term decay of inter-token dependency as relative distance increases", "relevant_arxiv_ids": ["2104.09864"]}
+{"id": "h023", "kind": "body-detail", "query": "predicting the added noise with a simplified unweighted training objective", "relevant_arxiv_ids": ["2006.11239"]}
+{"id": "h024", "kind": "body-detail", "query": "annotation bias toward lexical overlap when judging retrieval results", "relevant_arxiv_ids": ["2104.08663"]}
+{"id": "h025", "kind": "own-words", "query": "why does adding more layers make a plain network's training error go up", "relevant_arxiv_ids": ["1512.03385"]}
+{"id": "h026", "kind": "own-words", "query": "how to find the closest vectors quickly in a very large collection", "relevant_arxiv_ids": ["1603.09320"]}
+{"id": "h027", "kind": "own-words", "query": "cheap way to fine-tune a huge language model without updating all its weights", "relevant_arxiv_ids": ["2106.09685"]}
+{"id": "h028", "kind": "own-words", "query": "getting a model to show its working before giving the final answer on math word problems", "relevant_arxiv_ids": ["2201.11903"]}
+{"id": "h029", "kind": "own-words", "query": "making attention faster by being careful about GPU memory traffic", "relevant_arxiv_ids": ["2205.14135"]}
+{"id": "h030", "kind": "own-words", "query": "an agent that thinks out loud and then calls a search tool", "relevant_arxiv_ids": ["2210.03629"]}
+{"id": "h031", "kind": "siblings", "query": "the original BERT was significantly undertrained", "relevant_arxiv_ids": ["1907.11692"]}
+{"id": "h032", "kind": "siblings", "query": "for compute-optimal training the number of training tokens should grow as fast as model size, about 20 tokens per parameter", "relevant_arxiv_ids": ["2203.15556"]}
+{"id": "h033", "kind": "siblings", "query": "larger models are more sample efficient so optimal training stops well before convergence", "relevant_arxiv_ids": ["2001.08361"]}
+{"id": "h034", "kind": "siblings", "query": "optimizing human preferences with a simple classification loss instead of training a separate reward model and running RL", "relevant_arxiv_ids": ["2305.18290"]}
+{"id": "h035", "kind": "siblings", "query": "training diffusion models directly in pixel space is too expensive at high resolution", "relevant_arxiv_ids": ["2112.10752"]}
+{"id": "h036", "kind": "siblings", "query": "zero-shot evaluation of dense retrievers on out-of-domain datasets shows they often lose to BM25", "relevant_arxiv_ids": ["2104.08663"]}
+{"id": "h037", "kind": "siblings", "query": "removing the next sentence prediction loss matches or improves downstream performance", "relevant_arxiv_ids": ["1907.11692"]}
+{"id": "h038", "kind": "siblings", "query": "decoder-only model evaluated with zero, one and few demonstrations in the context window without gradient updates", "relevant_arxiv_ids": ["2005.14165"]}
+{"id": "h039", "kind": "multi", "query": "methods for aligning language models with human preference data", "relevant_arxiv_ids": ["2203.02155", "2305.18290"]}
+{"id": "h040", "kind": "multi", "query": "diffusion models for image generation", "relevant_arxiv_ids": ["2006.11239", "2112.10752"]}
+{"id": "h041", "kind": "multi", "query": "how loss scales with model size, data and compute and the optimal allocation", "relevant_arxiv_ids": ["2001.08361", "2203.15556"]}
+{"id": "h042", "kind": "multi", "query": "sinusoidal versus rotary encodings of token positions in transformers", "relevant_arxiv_ids": ["1706.03762", "2104.09864"]}
+{"id": "h043", "kind": "multi", "query": "bidirectional transformer encoders pretrained with masked language modeling then fine-tuned on downstream tasks", "relevant_arxiv_ids": ["1810.04805", "1907.11692"]}
+{"id": "h044", "kind": "multi", "query": "training encoders that map questions and passages to vectors for first-stage retrieval", "relevant_arxiv_ids": ["2004.04906", "2004.12832", "2309.07597"]}

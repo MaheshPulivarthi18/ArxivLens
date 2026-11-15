@@ -33,6 +33,9 @@ def _corpus():
     return ids
 
 
+# Query kinds in retrieval.jsonl (evals/README.md "Retrieval query kinds").
+RETRIEVAL_KINDS = {"abstract-paraphrase", "body-detail", "own-words", "siblings", "multi"}
+
 SETS = {
     "retrieval.jsonl": ("query", "relevant_arxiv_ids", 30),
     "answer.jsonl": ("question", "expected_arxiv_ids", 20),
@@ -53,8 +56,12 @@ def test_dataset_schema_size_and_corpus_membership(name):
     corpus = set(_corpus())
     assert len(cases) >= min_size
     expected_keys = {"id", text_key} | ({ids_key} if ids_key else set())
+    if name == "retrieval.jsonl":
+        expected_keys |= {"kind"}
     for c in cases:
         assert set(c) == expected_keys, c
+        if name == "retrieval.jsonl":
+            assert c["kind"] in RETRIEVAL_KINDS, c
         assert isinstance(c[text_key], str) and c[text_key].strip()
         if ids_key:
             assert c[ids_key], c
@@ -1146,3 +1153,11 @@ def test_classify_insufficient_evidence_is_a_refusal():
             "citations": [{"marker": 1, "arxiv_id": "2401.00001", "chunk_id": 1, "supported": False, "score": 0}]}
     assert classify(resp) == "refusal"
     assert classify({**resp, "refusal_reason": "something_new"}) == "error"  # unknown reasons still fail closed
+
+
+def test_retrieval_set_covers_every_query_kind():
+    # The harder kinds exist so that hybrid + rerank has room to beat the baselines (an easy set saturates at MRR 1.0).
+    counts = {}
+    for c in _jsonl("retrieval.jsonl"):
+        counts[c["kind"]] = counts.get(c["kind"], 0) + 1
+    assert set(counts) == RETRIEVAL_KINDS and min(counts.values()) >= 6, counts
