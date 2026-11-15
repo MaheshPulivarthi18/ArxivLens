@@ -104,10 +104,31 @@ def require_cross_encoder(embedder_url: str = DEFAULT_EMBEDDER_URL, timeout_s: f
                           "bi-encoder fallback as the production reranker")
 
 
+# Mirrors DiversityWindow / PaperCap in internal/query/search.go (ADR-0016); a test checks the values match.
+DIVERSITY_WINDOW = 5
+PAPER_CAP = 2
+
+
+def diversify(hits: Sequence[Hit], window: int = DIVERSITY_WINDOW, per_paper: int = PAPER_CAP) -> List[Hit]:
+    """Mirror of diversify() in search.go: the first `window` hits hold at most `per_paper` chunks of one paper,
+    taken greedily in rank order; skipped hits keep their order, fill empty window slots, then follow."""
+    head: List[Hit] = []
+    rest: List[Hit] = []
+    count: Dict[str, int] = {}
+    for h in hits:
+        if len(head) < window and count.get(h[1], 0) < per_paper:
+            head.append(h)
+            count[h[1]] = count.get(h[1], 0) + 1
+        else:
+            rest.append(h)
+    fill = max(0, min(window - len(head), len(rest)))
+    return head + rest[:fill] + rest[fill:]
+
+
 def rerank_pool(query: str, pool: Sequence[Tuple[int, str, str]], rerank: RerankFn,
                 limit: int = RESULT_LIMIT) -> List[Hit]:
     """ADR-0010 ordering: one rerank call over the whole (chunk_id, arxiv_id, content) RRF pool, stable sort by
-    score descending (ties keep RRF order), truncate to `limit`. A rerank failure raises (production falls back
+    score descending (ties keep RRF order), ADR-0016 paper diversity in the first 5, truncate to `limit`. A rerank failure raises (production falls back
     to RRF order; the eval must fail closed instead of measuring that fallback as the reranker)."""
     if not pool:
         return []
@@ -115,7 +136,7 @@ def rerank_pool(query: str, pool: Sequence[Tuple[int, str, str]], rerank: Rerank
     if len(scores) != len(pool):
         raise RerankError(f"rerank returned {len(scores)} scores for {len(pool)} passages")
     order = sorted(range(len(pool)), key=lambda i: -scores[i])  # sorted() is stable
-    return [(pool[i][0], pool[i][1]) for i in order[:limit]]
+    return diversify([(pool[i][0], pool[i][1]) for i in order])[:limit]
 
 
 def missing_arxiv_ids(relevant_arxiv_ids: Iterable[str], indexed_rows: Iterable[Sequence[Any]]) -> List[str]:

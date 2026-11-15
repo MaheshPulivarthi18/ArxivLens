@@ -282,3 +282,56 @@ func TestNewSearchEngineWiresSeams(t *testing.T) {
 		t.Fatalf("NewSearchEngine did not wire defaults")
 	}
 }
+
+func paperHits(papers ...string) []SearchHit {
+	hits := make([]SearchHit, len(papers))
+	for i, p := range papers {
+		hits[i] = SearchHit{ChunkID: int64(i + 1), ArxivID: p}
+	}
+	return hits
+}
+
+// ADR-0016: at most PaperCap chunks of one paper in the first DiversityWindow results, greedy in rank order.
+func TestDiversify(t *testing.T) {
+	cases := []struct {
+		name   string
+		papers []string
+		want   []int64
+	}{
+		{"one dominant paper yields its slots", []string{"A", "A", "A", "A", "B", "A", "C"}, []int64{1, 2, 5, 7, 3, 4, 6}},
+		{"already diverse is unchanged", []string{"A", "B", "C", "D", "E", "F"}, []int64{1, 2, 3, 4, 5, 6}},
+		{"one-paper pool still fills the window", []string{"A", "A", "A", "A", "A", "A"}, []int64{1, 2, 3, 4, 5, 6}},
+		{"two papers: cap then fill in rank order", []string{"A", "A", "A", "B", "B", "B"}, []int64{1, 2, 4, 5, 3, 6}},
+		{"shorter than the window", []string{"A", "A", "A"}, []int64{1, 2, 3}},
+		{"empty", nil, []int64{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ids(diversify(paperHits(tc.papers...), DiversityWindow, PaperCap))
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("order = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The reranked path applies the cap: chunks 1-4 of one paper outscore everything, yet the top 5 shows 3 papers.
+func TestHybridSearchRerankDiversifiesTop5(t *testing.T) {
+	var n int
+	e := newEngine(&fakeReranker{scores: byRank(func(r int) float32 { return 1 / float32(r) })}, 20, &n)
+	inner := e.fetch
+	e.fetch = func(ctx context.Context, q string, c []string, k int) ([]SearchHit, error) {
+		hits, err := inner(ctx, q, c, k)
+		for i := 0; i < 4 && i < len(hits); i++ {
+			hits[i].ArxivID = "2401.99999"
+		}
+		return hits, err
+	}
+	hits, err := e.HybridSearch(context.Background(), "q", nil, 5, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(hits); !reflect.DeepEqual(got, []int64{1, 2, 5, 6, 7}) {
+		t.Fatalf("order = %v, want [1 2 5 6 7]", got)
+	}
+}

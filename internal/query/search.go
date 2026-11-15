@@ -18,6 +18,15 @@ import (
 // The pool is max(RerankPool, limit). If latency forces a smaller value, record it in ADR-0010.
 const RerankPool = 20
 
+// Paper diversity in the head of a reranked list (ADR-0016). While the first DiversityWindow results are chosen, a
+// paper may hold at most PaperCap of them; the window is then filled from the remaining hits in rerank order, so a
+// one-paper pool still returns DiversityWindow hits. Below the window the list stays in rerank order. Measured on
+// the 78-case eval: Recall@5 0.95 -> 0.99 and multi-paper Recall@5 0.64 -> 0.86, MRR unchanged (0.96).
+const (
+	DiversityWindow = 5
+	PaperCap        = 2
+)
+
 type SearchHit struct {
 	ChunkID      int64   `json:"chunk_id"`
 	ArxivID      string  `json:"arxiv_id"`
@@ -239,7 +248,34 @@ func rerankAndSort(ctx context.Context, rr reranker, query string, hits []Search
 		hits[i].RerankScore = float64(scores[i])
 	}
 	sort.SliceStable(hits, func(i, j int) bool { return hits[i].RerankScore > hits[j].RerankScore })
+	hits = diversify(hits, DiversityWindow, PaperCap)
 	return hits[:min(limit, len(hits))]
+}
+
+// diversify reorders a ranked list so that its first window entries hold at most perPaper hits from any one paper
+// (ArxivID), taking hits greedily in rank order. Skipped hits keep their relative order and fill any slots the cap
+// leaves empty, then follow the window. The result is a permutation of hits.
+func diversify(hits []SearchHit, window, perPaper int) []SearchHit {
+	if len(hits) <= 1 || window <= 0 || perPaper <= 0 {
+		return hits
+	}
+	head := make([]SearchHit, 0, len(hits))
+	var rest []SearchHit
+	count := map[string]int{}
+	for _, h := range hits {
+		if len(head) < window && count[h.ArxivID] < perPaper {
+			head = append(head, h)
+			count[h.ArxivID]++
+			continue
+		}
+		rest = append(rest, h)
+	}
+	fill := min(window-len(head), len(rest))
+	if fill < 0 {
+		fill = 0
+	}
+	head = append(head, rest[:fill]...)
+	return append(head, rest[fill:]...)
 }
 
 type traceIDKey struct{}
