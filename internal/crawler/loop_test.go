@@ -28,15 +28,20 @@ func at(id string, m int) db.PaperRecord {
 	return p
 }
 
-// fakeFeed serves entries (newest-first) as pages and records each request as "start,n".
+// fakeFeed serves entries (newest-first) as pages and records each request as "start,n". cancel, if set, is
+// called on every request.
 type fakeFeed struct {
 	entries []db.PaperRecord
 	err     error
 	calls   []string
+	cancel  context.CancelFunc
 }
 
 func (f *fakeFeed) Page(_ context.Context, _ string, start, n int) ([]db.PaperRecord, error) {
 	f.calls = append(f.calls, fmt.Sprintf("%d,%d", start, n))
+	if f.cancel != nil {
+		f.cancel()
+	}
 	lo, hi := min(start, len(f.entries)), min(start+n, len(f.entries))
 	return f.entries[lo:hi], f.err
 }
@@ -86,8 +91,11 @@ func TestWalkStopsAtWatermark(t *testing.T) {
 		{"old entry on top, page's last > W: go on", feed(9, 13, 12, 11, 8, 7), true, 3, 100, nil, "0,3 3,3", "p13 p12 p11", 1, ""},
 		{"repeat across pages deduped", feed(15, 14, 13, 13, 12, 9), true, 3, 100, nil, "0,3 3,3", "p15 p14 p13 p12", 0, ""},
 		{"undated ignored, not a boundary", feed(15, -1, 14, -1, -1, -1, 13, 9), true, 3, 100, nil, "0,3 3,3 6,3", "p15 p14 p13", 0, ""},
+		{"page ending [<=W, undated] stops", feed(15, 9, -1, 8, 7, 6), true, 3, 100, nil, "0,3", "p15", 0, ""},
+		{"out_of_order across an undated entry", feed(15, 13, -1, 14, 12, 9), true, 3, 100, nil, "0,3 3,3", "p15 p13 p14 p12", 1, ""},
 		{"short page stops", feed(15, 14, 13, 12), true, 3, 100, nil, "0,3 3,3", "p15 p14 p13 p12", 0, ""},
 		{"first run limit 4", feed(15, 14, 13, 12, 11, 9), false, 4, 100, nil, "0,4", "p15 p14 p13 p12", 0, ""},
+		{"first run: undated not a candidate", feed(15, -1, 14), false, 3, 100, nil, "0,3", "p15 p14", 0, ""},
 		{"first run limit 103: n = remainder", feed(big...), false, 103, 2000, nil, "0,100 100,3", bigWant, 0, ""},
 		{"backlog > maxScan", feed(30, 29, 28, 27, 26, 25, 24, 23), true, 3, 6, nil, "0,3 3,3", "", 0, "exceeds --max-scan 6"},
 		{"fetch error", feed(15), true, 3, 100, errors.New("boom"), "0,3", "", 0, "boom"},
@@ -113,6 +121,14 @@ func TestWalkStopsAtWatermark(t *testing.T) {
 			}
 		})
 	}
+	t.Run("ctx cancelled between requests", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		f := &fakeFeed{entries: feed(15, 14, 13, 12, 11, 9), cancel: cancel}
+		got, _, err := walk(ctx, f, "cs.LG", w, true, 3, 100)
+		if !errors.Is(err, context.Canceled) || got != nil || strings.Join(f.calls, " ") != "0,3" {
+			t.Errorf("got (%q, %v) after requests %q; want context.Canceled, no candidates, one request", ids(got), err, f.calls)
+		}
+	})
 }
 
 func TestSelectBatch(t *testing.T) {
@@ -203,6 +219,18 @@ func TestArxivFeedRequest(t *testing.T) {
 	var se *arxiv.StatusError
 	if !errors.As(err, &se) || se.Code != 503 || got != nil || len(hits()) != 2 {
 		t.Errorf("503 after retries: %d papers, err %v; want *arxiv.StatusError 503 after 2 requests, nothing parsed", len(got), err)
+	}
+}
+
+func TestNewArxivFeedDefaults(t *testing.T) {
+	lim := arxiv.NewLimiter(time.Second)
+	f := NewArxivFeed(http.DefaultClient, lim).(*arxivFeed)
+	r, d := f.retry, arxiv.DefaultRetry
+	if f.client != http.DefaultClient || f.lim != lim || r.Attempts != d.Attempts || r.Base != d.Base || r.Max != d.Max {
+		t.Errorf("NewArxivFeed: client %p lim %p retry %+v; want the given client and limiter, arxiv.DefaultRetry %+v", f.client, f.lim, r, d)
+	}
+	if f = NewArxivFeed(http.DefaultClient, nil).(*arxivFeed); f.lim == nil || f.lim.Interval() != arxiv.DefaultInterval {
+		t.Errorf("NewArxivFeed(client, nil): limiter %+v, want a new arxiv.DefaultInterval limiter", f.lim)
 	}
 }
 
