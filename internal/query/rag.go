@@ -15,6 +15,7 @@ import (
 	"strings"
 	"unicode"
 
+	"arxivlens/internal/arxiv"
 	"arxivlens/internal/llm"
 )
 
@@ -48,6 +49,30 @@ type Citation struct {
 	PDFURL    string  `json:"pdf_url"`
 	Score     float64 `json:"score"`
 	Supported bool    `json:"supported"`
+	// ADR-0014 provenance and verification status (AI-8a).
+	PaperVersion int    `json:"paper_version"`   // papers.version of the cited chunk; 0 = unknown
+	Page         *int   `json:"page,omitempty"`  // start page of the chunk, when recorded
+	Quote        string `json:"quote,omitempty"` // in Content after normQuote; only on supported citations
+	Status       string `json:"status"`          // StatusSupported, StatusUnsupported or StatusUnverified
+}
+
+// Citation statuses (ADR-0014). Unsupported: a check ran and failed. Unverified: no check ran for this citation
+// (the verifier was unavailable, or no statement cited the passage). partially_supported/contradicted are reserved.
+const (
+	StatusSupported   = "supported"
+	StatusUnsupported = "unsupported"
+	StatusUnverified  = "unverified"
+)
+
+// citationStatus is the status of a citation whose score came from labelScore (ok false: not checked).
+func citationStatus(score float64, ok bool) string {
+	switch {
+	case !ok:
+		return StatusUnverified
+	case score >= SupportThreshold:
+		return StatusSupported
+	}
+	return StatusUnsupported
 }
 
 type AskResponse struct {
@@ -214,21 +239,19 @@ func (r *RAGService) synthesize(ctx context.Context, traceID, question string, h
 	case perr != nil:
 		return fallback("malformed_reply")
 	}
-	// Markers refer to passages in prompt order; verify against exactly the (possibly truncated) text sent.
-	phits := passageHits(passages)
 	log.Printf("[Query Service] synthesis trace_id=%s trace_id_source=%s provider=%s model=%s passages=%d claims=%d dropped_claims=%d dropped_markers=%d insufficient=%t prompt_tokens=%d completion_tokens=%d finish=%s llm_ms=%d prompt=%s",
 		id, src, r.llm.Name(), res.Model, len(passages), len(parsed.Claims), parsed.DroppedClaims, parsed.DroppedMarkers,
 		parsed.InsufficientEvidence, res.PromptTokens, res.CompletionTokens, res.FinishReason, res.Latency.Milliseconds(), synthesisPromptVersion)
 	if parsed.InsufficientEvidence {
-		evidence := make([]Citation, len(phits))
-		for i, h := range phits {
-			evidence[i] = newCitation(i+1, h, 0, false)
+		evidence := make([]Citation, len(passages))
+		for i, p := range passages {
+			evidence[i] = newCitation(i+1, p.Hit, 0, StatusUnverified) // nothing was checked
 		}
 		log.Printf("[Query Service] ask refused trace_id=%s trace_id_source=%s reason=%s citations=0 checked=0 unverified=0 evidence=%d",
 			id, src, reasonInsufficientEvidence, len(evidence))
 		return &AskResponse{Answer: refusalInsufficient, Citations: evidence, TraceID: traceID, RefusalReason: reasonInsufficientEvidence}
 	}
-	if resp := r.finalizeClaims(ctx, traceID, parsed.Claims, phits); resp != nil {
+	if resp := r.finalizeClaims(ctx, traceID, parsed.Claims, passages); resp != nil {
 		return resp
 	}
 	// No claim survived verification (or every citation was fabricated). The quoted answer is checked on its own
@@ -238,34 +261,48 @@ func (r *RAGService) synthesize(ctx context.Context, traceID, question string, h
 
 // finalizeClaims verifies every (claim, cited passage) pair and keeps only claims with at least one supported
 // citation: an unverified LLM sentence is never shown. A kept claim lists all its citations, each with its own
-// score and flag. When no claim survives it returns nil and synthesize falls back to the quoted answer.
-func (r *RAGService) finalizeClaims(ctx context.Context, traceID string, claims []synthesisClaim, hits []SearchHit) *AskResponse {
+// score and status. When no claim survives it returns nil and synthesize falls back to the quoted answer.
+// Pairs are scored on the passage text the model saw; citations show, and quotes are checked against, the raw
+// chunk (p.Hit). A model quote not in the raw chunk makes that citation unsupported (ADR-0014) before keep.
+func (r *RAGService) finalizeClaims(ctx context.Context, traceID string, claims []synthesisClaim, passages []contextPassage) *AskResponse {
 	type ref struct{ claim, marker int }
 	var refs []ref
 	var pairs []VerifyPair
 	for i, c := range claims {
 		for _, m := range c.Citations { // parseSynthesis guarantees 1..len(hits), distinct, non-empty
 			refs = append(refs, ref{i, m})
-			pairs = append(pairs, VerifyPair{Claim: c.Text, Passage: hits[m-1].Content})
+			pairs = append(pairs, VerifyPair{Claim: c.Text, Passage: passages[m-1].Text})
 		}
 	}
-	scores, failed, verifyErrs := r.scorePairs(ctx, pairs)
+	scores, failed, exact, verifyErrs := r.scorePairs(ctx, pairs)
 
-	check := citationCheck{hitScore: make([]float64, len(hits)), hitScored: make([]bool, len(hits))}
+	check := citationCheck{hitScore: make([]float64, len(passages)), hitScored: make([]bool, len(passages))}
 	perClaim := make([][]Citation, len(claims))
 	keep := make([]bool, len(claims))
 	for j, rf := range refs {
-		h := rf.marker - 1
+		h, c := rf.marker-1, claims[rf.claim]
+		raw := passages[h].Hit.Content
 		score, ok := labelScore(scores[j], failed[j])
-		if !ok {
+		if ok {
+			check.record(h, score)
+		} else {
 			check.unverified++
-			perClaim[rf.claim] = append(perClaim[rf.claim], newCitation(rf.marker, hits[h], 0, false))
-			continue
 		}
-		check.record(h, score)
-		supported := score >= SupportThreshold
-		keep[rf.claim] = keep[rf.claim] || supported
-		perClaim[rf.claim] = append(perClaim[rf.claim], newCitation(rf.marker, hits[h], score, supported))
+		status := citationStatus(score, ok)
+		modelQuote := normQuote(c.Quote) != "" // condition 1: "", whitespace or "[n]" only is no quote
+		if modelQuote && !inPassage(c.Quote, raw) {
+			status = StatusUnsupported // fabricated provenance: fails closed even when NLI says supported
+		}
+		cite := newCitation(rf.marker, passages[h].Hit, score, status)
+		switch {
+		case !cite.Supported:
+		case exact[j] && inPassage(c.Text, raw):
+			cite.Quote = normQuote(c.Text)
+		case modelQuote:
+			cite.Quote = strings.TrimSpace(c.Quote)
+		}
+		keep[rf.claim] = keep[rf.claim] || cite.Supported
+		perClaim[rf.claim] = append(perClaim[rf.claim], cite)
 	}
 
 	var b strings.Builder
@@ -343,6 +380,13 @@ func normQuote(s string) string {
 func isVerbatimQuote(claim, passage string) bool {
 	c := normQuote(claim)
 	return len(c) >= minAnswerSentence && strings.Contains(normQuote(passage), c)
+}
+
+// inPassage reports whether quote occurs in passage after normQuote (case-sensitive, ADR-0014). Unlike
+// isVerbatimQuote there is no minimum length: a quote never earns support by itself. An empty quote is false.
+func inPassage(quote, passage string) bool {
+	q := normQuote(quote)
+	return q != "" && strings.Contains(normQuote(passage), q)
 }
 
 // answerCandidates returns the quotable sentences of a chunk, in order, with inline references removed.
@@ -551,17 +595,6 @@ func truncateAtWord(text string, maxBytes int) (string, bool) {
 	return prefix, prefix != ""
 }
 
-// passageHits returns the hits behind passages in marker order, each with Content = the text the model saw,
-// so citation validation scores marker n against exactly passage n.
-func passageHits(passages []contextPassage) []SearchHit {
-	out := make([]SearchHit, len(passages))
-	for i, p := range passages {
-		out[i] = p.Hit
-		out[i].Content = p.Text
-	}
-	return out
-}
-
 // buildSynthesisPrompt returns the fixed system prompt and a user prompt with passages as numbered,
 // delimited blocks in marker order, followed by the question.
 func buildSynthesisPrompt(question string, passages []contextPassage) (system, user string) {
@@ -579,7 +612,7 @@ func buildSynthesisPrompt(question string, passages []contextPassage) (system, u
 type synthesisClaim struct {
 	Text      string // trimmed; inline "[n]" markers removed
 	Citations []int  // distinct, in first-seen order, each in 1..k, never empty
-	Quote     string // optional; parsed and kept, not checked or used until AI-8 (ADR-0014)
+	Quote     string // optional; must occur in each cited raw chunk (inPassage), else that citation is unsupported
 }
 
 type synthesisResult struct {
@@ -672,7 +705,8 @@ func (r *RAGService) finalize(ctx context.Context, traceID, answer string, hits 
 }
 
 // refusal is the ADR-0003 refusal: verification_unavailable when any citation could not be checked, else
-// all_citations_unsupported; every hit is returned as evidence with its best checked score, never supported.
+// all_citations_unsupported; every hit is returned as evidence with its best checked score, never supported:
+// unsupported when a citation of it was checked, else unverified (nothing checked it).
 func refusal(ctx context.Context, traceID string, citations int, check citationCheck, hits []SearchHit) *AskResponse {
 	reason, text := reasonAllUnsupported, refusalUnsupported
 	if check.unverified > 0 {
@@ -680,7 +714,11 @@ func refusal(ctx context.Context, traceID string, citations int, check citationC
 	}
 	evidence := make([]Citation, len(hits))
 	for i, h := range hits {
-		evidence[i] = newCitation(i+1, h, check.hitScore[i], false) // 0 when no checked citation scored hit i
+		status := StatusUnverified
+		if check.hitScored[i] {
+			status = StatusUnsupported
+		}
+		evidence[i] = newCitation(i+1, h, check.hitScore[i], status) // 0 when no checked citation scored hit i
 	}
 	id, src := traceIDFrom(ctx)
 	log.Printf("[Query Service] ask refused trace_id=%s trace_id_source=%s reason=%s citations=%d checked=%d unverified=%d evidence=%d",
@@ -688,8 +726,9 @@ func refusal(ctx context.Context, traceID string, citations int, check citationC
 	return &AskResponse{Answer: text, Citations: evidence, TraceID: traceID, RefusalReason: reason}
 }
 
-func newCitation(marker int, hit SearchHit, score float64, supported bool) Citation {
-	return Citation{
+// newCitation is the only Citation constructor: Supported is derived from status, so the two never disagree.
+func newCitation(marker int, hit SearchHit, score float64, status string) Citation {
+	c := Citation{
 		Marker:    marker,
 		ArxivID:   hit.ArxivID,
 		Title:     hit.Title,
@@ -698,8 +737,17 @@ func newCitation(marker int, hit SearchHit, score float64, supported bool) Citat
 		Content:   hit.Content,
 		PDFURL:    fmt.Sprintf("https://arxiv.org/pdf/%s.pdf", hit.ArxivID),
 		Score:     score,
-		Supported: supported,
+		Supported: status == StatusSupported,
 	}
+	c.PaperVersion, c.Status = hit.Version, status
+	if hit.Version > 0 {
+		c.PDFURL = arxiv.PDFURL(hit.ArxivID, hit.Version) // the version that was indexed, not the latest
+	}
+	if hit.Page != nil {
+		p := *hit.Page // copy: the citation must not alias the hit
+		c.Page = &p
+	}
+	return c
 }
 
 // filterRelevantHits applies the relevance cutoff (rerank < 0.45 dropped) and the
@@ -726,7 +774,7 @@ var markerRegex = regexp.MustCompile(`\[(\d+)\]`)
 // validateCitations extracts [n] markers from answer, discards markers outside 1..len(hits), and labels each
 // citation supported when the marker-free sentence is a verbatim quote of the cited chunk (score 1), or else when
 // the NLI verifier's P(entailment) of the sentence by the chunk is >= SupportThreshold. A citation whose support cannot be computed (verifier error, wrong score count, or a
-// score outside [0, 1]) is unsupported with score 0.
+// score outside [0, 1]) is unverified, not supported, with score 0.
 //
 // All distinct non-quote (sentence, chunk) pairs are verified in one VerifyClaims call. No call is made when the
 // answer has no in-range marker or every cited sentence is a verbatim quote.
@@ -791,23 +839,25 @@ func (r *RAGService) checkCitations(ctx context.Context, answer string, hits []S
 			pairs = append(pairs, VerifyPair{Claim: sentTexts[c.sentIdx], Passage: hits[c.hitIdx].Content})
 		}
 	}
-	scores, failed, verifyErrs := r.scorePairs(ctx, pairs)
+	scores, failed, exact, verifyErrs := r.scorePairs(ctx, pairs)
 
 	// 3. Label each citation (§9, QA-4). Fail closed (AI-2): no score, or a score outside [0, 1], leaves the
-	// citation unsupported with score 0.
+	// citation unverified (never supported) with score 0. An exact match quotes its sentence (ADR-0014).
 	validatedCitations := make([]Citation, 0, len(cited))
 	unverified := 0
 	for _, c := range cited {
-		hit := hits[c.hitIdx]
 		pi := pairIndex[pairKey{c.sentIdx, c.hitIdx}]
 		score, ok := labelScore(scores[pi], failed[pi])
-		if !ok {
+		if ok {
+			check.record(c.hitIdx, score)
+		} else {
 			unverified++
-			validatedCitations = append(validatedCitations, newCitation(c.hitIdx+1, hit, 0, false))
-			continue
 		}
-		check.record(c.hitIdx, score)
-		validatedCitations = append(validatedCitations, newCitation(c.hitIdx+1, hit, score, score >= SupportThreshold))
+		cite := newCitation(c.hitIdx+1, hits[c.hitIdx], score, citationStatus(score, ok))
+		if exact[pi] && cite.Supported {
+			cite.Quote = normQuote(sentTexts[c.sentIdx])
+		}
+		validatedCitations = append(validatedCitations, cite)
 	}
 	check.unverified = unverified
 	if unverified > 0 {
@@ -822,21 +872,23 @@ func (r *RAGService) checkCitations(ctx context.Context, answer string, hits []S
 // scorePairs scores each (claim, passage) pair: 1 for a verbatim quote of the passage, else the NLI verifier's
 // P(entailment), all non-quote pairs in one VerifyClaims call. failed[i] is true when pair i needed the verifier
 // and it was unavailable, errored, or returned the wrong number of scores; verifyErrs is 1 then, else 0.
-func (r *RAGService) scorePairs(ctx context.Context, pairs []VerifyPair) (scores []float64, failed []bool, verifyErrs int) {
+// exact[i] is true when pair i scored 1 by the verbatim match.
+func (r *RAGService) scorePairs(ctx context.Context, pairs []VerifyPair) (scores []float64, failed, exact []bool, verifyErrs int) {
 	scores = make([]float64, len(pairs))
 	failed = make([]bool, len(pairs))
+	exact = make([]bool, len(pairs))
 	var nliIdx []int
 	var nliPairs []VerifyPair
 	for i, p := range pairs {
 		if isVerbatimQuote(p.Claim, p.Passage) {
-			scores[i] = 1
+			scores[i], exact[i] = 1, true
 		} else {
 			nliIdx = append(nliIdx, i)
 			nliPairs = append(nliPairs, p)
 		}
 	}
 	if len(nliPairs) == 0 {
-		return scores, failed, 0
+		return scores, failed, exact, 0
 	}
 	var got []float64
 	var err error
@@ -855,7 +907,7 @@ func (r *RAGService) scorePairs(ctx context.Context, pairs []VerifyPair) (scores
 	if err != nil {
 		verifyErrs = 1
 	}
-	return scores, failed, verifyErrs
+	return scores, failed, exact, verifyErrs
 }
 
 // labelScore turns a raw pair score into a citation score. ok is false (fail closed, AI-2) when the pair could not
