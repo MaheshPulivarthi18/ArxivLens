@@ -1168,7 +1168,7 @@ func TestRefusalEvidenceStatus(t *testing.T) {
 	}
 	checkCitationInvariants(t, resp)
 	early, _ := newRAG([]SearchHit{ragHit(1, "Method", 0.2)}, nil).Ask(context.Background(), "q", nil, 3)
-	if early.Citations == nil || len(early.Citations) != 0 {
+	if checkCitationInvariants(t, early); early.Citations == nil || len(early.Citations) != 0 {
 		t.Errorf("early refusal citations = %+v, want []", early.Citations)
 	}
 }
@@ -1178,7 +1178,7 @@ func TestCitationQuote(t *testing.T) {
 	captureLog(t)
 	ctx := context.Background()
 	quoted, _ := newRAG(batchHits(), nil).Ask(ctx, "q", nil, 3) // (a) exact match: the sentence without its marker
-	if len(quoted.Citations) != 3 || quoted.Citations[0].Quote != "The Method section shows that the proposed method improves accuracy on every benchmark." {
+	if checkCitationInvariants(t, quoted); len(quoted.Citations) != 3 || quoted.Citations[0].Quote != "The Method section shows that the proposed method improves accuracy on every benchmark." {
 		t.Errorf("(a) extractive citations %+v", quoted.Citations)
 	}
 	spread := []SearchHit{{ChunkID: 1, ArxivID: "2401.00001", Content: "Paper — Method\n\nWe show that the proposed\nmethod  improves [12] accuracy [3, 4] on every benchmark."}}
@@ -1258,7 +1258,7 @@ func TestCitationProvenance(t *testing.T) {
 		r, _ := llmRAG([]SearchHit{h}, simVerifier(constSim(0.9)), llmtest.Reply(`{"claims": [{"text": "It raises accuracy.", "citations": [1]}]}`))
 		synth, _ := r.Ask(context.Background(), "q", nil, 3)
 		for _, resp := range []*AskResponse{quoted, synth} {
-			if len(resp.Citations) != 1 {
+			if checkCitationInvariants(t, resp); len(resp.Citations) != 1 {
 				t.Fatalf("v%d %s: citations %+v", tc.version, resp.AnswerKind, resp.Citations)
 			}
 			c := resp.Citations[0]
