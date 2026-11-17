@@ -3,6 +3,7 @@ name: Full stack
 # Brings up infra + Python workers in compose, runs the Go downloader and query service on the host,
 # crawls 2 papers to `embedded` and runs `make test-full`. No secrets. arXiv is replayed from the Actions cache
 # (scripts/arxiv_replay.py): 0 arXiv requests per run once recorded, ~5 on the recording run.
+# ING-6 Risk 1: one read-only, never-failing step prints the recorded search feed's `published` order (design ING-6).
 on:
   workflow_dispatch:
   pull_request:
@@ -115,6 +116,40 @@ jobs:
         with:
           path: .arxiv-replay
           key: arxiv-replay-${{ runner.os }}-stack-v1-${{ github.run_id }}
+      - name: "ING-6 Risk 1: published order of recorded search feeds"
+        if: ${{ !cancelled() }}
+        timeout-minutes: 1
+        run: |
+          python3 -I - <<'PY' || echo "::warning::RISK1 probe exited non-zero"
+          import glob, json, xml.etree.ElementTree as ET
+          A = "{http://www.w3.org/2005/Atom}"
+          found = 0
+          for meta in sorted(glob.glob(".arxiv-replay/api/*.json")):
+              try:
+                  q = json.load(open(meta)).get("query", "")
+                  if "sortBy=submittedDate" not in q:
+                      continue
+                  found += 1
+                  print(f"RISK1 query={q}")
+                  dated = []
+                  for n, e in enumerate(ET.parse(meta[:-5]).getroot().iter(A + "entry"), 1):
+                      i, p = (e.findtext(A + "id") or "").split("/abs/", 1)[-1], (e.findtext(A + "published") or "").strip()
+                      print(f"RISK1 entry {n} {i} published={p}")
+                      dated += [(n, p)] if p else []
+                  bad = [(a, b) for a, b in zip(dated, dated[1:]) if a[1] < b[1]]
+                  if len(dated) < 2:
+                      print(f"RISK1 ORDER n/a ({len(dated)} entries)")
+                  elif bad:
+                      (i, p), (j, r) = bad[0]
+                      print(f"RISK1 ORDER NOT descending (first violation: entry {i} {p} < entry {j} {r})")
+                  else:
+                      print("RISK1 ORDER descending")
+              except Exception as err:
+                  print(f"::warning::RISK1 {meta}: {type(err).__name__}: {err}")
+          if not found:
+              print("RISK1 none: no recorded sortBy=submittedDate feed in .arxiv-replay/api")
+              print("::warning::RISK1 none: no recorded sortBy=submittedDate feed in .arxiv-replay/api")
+          PY
       - name: Start the arXiv replay proxy (replay-only)
         timeout-minutes: 1
         run: |
