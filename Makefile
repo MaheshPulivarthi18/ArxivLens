@@ -15,7 +15,7 @@ help: ## List targets
 
 # --- setup -------------------------------------------------------------------
 setup-py: ## Install Python deps into the active environment
-	$(PY) -m pip install -r requirements-m0.txt minio ulid-py fastapi uvicorn opentelemetry-sdk
+	$(PY) -m pip install -r requirements-dev.txt
 
 setup-fe: ## Install frontend deps (exact lockfile)
 	cd frontend && npm ci
