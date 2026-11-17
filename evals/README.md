@@ -22,6 +22,10 @@ make eval                                # = python3 scripts/eval_gate.py; exit 
 python3 scripts/evaluate_retrieval.py    # retrieval only (DATABASE_URL + ARXIVLENS_EMBEDDER_URL, default http://localhost:8081)
 python3 scripts/evaluate_answers.py      # /v1/ask only (ARXIVLENS_API_URL, default http://localhost:8080)
 ```
+In CI, `.github/workflows/eval.yml` runs the full stack, `make eval-seed` and `make eval` nightly (`schedule`) and on
+demand (`workflow_dispatch`: Actions → Eval → Run workflow). The gate table is printed in the job log, the results JSON
+is uploaded as the run artifact `eval-results-<run_id>`, and arXiv is replayed from the Actions cache (#45). The
+reference numbers are in `BASELINE.md`.
 ### Retrieval query kinds
 The first 34 cases paraphrase abstracts with their distinctive keywords, and each targets a paper whose topic no other
 corpus paper shares. Every mode scored near 1.0 on them, so "hybrid + rerank beats BM25 and dense" depended on a single
@@ -41,19 +45,21 @@ The per-kind MRR table is printed and saved as `by_kind` in the results JSON; it
 
 ### What the retrieval gate measures
 Decisions: [ADR-0006](https://github.com/MaheshPulivarthi18/arxivlens-agents/blob/main/docs/adr/0006-recall-at-5-definition.md)
-(metric definition) and [ADR-0010](https://github.com/MaheshPulivarthi18/arxivlens-agents/blob/main/docs/adr/0010-ask-sorts-by-rerank.md)
-(ordering), both in arxivlens-agents.
+(metric definition), [ADR-0010](https://github.com/MaheshPulivarthi18/arxivlens-agents/blob/main/docs/adr/0010-ask-sorts-by-rerank.md),
+[ADR-0017](https://github.com/MaheshPulivarthi18/arxivlens-agents/blob/main/docs/adr/0017-rerank-rank-fusion.md) and
+[ADR-0016](https://github.com/MaheshPulivarthi18/arxivlens-agents/blob/main/docs/adr/0016-top5-paper-diversity.md)
+(ordering), all in arxivlens-agents.
 
 - **Recall@5 (gated, ≥ 0.80) is paper-level.** Each mode returns 5 chunks (the `/v1/ask` default `maxCitations`). They
   are deduped to arXiv IDs in rank order, and Recall@5 = `|top-5 papers ∩ relevant_arxiv_ids| / |relevant_arxiv_ids|`.
   MRR and NDCG@5 use the same paper ranking. Extra chunks from a paper that is already counted do not raise any of them.
 - **`chunk_precision@5` is a diagnostic and is not gated:** `|top-5 chunks from a relevant paper| / 5`. It is printed
   and saved in the results JSON.
-- **Gated mode "Hybrid RRF + Rerank" follows ADR-0010.** The RRF candidate pool of 20 uses the same SQL as
-  `internal/query/search.go` (50 per arm, `ce.model` filter, k = 60). The whole pool is reranked in one
-  `POST /internal/rerank` call to the embedder API's cross-encoder, then stable-sorted by score (ties keep RRF order)
-  and cut to the top 5. **Production `/v1/ask` returns this ordering only once RET-1 merges.** Until then, the gate
-  measures the ADR-0010 target behaviour, not today's `/v1/ask`, which reranks only its RRF top 5 and does not sort.
+- **Gated mode "Hybrid RRF + Rerank" follows ADR-0010, ADR-0017 and ADR-0016.** The RRF candidate pool of 20 uses the
+  same SQL as `internal/query/search.go` (50 per arm, `ce.model` filter, k = 60). The whole pool is reranked in one
+  `POST /internal/rerank` call to the embedder API's cross-encoder, ordered by fusing rerank and RRF ranks (ADR-0017:
+  `1/(10 + rerank rank) + 1/(10 + RRF rank)`, ties keep RRF order), limited to two chunks per paper in the top 5
+  (ADR-0016), and cut to the top 5. This is the ordering production `/v1/ask` returns (RET-1 merged in `bb9ee90`).
   The eval refuses to run if `/healthz` reports `"reranker": false`, because the endpoint would then fall back to
   bi-encoder scores. A rerank error fails the run; it does not fall back to RRF order. The gate also fails unless the
   results record the production rerank path.
