@@ -59,6 +59,7 @@ jobs:
           $PSQL -c "SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'chunk_embeddings' ORDER BY 1;"
           grep -E '^index\|chunk_embeddings_hnsw_idx\|.*USING hnsw \(embedding halfvec_cosine_ops\) WITH \(m=.?16.?, ef_construction=.?64.?\)' /tmp/run1.txt
           grep -E '^index_valid\|chunk_embeddings_hnsw_idx\|true$' /tmp/run1.txt
+          grep -E '^column\|paper_chunk_pages\.page_start\|integer$' /tmp/run1.txt
       - name: Migrate run 2 (idempotent, schema unchanged)
         run: |
           ./bin/arxivlens migrate
