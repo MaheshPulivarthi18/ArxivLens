@@ -38,7 +38,7 @@ quote is verified by quote match or NLI entailment (#44).
 | correct_refusal_rate | >= 0.95 | 1.0000 (summary: 100.00% of 22) | PASS |
 | `/v1/ask` ask_p95_ms | < 3000 | 13330.2916 (summary: 13330) | INFO (cpu-only; not gated) |
 | ask_errors (answer + refusal sets) | == 0 | 0.0000 | PASS |
-| `/v1/search` p95 | < 3000 (PRD §8) | not run: the gate doesn't measure it yet (EVAL-2, ADR-0012 Proposed) | — |
+| `/v1/search` p95 | < 1500 (PRD §8) | not run: the gate doesn't measure it yet (EVAL-2, ADR-0012 Proposed) | — |
 | (info, not gated) chunk_precision@5, Hybrid RRF + Rerank | — | 0.6333 | — |
 | (info) expected_paper_hit_rate | — | 0.9545 (summary: answers citing expected 95.45% of 22) | — |
 | (info) in-corpus refused (answer set) | — | 4.55% (summary line; 1 of 22) | — |
