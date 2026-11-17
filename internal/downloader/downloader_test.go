@@ -1,11 +1,17 @@
 package downloader
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -70,15 +76,30 @@ type downloadFakes struct {
 	urls, puts, dbKeys []string
 	dbVersions         []int
 	published          []events.EventEnvelope
+	// stored is the object already in MinIO (nil: none); status/sha/statusErr answer PaperVersionStatus,
+	// whose requested versions land in lookups.
+	stored      []byte
+	status, sha string
+	statusErr   error
+	lookups     []int
 }
 
 func (f *downloadFakes) RoundTrip(r *http.Request) (*http.Response, error) {
 	f.urls = append(f.urls, r.URL.String())
 	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("%PDF-1.4")), Request: r}, nil
 }
-func (f *downloadFakes) ObjectExists(context.Context, string) (bool, error) { return false, nil }
+func (f *downloadFakes) ObjectExists(context.Context, string) (bool, error) {
+	return f.stored != nil, nil
+}
 func (f *downloadFakes) DownloadPDF(context.Context, string) (io.ReadCloser, error) {
-	return nil, io.EOF
+	if f.stored == nil {
+		return nil, io.EOF
+	}
+	return io.NopCloser(bytes.NewReader(f.stored)), nil
+}
+func (f *downloadFakes) PaperVersionStatus(_ context.Context, _ string, version int) (string, string, error) {
+	f.lookups = append(f.lookups, version)
+	return f.status, f.sha, f.statusErr
 }
 func (f *downloadFakes) UploadPDF(_ context.Context, key string, _ io.Reader, _ int64) error {
 	f.puts = append(f.puts, key)
@@ -118,4 +139,71 @@ func TestHandleRecordFetchesTheEnvelopesVersion(t *testing.T) {
 			t.Errorf("v%d: published %+v, want one papers.downloaded envelope at v%d", tt.envVersion, f.published, tt.want)
 		}
 	}
+}
+
+// A redelivered papers.discovered record is a no-op only when the stored object's bytes match the
+// sha256 of a row that is already embedded; every other case keeps today's path (OPS-H11).
+func TestHandleRecordSkipsAlreadyEmbedded(t *testing.T) {
+	stored := []byte("%PDF-1.4 stored copy")
+	h := sha256.Sum256(stored)
+	same := hex.EncodeToString(h[:])
+	tests := []struct {
+		name                 string
+		envVersion           int
+		stored               []byte
+		status, sha          string
+		statusErr            error
+		wantDB, wantPub      int
+		wantPDF, wantLookups int
+	}{
+		{"a embedded same sha (v0 envelope)", 0, stored, "embedded", same, nil, 0, 0, 0, 1},
+		{"b embedded other sha", 2, stored, "embedded", strings.Repeat("0", 64), nil, 1, 1, 0, 1},
+		{"c embedded empty sha", 1, stored, "embedded", "", nil, 1, 1, 0, 1},
+		{"d chunked same sha", 1, stored, "chunked", same, nil, 1, 1, 0, 1},
+		{"e no row", 1, stored, "", "", nil, 1, 1, 0, 1},
+		{"f lookup error", 1, stored, "embedded", same, errors.New("db down"), 1, 1, 0, 1},
+		{"g not in storage", 1, nil, "embedded", same, nil, 1, 1, 1, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			log.SetOutput(&logs)
+			defer log.SetOutput(os.Stderr)
+			f := &downloadFakes{stored: tt.stored, status: tt.status, sha: tt.sha, statusErr: tt.statusErr}
+			d := &Downloader{database: f, storage: f, bucket: "b", producer: f,
+				client: &http.Client{Transport: f}, limiter: arxiv.NewLimiter(time.Millisecond)}
+			value, _ := json.Marshal(events.NewEventEnvelope(events.TopicPapersDiscovered, "2307.08691", tt.envVersion, nil))
+			if err := d.HandleRecord(context.Background(), &kgo.Record{Value: value}); err != nil {
+				t.Fatalf("HandleRecord = %v, want nil", err)
+			}
+			if len(f.dbKeys) != tt.wantDB || len(f.published) != tt.wantPub || len(f.urls) != tt.wantPDF {
+				t.Errorf("DB updates %d, published %d, PDF requests %d; want %d, %d, %d",
+					len(f.dbKeys), len(f.published), len(f.urls), tt.wantDB, tt.wantPub, tt.wantPDF)
+			}
+			wantV := max(tt.envVersion, 1)
+			if len(f.lookups) != tt.wantLookups || (len(f.lookups) == 1 && f.lookups[0] != wantV) {
+				t.Errorf("status lookups at versions %v, want %d lookup(s) at v%d", f.lookups, tt.wantLookups, wantV)
+			}
+			if len(f.published) == 1 && f.published[0].Payload["sha256"] != hex.EncodeToString(sha256Of(tt.stored)) {
+				t.Errorf("published sha256 %v does not match the PDF bytes", f.published[0].Payload["sha256"])
+			}
+			skipped := strings.Contains(logs.String(), "already embedded with the same sha256; skipping re-publish")
+			if skipped != (tt.wantPub == 0) {
+				t.Errorf("skip log line present = %v, want %v; log:\n%s", skipped, tt.wantPub == 0, logs.String())
+			}
+			if tt.statusErr != nil && !strings.Contains(logs.String(), tt.statusErr.Error()) {
+				t.Errorf("lookup error not logged; log:\n%s", logs.String())
+			}
+		})
+	}
+}
+
+// sha256Of returns the digest of the bytes HandleRecord used: the stored object, else the fetched PDF.
+func sha256Of(stored []byte) []byte {
+	b := stored
+	if b == nil {
+		b = []byte("%PDF-1.4")
+	}
+	h := sha256.Sum256(b)
+	return h[:]
 }

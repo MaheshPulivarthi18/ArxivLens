@@ -1,9 +1,10 @@
 import io
 import json
 import time
+import warnings
 import psycopg
 import pytest
-from confluent_kafka import Consumer, Producer
+from confluent_kafka import Consumer, Producer, TopicPartition
 import ulid
 
 from services.common.config import config
@@ -12,6 +13,7 @@ from services.processor.worker import ProcessorWorker
 from services.embedder.worker import EmbedderWorker
 from shared.events.events import (
     EventEnvelope,
+    TOPIC_PAPERS_DISCOVERED,
     TOPIC_PAPERS_DOWNLOADED,
     TOPIC_PAPERS_DOWNLOADED_DLQ,
     TOPIC_PAPERS_CHUNKED,
@@ -186,3 +188,89 @@ def test_corrupt_pdf_dlq_routing_and_diagnostic_payload():
     assert "stack_trace" in dlq_msg
     assert dlq_msg["attempts"] == 3
     assert dlq_msg["traceparent"] == trace_id_sample
+
+
+def test_redelivered_discovered_keeps_embedded_status():
+    """
+    OPS-H11: a redelivered papers.discovered record for an embedded paper whose PDF is in MinIO
+    with the same sha256 is a no-op for the running downloader (group downloader-v1): the status
+    and updated_at don't change and no papers.downloaded record is appended for that paper.
+    """
+    conn = psycopg.connect(config.postgres_url)
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT arxiv_id, version, status, updated_at FROM papers
+            WHERE status = 'embedded' AND COALESCE(sha256, '') <> '' AND pdf_storage_key IS NOT NULL
+            ORDER BY arxiv_id, version LIMIT 1;
+        """)
+        row = cur.fetchone()
+    if row is None:
+        conn.close()
+        reason = "no embedded paper with a stored sha256 in papers (crawl one to embedded first)"
+        warnings.warn(reason)
+        pytest.skip(reason)
+    arxiv_id, version, status_before, updated_before = row
+
+    brokers = config.kafka_brokers
+    reader = Consumer({"bootstrap.servers": brokers, "group.id": f"ops-h11-{ulid.new()}", "enable.auto.commit": False})
+    parts = sorted(reader.list_topics(TOPIC_PAPERS_DOWNLOADED, timeout=10).topics[TOPIC_PAPERS_DOWNLOADED].partitions)
+    ends = {p: reader.get_watermark_offsets(TopicPartition(TOPIC_PAPERS_DOWNLOADED, p), timeout=10)[1] for p in parts}
+
+    envelope = EventEnvelope(
+        event_id=str(ulid.new()),
+        event_type=TOPIC_PAPERS_DISCOVERED,
+        occurred_at="2026-11-17T00:00:00Z",
+        paper_id=arxiv_id,
+        version=version,
+        payload={"arxiv_id": arxiv_id, "version": version},
+    )
+    delivered = []
+    producer = Producer({"bootstrap.servers": brokers})
+    producer.produce(
+        TOPIC_PAPERS_DISCOVERED,
+        key=arxiv_id.encode("utf-8"),
+        value=json.dumps(envelope.model_dump()).encode("utf-8"),
+        on_delivery=lambda err, msg: delivered.append((err, msg.partition(), msg.offset())),
+    )
+    producer.flush(10)
+    assert len(delivered) == 1 and delivered[0][0] is None, f"produce failed: {delivered}"
+    _, partition, offset = delivered[0]
+
+    group = Consumer({"bootstrap.servers": brokers, "group.id": "downloader-v1", "enable.auto.commit": False})
+    committed = -1
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        committed = group.committed([TopicPartition(TOPIC_PAPERS_DISCOVERED, partition)], timeout=10)[0].offset
+        if committed > offset:
+            break
+        time.sleep(1)
+    group.close()
+    assert committed > offset, (
+        f"downloader-v1 did not commit past {TOPIC_PAPERS_DISCOVERED}[{partition}]@{offset} within 60 s (committed={committed})"
+    )
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT status, updated_at FROM papers WHERE arxiv_id = %s AND version = %s;", (arxiv_id, version))
+        status_after, updated_after = cur.fetchone()
+    conn.close()
+    assert status_after == status_before == "embedded", f"{arxiv_id} v{version} status {status_before} -> {status_after}"
+    assert updated_after == updated_before, f"{arxiv_id} v{version} updated_at {updated_before} -> {updated_after}"
+
+    # Read every papers.downloaded record appended after the recorded end offsets.
+    new_ends = {p: reader.get_watermark_offsets(TopicPartition(TOPIC_PAPERS_DOWNLOADED, p), timeout=10)[1] for p in parts}
+    todo = {p for p in parts if new_ends[p] > ends[p]}
+    appended = []
+    if todo:
+        reader.assign([TopicPartition(TOPIC_PAPERS_DOWNLOADED, p, ends[p]) for p in sorted(todo)])
+        deadline = time.time() + 30
+        while todo and time.time() < deadline:
+            msg = reader.poll(timeout=1.0)
+            if msg is None or msg.error():
+                continue
+            if msg.offset() >= new_ends[msg.partition()] - 1:
+                todo.discard(msg.partition())
+            if json.loads(msg.value().decode("utf-8")).get("paper_id") == arxiv_id:
+                appended.append((msg.partition(), msg.offset()))
+    reader.close()
+    assert not todo, f"could not read papers.downloaded partitions {sorted(todo)} up to {new_ends}"
+    assert not appended, f"papers.downloaded re-published for {arxiv_id} at (partition, offset) {appended}"

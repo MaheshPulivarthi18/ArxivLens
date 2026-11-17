@@ -23,6 +23,7 @@ import (
 // that HandleRecord uses, so it can be unit-tested with fakes.
 type paperDB interface {
 	UpdatePaperDownloaded(ctx context.Context, arxivID string, version int, storageKey, sha256 string) error
+	PaperVersionStatus(ctx context.Context, arxivID string, version int) (status, sha256 string, err error)
 }
 
 type pdfStore interface {
@@ -97,6 +98,19 @@ func (d *Downloader) HandleRecord(ctx context.Context, record *kgo.Record) error
 			obj.Close()
 			h := sha256.Sum256(pdfBytes)
 			sha256Hex = hex.EncodeToString(h[:])
+		}
+	}
+
+	// A redelivered/replayed record for a paper that is already embedded with these exact bytes is a
+	// no-op (OPS-H6 G1): no status regression, no duplicate downstream events. Anything else (other
+	// status, sha mismatch or unknown, lookup error) falls through to reprocessing.
+	if len(pdfBytes) > 0 {
+		status, storedSHA, lerr := d.database.PaperVersionStatus(ctx, arxivID, version)
+		if lerr != nil {
+			log.Printf("[Downloader] Warning reading status of %s v%d: %v; reprocessing", arxivID, version, lerr)
+		} else if status == "embedded" && storedSHA != "" && storedSHA == sha256Hex {
+			log.Printf("[Downloader] %s v%d already embedded with the same sha256; skipping re-publish (event_id=%s)", arxivID, version, envelope.EventID)
+			return nil
 		}
 	}
 
