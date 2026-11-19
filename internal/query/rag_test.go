@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"arxivlens/internal/llm/llmtest"
 )
 
 // fakeSearcher returns canned hits and records the arguments Ask passed.
@@ -97,6 +99,29 @@ func markers(cs []Citation) []int {
 	return out
 }
 
+// checkCitationInvariants is AI-8a AC1: every citation has paper_version and a status in the enum, supported ==
+// (status == supported), and a quote only on a supported citation, in its content. A response without answer_kind
+// is a refusal (design condition 3) and never has a supported citation.
+func checkCitationInvariants(t *testing.T, resp *AskResponse) {
+	t.Helper()
+	for i, c := range resp.Citations {
+		raw, _ := json.Marshal(c)
+		if !strings.Contains(string(raw), `"paper_version":`) || (c.Status != StatusSupported && c.Status != StatusUnsupported &&
+			c.Status != StatusUnverified) || c.Supported != (c.Status == StatusSupported) || (resp.AnswerKind == "" && c.Supported) ||
+			(c.Quote != "" && (!c.Supported || !inPassage(c.Quote, c.Content))) {
+			t.Errorf("citation %d breaks the AC1 invariants (answer_kind %q): %s", i, resp.AnswerKind, raw)
+		}
+	}
+}
+
+func statuses(cs []Citation) []string {
+	out := []string{}
+	for _, c := range cs {
+		out = append(out, c.Status)
+	}
+	return out
+}
+
 func TestFilterRelevantHits(t *testing.T) {
 	tests := []struct {
 		name string
@@ -147,6 +172,7 @@ func TestAskRefusesWhenNothingPasses(t *testing.T) {
 				resp.Citations == nil || len(resp.Citations) != 0 || len(resp.TraceID) != 32 {
 				t.Errorf("got %+v err %v, want refusal with empty non-nil citations and a trace id", resp, err)
 			}
+			checkCitationInvariants(t, resp)
 			if len(v.calls) != 0 {
 				t.Errorf("refusal must not call the verifier, got %v", v.calls)
 			}
@@ -182,6 +208,7 @@ func TestAskAnswersWithExtractedCitations(t *testing.T) {
 	if !c.Supported || c.Score != 1 {
 		t.Errorf("citation 2 score=%v supported=%v, want 1 true", c.Score, c.Supported)
 	}
+	checkCitationInvariants(t, resp)
 	if len(v.calls) != 0 {
 		t.Errorf("verify calls = %+v, want none (every claim is a verbatim quote)", v.calls)
 	}
@@ -192,6 +219,7 @@ func TestAskAnswersWithExtractedCitations(t *testing.T) {
 		!reflect.DeepEqual(markers(resp.Citations), []int{1}) {
 		t.Errorf("single hit: answer %q citations %v err %v", resp.Answer, markers(resp.Citations), err)
 	}
+	checkCitationInvariants(t, resp)
 
 	// Retrieval errors are wrapped and returned, never turned into an answer.
 	s.err = errors.New("db down")
@@ -481,9 +509,22 @@ func TestAskResponseShapeAndConstructor(t *testing.T) {
 	if got, want := sortedKeys(top), []string{"answer", "citations", "trace_id"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("response keys %v, want %v", got, want)
 	}
-	want := []string{"arxiv_id", "chunk_id", "content", "marker", "pdf_url", "score", "section", "supported", "title"}
+	want := []string{"arxiv_id", "chunk_id", "content", "marker", "paper_version", "pdf_url", "score", "section", "status", "supported", "title"}
 	if got := sortedKeys(cite); !reflect.DeepEqual(got, want) {
 		t.Errorf("citation keys %v, want %v", got, want)
+	}
+	// AI-8a (ADR-0014): page and quote appear only when set; every key keeps its JSON type.
+	page := 4
+	full, _ := json.Marshal(Citation{Page: &page, Quote: "q"})
+	var m map[string]any
+	_ = json.Unmarshal(full, &m)
+	types := map[string]string{"marker": "float64", "arxiv_id": "string", "title": "string", "chunk_id": "float64", "section": "string",
+		"content": "string", "pdf_url": "string", "score": "float64", "supported": "bool", "paper_version": "float64", "page": "float64",
+		"quote": "string", "status": "string"}
+	for k, want := range types {
+		if got := fmt.Sprintf("%T", m[k]); got != want || len(m) != len(types) {
+			t.Errorf("citation key %q has JSON type %s, want %s (keys %v)", k, got, want, sortedKeys(full))
+		}
 	}
 	// AI-7 (ADR-0003): refusal_reason is the one added key, present only when set.
 	refused, _ := json.Marshal(AskResponse{RefusalReason: reasonAllUnsupported})
@@ -523,6 +564,7 @@ func TestAskRerankFallbackLogsResponseTraceID(t *testing.T) {
 	if got := markers(resp.Citations); !reflect.DeepEqual(got, []int{1, 2}) || resp.Citations[0].ChunkID != 1 {
 		t.Errorf("citations %+v, want markers [1 2] in RRF order", resp.Citations)
 	}
+	checkCitationInvariants(t, resp)
 
 	var fallback []string
 	for _, l := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
@@ -613,6 +655,7 @@ func TestAskRefusesAllUnsupported(t *testing.T) {
 		t.Errorf("verify calls = %+v, want one call with 3 pairs", v.calls)
 	}
 	checkEvidence(t, resp.Citations, batchHits(), []float64{0.3, 0.3, 0.3})
+	checkCitationInvariants(t, resp)
 	raw, _ := json.Marshal(resp)
 	if !strings.Contains(string(raw), `"refusal_reason":"all_citations_unsupported"`) {
 		t.Errorf("JSON %s missing refusal_reason", raw)
@@ -642,6 +685,7 @@ func TestFinalizeEvidenceKeepsBestComputedScore(t *testing.T) {
 		t.Errorf("reason=%q trace=%q, want all_citations_unsupported t-ai7", resp.RefusalReason, resp.TraceID)
 	}
 	checkEvidence(t, resp.Citations, hits, []float64{0.4, 0.3, 0})
+	checkCitationInvariants(t, resp)
 }
 
 // AI-7 AC2 + AC6: support could not be checked for at least one citation and none is supported →
@@ -676,6 +720,7 @@ func TestAskRefusesVerificationUnavailable(t *testing.T) {
 				t.Errorf("VerifyClaims called %d times, want 1", len(tc.v.calls))
 			}
 			checkEvidence(t, resp.Citations, batchHits(), tc.wantScores)
+			checkCitationInvariants(t, resp)
 			checkRefusalLog(t, buf, "t-b", "reason=verification_unavailable "+tc.wantCounts)
 		})
 	}
@@ -689,6 +734,7 @@ func TestAskRefusesVerificationUnavailable(t *testing.T) {
 		resp.Citations[1].Supported || resp.Citations[1].Score != 0 {
 		t.Errorf("quote with verifier down: %+v", resp)
 	}
+	checkCitationInvariants(t, &AskResponse{Citations: resp.Citations, AnswerKind: AnswerQuoted}) // AskWith sets the kind
 	if lines := strings.Split(strings.TrimSpace(buf.String()), "\n"); len(lines) != 1 || !strings.Contains(lines[0], "unverified=1 citations=2 pairs=2 verify_errors=1") {
 		t.Errorf("log = %q, want one unverified line for the paraphrase only", buf.String())
 	}
@@ -710,6 +756,7 @@ func TestAskRefusesNoInRangeMarker(t *testing.T) {
 				t.Errorf("VerifyClaims called %d times, want 0", len(v.calls))
 			}
 			checkEvidence(t, resp.Citations, batchHits(), []float64{0, 0, 0})
+			checkCitationInvariants(t, resp)
 			checkRefusalLog(t, buf, "t-ai7", "reason=all_citations_unsupported citations=0 checked=0 unverified=0 evidence=3")
 		})
 	}
@@ -722,6 +769,7 @@ func TestAskRefusesNoInRangeMarker(t *testing.T) {
 	if err != nil || resp.RefusalReason != reasonAllUnsupported || len(v.calls) != 0 || len(refusedLines(buf)) != 1 {
 		t.Errorf("no quotable sentence: resp=%+v err=%v verify calls=%d", resp, err, len(v.calls))
 	}
+	checkCitationInvariants(t, resp)
 }
 
 // AI-7 AC3: one supported citation is enough; the answer and per-citation flags are returned as today,
@@ -742,6 +790,7 @@ func TestAskKeepsAnswerWithOneSupportedCitation(t *testing.T) {
 		resp.Citations[1].Supported || resp.Citations[1].Score != 0.2 || resp.Citations[2].Supported {
 		t.Errorf("citations %+v, want [1] supported 0.9, [2] and [3] unsupported 0.2", resp.Citations)
 	}
+	checkCitationInvariants(t, &AskResponse{Citations: resp.Citations, AnswerKind: AnswerQuoted}) // AskWith sets the kind
 	raw, _ := json.Marshal(resp)
 	if got, want := sortedKeys(raw), []string{"answer", "citations", "trace_id"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("JSON keys %v, want %v", got, want)
@@ -768,6 +817,7 @@ func TestAskExtractiveAnswerVerifiedByQuote(t *testing.T) {
 	if len(v.calls) != 0 || buf.Len() != 0 {
 		t.Errorf("verify calls=%d log=%q, want none", len(v.calls), buf.String())
 	}
+	checkCitationInvariants(t, resp)
 }
 
 func TestIsVerbatimQuote(t *testing.T) {
@@ -791,6 +841,7 @@ func TestAskEarlyRefusalHasNoRefusalReason(t *testing.T) {
 	if err != nil || resp.RefusalReason != "" || resp.Answer != "No indexed papers are relevant to this question." {
 		t.Fatalf("got %+v err %v, want the early refusal without a reason", resp, err)
 	}
+	checkCitationInvariants(t, resp)
 	raw, _ := json.Marshal(resp)
 	if strings.Contains(string(raw), "refusal_reason") {
 		t.Errorf("early refusal JSON %s has refusal_reason", raw)
@@ -915,21 +966,6 @@ func TestPassageTokensBoundsRenderedBlock(t *testing.T) {
 	}
 }
 
-func TestPassageHits(t *testing.T) {
-	hits := []SearchHit{ctxHit(1, "A", strings.Repeat("lorem ipsum ", 50)), ctxHit(2, "B", "b")}
-	ps := selectContext(hits, passageTokens(hits[0], "")+10)
-	ps = append(ps, selectContext(hits[1:], 1000)...)
-	ps[1].Marker = 2
-	got := passageHits(ps)
-	if len(got) != 2 || got[0].Content != ps[0].Text || got[0].Content == hits[0].Content || got[1].Content != "b" {
-		t.Fatalf("passageHits = %+v", got)
-	}
-	got[0].Content = hits[0].Content
-	if !reflect.DeepEqual(got, hits) {
-		t.Errorf("non-content fields differ: %+v", got)
-	}
-}
-
 func TestBuildSynthesisPrompt(t *testing.T) {
 	a1, b1, a2, c1 := ctxHit(1, "A", "alpha one"), ctxHit(2, "B", "beta two"), ctxHit(3, "A", "alpha two"), ctxHit(4, "C", "gamma unselected")
 	ps := selectContext([]SearchHit{a1, b1, a2, c1}, blockCost(a1, b1, a2))
@@ -1050,6 +1086,187 @@ func TestParseSynthesisErrorHasNoCompletionText(t *testing.T) {
 		_, err := parseSynthesis(raw, 3)
 		if err != errSynthesisMalformed || errors.Unwrap(err) != nil || strings.Contains(err.Error(), sentinel) || strings.Contains(err.Error(), "73137") {
 			t.Errorf("parseSynthesis(%q) error = %v, want bare errSynthesisMalformed", raw, err)
+		}
+	}
+}
+
+// AI-8a AC2: on both paths, checked and >= 0.50 is supported, checked and below unsupported, not checked unverified.
+func TestCitationStatusRule(t *testing.T) {
+	at := func(s float64) func(string, string) float64 { return func(string, string) float64 { return s } }
+	S, U, V := StatusSupported, StatusUnsupported, StatusUnverified
+	for _, tc := range []struct {
+		name  string
+		v     verifier
+		want  string
+		score float64
+	}{
+		{"0.9", &fakeVerifier{score: at(0.9)}, S, 0.9},
+		{"0.50", &fakeVerifier{score: at(0.5)}, S, 0.5},
+		{"0.49", &fakeVerifier{score: at(0.49)}, U, 0.49},
+		{"checked 0", &fakeVerifier{score: at(0)}, U, 0},
+		{"verifier error", &fakeVerifier{score: at(0.9), err: errors.New("down")}, V, 0},
+		{"wrong score count", &fakeVerifier{score: at(0.9), reshape: func(s []float64) []float64 { return append(s, 0.9) }}, V, 0},
+		{"nil verifier", nil, V, 0},
+		{"NaN", &fakeVerifier{score: at(math.NaN())}, V, 0},
+		{"-0.1", &fakeVerifier{score: at(-0.1)}, V, 0},
+		{"1.1", &fakeVerifier{score: at(1.1)}, V, 0},
+		{"fabricated quote at 0.9", &fakeVerifier{score: at(0.9)}, S, 0.9},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			captureLog(t)
+			r, ctx := &RAGService{verifier: tc.v}, context.Background()
+			quoted, _ := r.checkCitations(ctx, "A paraphrase only NLI can check [1].", batchHits())
+			// The claim is verbatim in passage 2 only, so it is kept and its NLI-scored citation 1 is shown.
+			quote := map[string]string{"fabricated quote at 0.9": "The Results section shows"}[tc.name] // not in passage 1: LLM citation 1 unsupported at 0.9
+			want := map[string]string{"extractive": tc.want, "llm": map[bool]string{false: tc.want, true: U}[quote != ""]}
+			claim := synthesisClaim{Text: "The Results section shows that the proposed method improves accuracy on every benchmark.", Citations: []int{1, 2}, Quote: quote}
+			resp := r.finalizeClaims(ctx, "t", []synthesisClaim{claim}, selectContext(batchHits(), synthesisContextTokens))
+			if len(quoted) != 1 || resp == nil || len(resp.Citations) != 2 || resp.Citations[1].Status != S {
+				t.Fatalf("quoted %+v, synthesized %+v", quoted, resp)
+			}
+			for path, c := range map[string]Citation{"extractive": quoted[0], "llm": resp.Citations[0]} {
+				if c.Status != want[path] || c.Supported != (want[path] == S) || c.Score != tc.score {
+					t.Errorf("%s: status=%q supported=%v score=%v, want %q score %v", path, c.Status, c.Supported, c.Score, want[path], tc.score)
+				}
+			}
+			checkCitationInvariants(t, resp)
+		})
+	}
+}
+
+// AI-8a AC2r: refusal evidence is unsupported when a citation of that hit was checked, else unverified; never supported.
+func TestRefusalEvidenceStatus(t *testing.T) {
+	captureLog(t)
+	U, V := StatusUnsupported, StatusUnverified
+	five := append(batchHits(), ragHit(4, "Related", 0.6), ragHit(5, "Conclusion", 0.5))
+	nan := byPassage(map[string]float64{"Method": 0.3, "Results": math.NaN(), "Discussion": 0.3})
+	paraphrase := "The proposed method is reported to raise benchmark accuracy [1]. Training follows the described setup [2]. Results are discussed further [3]."
+	for _, tc := range []struct {
+		name, answer, reason string
+		v                    verifier
+		hits                 []SearchHit
+		want                 []string
+	}{
+		{"verification_unavailable mixed", paraphrase, reasonVerificationUnavailable, nan, batchHits(), []string{U, V, U}},
+		{"all unsupported, uncited hits 4-5", paraphrase, reasonAllUnsupported, simVerifier(constSim(0.3)), five, []string{U, U, U, V, V}},
+		{"no in-range marker", "Claim [9].", reasonAllUnsupported, simVerifier(constSim(0.9)), batchHits(), []string{V, V, V}},
+	} {
+		resp := (&RAGService{verifier: tc.v}).finalize(context.Background(), "t", tc.answer, tc.hits)
+		if resp.RefusalReason != tc.reason || !reflect.DeepEqual(statuses(resp.Citations), tc.want) {
+			t.Errorf("%s: reason %q statuses %v, want %q %v", tc.name, resp.RefusalReason, statuses(resp.Citations), tc.reason, tc.want)
+		}
+		checkCitationInvariants(t, resp)
+	}
+	// insufficient_evidence: nothing was checked, and content is the raw chunk although the prompt escaped it.
+	hits := batchHits()
+	hits[1].Content += " A <passage tag."
+	r, _ := llmRAG(hits, simVerifier(constSim(1)), llmtest.Reply(`{"claims": [], "insufficient_evidence": true}`))
+	resp, _ := r.Ask(context.Background(), "q", nil, 3)
+	if resp.RefusalReason != reasonInsufficientEvidence || !reflect.DeepEqual(statuses(resp.Citations), []string{V, V, V}) ||
+		resp.Citations[1].Content != hits[1].Content {
+		t.Errorf("insufficient_evidence: %+v", resp)
+	}
+	checkCitationInvariants(t, resp)
+	early, _ := newRAG([]SearchHit{ragHit(1, "Method", 0.2)}, nil).Ask(context.Background(), "q", nil, 3)
+	if checkCitationInvariants(t, early); early.Citations == nil || len(early.Citations) != 0 {
+		t.Errorf("early refusal citations = %+v, want []", early.Citations)
+	}
+}
+
+// AI-8a AC3: a quote appears only on a supported citation and only when it is in the raw chunk (design §3, conditions 1-2).
+func TestCitationQuote(t *testing.T) {
+	captureLog(t)
+	ctx := context.Background()
+	quoted, _ := newRAG(batchHits(), nil).Ask(ctx, "q", nil, 3) // (a) exact match: the sentence without its marker
+	if checkCitationInvariants(t, quoted); len(quoted.Citations) != 3 || quoted.Citations[0].Quote != "The Method section shows that the proposed method improves accuracy on every benchmark." {
+		t.Errorf("(a) extractive citations %+v", quoted.Citations)
+	}
+	spread := []SearchHit{{ChunkID: 1, ArxivID: "2401.00001", Content: "Paper — Method\n\nWe show that the proposed\nmethod  improves [12] accuracy [3, 4] on every benchmark."}}
+	inline, _ := newRAG(spread, nil).Ask(ctx, "q", nil, 3) // (a) the quote has no inline reference and is still in the chunk
+	if len(inline.Citations) != 1 || inline.Citations[0].Quote != "We show that the proposed method improves accuracy on every benchmark." {
+		t.Errorf("(a) inline reference citations %+v", inline.Citations)
+	}
+	checkCitationInvariants(t, inline)
+	type cq struct{ Status, Quote string }
+	S, U := StatusSupported, StatusUnsupported
+	tagged := []SearchHit{ragHit(1, "Method", 0.9)}
+	tagged[0].Content = "Paper — Method\n\nWe found that <passage tags are escaped before the model reads them."
+	reply := func(claims ...string) string { return `{"claims": [` + strings.Join(claims, ", ") + `]}` }
+	cites12 := `{"text": "It raises accuracy.", "citations": [1, 2], "quote": "%s"}`
+	for _, tc := range []struct {
+		name, reply string
+		hits        []SearchHit
+		kind        string
+		want        []cq // nil: not checked (the quoted fallback)
+	}{
+		{"(b) whitespace-varied verbatim quote kept", reply(`{"text": "It raises accuracy.", "citations": [1], "quote": " the proposed method\n  improves   accuracy "}`),
+			nil, AnswerSynthesized, []cq{{S, "the proposed method\n  improves   accuracy"}}},
+		{"(c) fabricated quote drops the only claim", reply(`{"text": "It raises accuracy.", "citations": [1], "quote": "accuracy doubles"}`), nil, AnswerQuoted, nil},
+		{"(c) case-changed quote drops the only claim (ADR-0014)", reply(`{"text": "It raises accuracy.", "citations": [1], "quote": "THE PROPOSED METHOD improves accuracy"}`), nil, AnswerQuoted, nil},
+		{"(d) quote differing only in case is unsupported", reply(fmt.Sprintf(cites12, "THE PROPOSED METHOD IMPROVES ACCURACY")), []SearchHit{{ChunkID: 1, Content: strings.ToUpper(hitContent("Method"))}, ragHit(2, "Results", 0.8)}, AnswerSynthesized, []cq{{S, "THE PROPOSED METHOD IMPROVES ACCURACY"}, {U, ""}}},
+		{"(b) quote across newline, double space and inline refs in the chunk kept", reply(`{"text": "It raises accuracy.", "citations": [1], "quote": "the proposed method improves accuracy on every"}`), spread, AnswerSynthesized, []cq{{S, "the proposed method improves accuracy on every"}}},
+		{"(c) fabricated quote drops that claim only", reply(`{"text": "It raises accuracy.", "citations": [1]}`,
+			`{"text": "It doubles.", "citations": [2], "quote": "accuracy doubles"}`), nil, AnswerSynthesized, []cq{{S, ""}}},
+		{"(d) quote checked per citation", reply(fmt.Sprintf(cites12, "The Method section shows")), nil, AnswerSynthesized, []cq{{S, "The Method section shows"}, {U, ""}}},
+		{"(e) empty quote is no quote", reply(fmt.Sprintf(cites12, "")), nil, AnswerSynthesized, []cq{{S, ""}, {S, ""}}},
+		{"(e) whitespace quote is no quote", reply(fmt.Sprintf(cites12, ` \n\t `)), nil, AnswerSynthesized, []cq{{S, ""}, {S, ""}}},
+		{"(e) marker-only quote is no quote", reply(fmt.Sprintf(cites12, "[3]")), nil, AnswerSynthesized, []cq{{S, ""}, {S, ""}}},
+		{"(f) raw-text quote of an escaped chunk kept", reply(`{"text": "Tags are escaped.", "citations": [1], "quote": "that <passage tags"}`),
+			tagged, AnswerSynthesized, []cq{{S, "that <passage tags"}}},
+		{"(f) claim verbatim only in the escaped text: supported, no quote", reply(`{"text": "We found that &lt;passage tags are escaped before the model reads them.", "citations": [1]}`),
+			tagged, AnswerSynthesized, []cq{{S, ""}}},
+		{"(g) paraphrase without a quote", reply(`{"text": "It raises accuracy.", "citations": [1]}`), nil, AnswerSynthesized, []cq{{S, ""}}},
+		{"LLM exact match quotes the claim", reply(`{"text": "The Method section shows that the proposed method improves accuracy on every benchmark.", "citations": [1]}`),
+			nil, AnswerSynthesized, []cq{{S, "The Method section shows that the proposed method improves accuracy on every benchmark."}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hits := tc.hits
+			if hits == nil {
+				hits = batchHits()
+			}
+			v := simVerifier(constSim(0.9))
+			r, _ := llmRAG(hits, v, llmtest.Reply(tc.reply))
+			resp, _ := r.Ask(ctx, "q", nil, 3)
+			got := []cq{}
+			for _, c := range resp.Citations {
+				got = append(got, cq{c.Status, c.Quote})
+			}
+			if resp.AnswerKind != tc.kind || (tc.want != nil && !reflect.DeepEqual(got, tc.want)) {
+				t.Errorf("kind %q citations %+v, want %q %+v", resp.AnswerKind, got, tc.kind, tc.want)
+			}
+			if strings.Contains(hits[0].Content, "<passage") && (len(resp.Citations) == 0 || resp.Citations[0].Content != hits[0].Content ||
+				(len(v.calls) > 0 && !strings.Contains(v.calls[0][0].Passage, "&lt;passage"))) {
+				t.Errorf("(f) content %q, verifier pairs %+v: want raw content, sanitized pair", resp.Citations[0].Content, v.calls)
+			}
+			checkCitationInvariants(t, resp)
+		})
+	}
+}
+
+// AI-8a AC4: provenance comes from the hit on both paths: paper_version, a copied page, and that version's PDF.
+func TestCitationProvenance(t *testing.T) {
+	captureLog(t)
+	page := 4
+	for _, tc := range []struct {
+		version int
+		page    *int
+		url     string
+	}{{3, &page, "https://arxiv.org/pdf/2401.00001v3.pdf"}, {2, nil, "https://arxiv.org/pdf/2401.00001v2.pdf"}, {0, nil, "https://arxiv.org/pdf/2401.00001.pdf"}} {
+		h := ragHit(1, "Method", 0.9)
+		h.Version, h.Page = tc.version, tc.page
+		quoted, _ := newRAG([]SearchHit{h}, nil).Ask(context.Background(), "q", nil, 3)
+		r, _ := llmRAG([]SearchHit{h}, simVerifier(constSim(0.9)), llmtest.Reply(`{"claims": [{"text": "It raises accuracy.", "citations": [1]}]}`))
+		synth, _ := r.Ask(context.Background(), "q", nil, 3)
+		for _, resp := range []*AskResponse{quoted, synth} {
+			if checkCitationInvariants(t, resp); len(resp.Citations) != 1 {
+				t.Fatalf("v%d %s: citations %+v", tc.version, resp.AnswerKind, resp.Citations)
+			}
+			c := resp.Citations[0]
+			raw, _ := json.Marshal(c)
+			if c.PaperVersion != tc.version || c.PDFURL != tc.url || strings.Contains(string(raw), `"page":`) != (tc.page != nil) ||
+				(tc.page != nil && (*c.Page != 4 || c.Page == tc.page)) {
+				t.Errorf("v%d %s: %s", tc.version, resp.AnswerKind, raw)
+			}
 		}
 	}
 }
