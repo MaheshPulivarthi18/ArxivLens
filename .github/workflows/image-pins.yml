@@ -59,7 +59,7 @@ jobs:
           echo "Self-test: a wrong digest must fail and name the image"
           bad="${pins[0]%@*}@sha256:$(printf '0%.0s' {1..64})"
           if msg="$(check_pin "$bad")"; then echo "::error::self-test: $bad resolved, want failure"; exit 1; fi
-          echo "$msg" | sed 's/^::error::/  (expected) /'
+          echo "  (expected) ${msg#::error::}"
           case "$msg" in *"${pins[0]%@*}"*"Re-pin"*) ;; *) echo "::error::self-test: message does not name ${pins[0]%@*}"; exit 1;; esac
 
           failed=0
