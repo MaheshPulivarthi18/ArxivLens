@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { BookOpen, ExternalLink, ArrowLeft, Search, Tag, CheckCircle2 } from 'lucide-react';
-import { Card, CardHeader, CardTitle, CardContent } from './ui/card';
+import { ExternalLink, ArrowLeft, Search, CheckCircle2 } from 'lucide-react';
+import { Card } from './ui/card';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 
