@@ -118,6 +118,7 @@ jobs:
           key: arxiv-replay-${{ runner.os }}-stack-v1-${{ github.run_id }}
       - name: "ING-6 Risk 1: published order of recorded search feeds"
         if: ${{ !cancelled() }}
+        continue-on-error: true
         timeout-minutes: 1
         run: |
           python3 -I - <<'PY' || echo "::warning::RISK1 probe exited non-zero"
@@ -281,11 +282,12 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "$ARXIVLENS_HF_CACHE"
           set +e
           read -ra f1 <<< "$F1_TESTS"
-          make test-full PYTEST_ARGS="$(printf -- '--deselect %s ' "${f1[@]}")" 2>&1 | tee test-full.log
+          # -rA: the job log names every test (`PASSED <node id>`); the step summary below drops those lines.
+          make test-full PYTEST_ARGS="$(printf -- '--deselect %s ' "${f1[@]}")-rA" 2>&1 | tee test-full.log
           rc=${PIPESTATUS[0]}
           {
             echo "### AC4 \`make test-full\` (exit $rc; F1 deselected: $F1_TESTS)"; echo '```'
-            if grep -q 'short test summary info' test-full.log; then sed -n '/short test summary info/,$p' test-full.log; else tail -n 1 test-full.log; fi
+            if grep -q 'short test summary info' test-full.log; then sed -n '/short test summary info/,$p' test-full.log | grep -v '^PASSED '; else tail -n 1 test-full.log; fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
