@@ -40,6 +40,7 @@ func TestSynthesisAnswersWithVerifiedClaims(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	checkCitationInvariants(t, resp)
 	if want := "The method improves benchmark accuracy [1]. Results confirm the gain [2][3]."; resp.Answer != want || resp.RefusalReason != "" {
 		t.Fatalf("answer = %q (reason %q), want %q", resp.Answer, resp.RefusalReason, want)
 	}
@@ -80,6 +81,7 @@ func TestSynthesisDropsUnsupportedClaims(t *testing.T) {
 	reply := `{"claims": [{"text": "Supported claim.", "citations": [1]}, {"text": "Unsupported claim!", "citations": [2]}]}`
 	r, _ := llmRAG(batchHits(), byPassage(map[string]float64{"Method": 0.95, "Results": 0.1}), llmtest.Reply(reply))
 	resp, _ := r.Ask(context.Background(), "q", nil, 3)
+	checkCitationInvariants(t, resp)
 	if resp.Answer != "Supported claim [1]." || !reflect.DeepEqual(markers(resp.Citations), []int{1}) {
 		t.Errorf("answer=%q markers=%v, want only the supported claim", resp.Answer, markers(resp.Citations))
 	}
@@ -97,6 +99,7 @@ func TestSynthesisRefusals(t *testing.T) {
 		v := simVerifier(constSim(1))
 		r, _ := llmRAG(batchHits(), v, llmtest.Reply(`{"claims": [], "insufficient_evidence": true}`))
 		resp, _ := r.Ask(context.Background(), "secret question", nil, 3)
+		checkCitationInvariants(t, resp)
 		if resp.RefusalReason != reasonInsufficientEvidence || resp.Answer != refusalInsufficient || len(v.calls) != 0 {
 			t.Fatalf("resp = %+v, verify calls %d", resp, len(v.calls))
 		}
@@ -130,6 +133,7 @@ func TestSynthesisFallsBackToExtractive(t *testing.T) {
 			if err != nil || resp.Answer != extractive || resp.RefusalReason != "" {
 				t.Fatalf("resp=%+v err=%v, want the extractive answer", resp, err)
 			}
+			checkCitationInvariants(t, resp)
 			if !strings.Contains(buf.String(), "synthesis fallback") || !strings.Contains(buf.String(), "reason="+tc.reason+" provider=fake") ||
 				strings.Contains(buf.String(), "secret question") {
 				t.Errorf("log = %q, want one fallback line with reason=%s", buf.String(), tc.reason)
@@ -157,6 +161,7 @@ func TestSynthesisClaimsUnsupportedFallBackToQuotes(t *testing.T) {
 			buf := captureLog(t)
 			r, _ := llmRAG(batchHits(), tc.v, llmtest.Reply(tc.reply))
 			resp, _ := r.Ask(context.Background(), "secret question", nil, 3)
+			checkCitationInvariants(t, resp)
 			if resp.Answer != extractive || resp.RefusalReason != "" || resp.AnswerKind != AnswerQuoted {
 				t.Fatalf("resp = %+v, want the quoted answer", resp)
 			}
@@ -171,6 +176,7 @@ func TestSynthesisClaimsUnsupportedFallBackToQuotes(t *testing.T) {
 		v := &fakeVerifier{score: func(string, string) float64 { return 1 }, err: errors.New("down")}
 		r, _ := llmRAG(batchHits(), v, llmtest.Reply(twoClaims))
 		resp, _ := r.Ask(context.Background(), "q", nil, 3)
+		checkCitationInvariants(t, resp)
 		if resp.Answer != extractive || resp.AnswerKind != AnswerQuoted {
 			t.Fatalf("resp = %+v", resp)
 		}
@@ -187,14 +193,17 @@ func TestQuickAnswerSkipsSynthesis(t *testing.T) {
 	captureLog(t)
 	r, f := llmRAG(batchHits(), simVerifier(constSim(1)), llmtest.Reply(twoClaims))
 	resp, _ := r.AskWith(context.Background(), "q", nil, 3, AskOptions{Quick: true})
+	checkCitationInvariants(t, resp)
 	if len(f.Requests()) != 0 || resp.AnswerKind != AnswerQuoted || !resp.SynthesisAvailable {
 		t.Fatalf("resp = %+v, llm requests %d", resp, len(f.Requests()))
 	}
 	full, _ := r.AskWith(context.Background(), "q", nil, 3, AskOptions{})
+	checkCitationInvariants(t, full)
 	if full.AnswerKind != AnswerSynthesized || full.SynthesisAvailable {
 		t.Errorf("full = %+v", full)
 	}
 	plain, _ := newRAG(batchHits(), simVerifier(constSim(1))).AskWith(context.Background(), "q", nil, 3, AskOptions{Quick: true})
+	checkCitationInvariants(t, plain)
 	if plain.SynthesisAvailable || plain.AnswerKind != AnswerQuoted {
 		t.Errorf("no-LLM quick = %+v", plain)
 	}
@@ -213,6 +222,7 @@ func TestSynthesisMarkersFollowPromptOrder(t *testing.T) {
 	v := byPassage(map[string]float64{"Gamma": 0.9})
 	r, _ := llmRAG([]SearchHit{a1, b1, a2}, v, llmtest.Reply(reply))
 	resp, _ := r.Ask(context.Background(), "q", nil, 3)
+	checkCitationInvariants(t, resp)
 	if len(resp.Citations) != 1 || resp.Citations[0].ChunkID != 3 || resp.Citations[0].Marker != 2 || !resp.Citations[0].Supported {
 		t.Errorf("citations = %+v, want marker 2 -> chunk 3 (a2), supported", resp.Citations)
 	}
@@ -235,6 +245,7 @@ func TestWithMarkers(t *testing.T) {
 func TestWithLLMNilKeepsExtractive(t *testing.T) {
 	r := newRAG(batchHits(), simVerifier(constSim(0))).WithLLM(nil)
 	resp, _ := r.Ask(context.Background(), "q", nil, 3)
+	checkCitationInvariants(t, resp)
 	if resp.RefusalReason != "" || !strings.Contains(resp.Answer, "improves accuracy") {
 		t.Errorf("resp = %+v", resp)
 	}
