@@ -1350,6 +1350,25 @@ func TestAskClaims(t *testing.T) {
 	if raw, _ := json.Marshal(claims[1]); string(raw) != `{"text":"An uncited fragment.","status":"unverified","markers":[]}` {
 		t.Errorf("uncited claim JSON %s", raw)
 	}
+	// A claim whose citation was never checked (verifier down) is unverified, not unsupported.
+	quoteThenParaphrase := want[0].Text[:len(want[0].Text)-1] + " [1]. A paraphrase that only NLI could check [2]."
+	_, claims, _ = (&RAGService{verifier: &fakeVerifier{err: errors.New("down")}}).checkCitations(ctx, quoteThenParaphrase, batchHits())
+	if !reflect.DeepEqual(claims, []Claim{{want[0].Text, S, []int{1}}, {"A paraphrase that only NLI could check.", V, []int{2}}}) {
+		t.Errorf("verifier down claims %+v", claims)
+	}
+	// claimStatus by literal value: any supported citation wins, else any unverified, else unsupported.
+	for _, tc := range []struct {
+		in   []string
+		want string
+	}{{nil, V}, {[]string{U}, U}, {[]string{V}, V}, {[]string{U, V}, V}, {[]string{V, U}, V}, {[]string{U, S}, S}, {[]string{V, S}, S}, {[]string{U, U}, U}} {
+		var cs []Citation
+		for _, st := range tc.in {
+			cs = append(cs, Citation{Status: st})
+		}
+		if got := claimStatus(cs); got != tc.want {
+			t.Errorf("claimStatus(%v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
 	// AC4 (design condition 7): "e.g." and "0.5" inside the quoted sentence do not split it; one claim.
 	sent := "Regularisers such as dropout, e.g. at rate 0.5, improve accuracy on every benchmark"
 	h := ragHit(1, "Method", 0.9)
