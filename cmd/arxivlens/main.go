@@ -312,6 +312,8 @@ func newDLQCmd() *cobra.Command {
 	}
 	listCmd.Flags().StringVar(&topic, "topic", "papers.downloaded.dlq", "DLQ topic name")
 	listCmd.Flags().IntVar(&limit, "limit", 50, "Max messages to inspect")
+	// SKELETON (OPS-H7a2): --partition, --from P/O, --page-size (+ hidden --limit alias), --all; P/O lines,
+	// UNDECODABLE line, footer; inspect scans to the watermarks; commands built from a dlqLister interface for TestDLQFlags. [~80]
 
 	inspectCmd := &cobra.Command{
 		Use:   "inspect",

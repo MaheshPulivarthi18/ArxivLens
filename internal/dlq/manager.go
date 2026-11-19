@@ -121,3 +121,7 @@ func (m *Manager) Replay(
 
 	return replayedCount, nil
 }
+
+// SKELETON (OPS-H7a2): Cursor{Partition, Offset} + ParseCursor("P/O") [~20], ListOptions/Page [~15],
+// (*Manager).List: watermark snapshot, --partition, --from, below-Low warning, page-size cap, next cursor [~60],
+// NewManager wiring the Reader [~8].
