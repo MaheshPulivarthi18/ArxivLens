@@ -1054,6 +1054,55 @@ def test_print_table_shows_report_only_block(capsys):
     assert "Citation coverage" in capsys.readouterr().out
 
 
+# --- EVAL-10: refused, missed and near-miss-failed case IDs in the summary (IDs only, no text) ---
+
+ID_LABELS = ("  refused IDs ", "  miss IDs ", "  near-miss answered IDs ")
+EVAL10_TEXT = ("Q-REFUSED-why", "Q-WRONGPAPER-how", "Q-NEARMISS-what", "Wrong paper says W-ANSWER-TEXT",
+               "Near miss says N-ANSWER-TEXT", "passage text")
+
+
+def _eval10_run():
+    answers = [{"id": "a7", "question": "Q-REFUSED-why", "expected_arxiv_ids": ["1706.03762"]},
+               {"id": "a8", "question": "Q-WRONGPAPER-how", "expected_arxiv_ids": ["1706.03762"]}]
+    nm = [{"id": "n4", "question": "Q-NEARMISS-what"}]
+    wrong = {"answer": "Wrong paper says W-ANSWER-TEXT [1].", "citations": [{**_cite(1), "arxiv_id": "1810.04805"}]}
+    canned = {"Q-REFUSED-why": EARLY, "Q-WRONGPAPER-how": wrong,
+              "Q-NEARMISS-what": {"answer": "Near miss says N-ANSWER-TEXT [1].", "citations": [_cite(1)]}}
+    return evaluate_answers.evaluate(answers, [], lambda q: (canned[q], 50.0), nm)
+
+
+def _id_lines(out):
+    return {label: line for line in out.splitlines() for label in ID_LABELS if line.startswith(label)}
+
+
+def test_report_names_refused_missed_and_near_miss_ids(capsys):
+    m = _eval10_run()
+    assert m["answer_refused_ids"] == ["a7"]  # the wrong-paper answer is a miss, not a refusal
+    assert m["expected_paper_miss_ids"] == ["a7", "a8"] and m["near_miss_failure_ids"] == ["n4"]
+    evaluate_answers.print_report(m)
+    out = capsys.readouterr().out
+    lines = _id_lines(out)
+    assert set(lines) == set(ID_LABELS), out
+    assert lines["  refused IDs "].split(": ", 1)[1] == "a7"
+    assert lines["  miss IDs "].split(": ", 1)[1] == "a7, a8"
+    assert lines["  near-miss answered IDs "].split(": ", 1)[1] == "n4"
+    # the refused line follows "In-corpus refused"; the near-miss line sits in the report-only block
+    order = out.splitlines()
+    assert order.index(lines["  refused IDs "]) == order.index(next(x for x in order if x.startswith("In-corpus"))) + 1
+    assert order.index(lines["  near-miss answered IDs "]) > order.index("-- report-only (not gated) --")
+    dumped = json.dumps(m)
+    for text in EVAL10_TEXT:
+        assert text not in out and text not in dumped, text
+
+
+def test_report_prints_no_id_lines_without_failures(capsys):
+    m = _run(ANSWERED, EARLY, near_miss=True, nm_resp=EARLY)
+    assert m["answer_refused_ids"] == [] and m["expected_paper_miss_ids"] == [] and m["near_miss_failure_ids"] == []
+    evaluate_answers.print_report(m)
+    out = capsys.readouterr().out
+    assert _id_lines(out) == {} and "IDs" not in out, out
+
+
 # --- EVAL-7: blind human review (synthetic fixtures only; agents never write real judgments) ---
 
 XC = {"arxiv_id": "1810.04805", "chunk_id": 21, "marker": 1, "supported": True, "score": 0.77}

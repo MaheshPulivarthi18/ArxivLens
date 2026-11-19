@@ -131,6 +131,9 @@ Promoting one to a gate needs an ADR and a key in `thresholds.json`.
 - **Per-case records** (`answers.cases`): `id`, `set`, `outcome`, `refused`, `refusal_reason`, `latency_ms`,
   `cited_units`/`total_units` (answered only), and per citation `arxiv_id`, `chunk_id`, `marker`, `supported`, `score`.
   **No question, passage or answer text is saved**, because CI artifacts of this public repo can be downloaded.
+- **Summary IDs** (EVAL-10): the printed `/v1/ask` summary in the job log lists the case IDs behind the misses, as
+  `refused IDs` (`answer_refused_ids`), `miss IDs` (`expected_paper_miss_ids`: refusals plus wrong-paper answers) and
+  `near-miss answered IDs` (`near_miss_failure_ids`, errors included). Each line is printed only when it has IDs, and it holds IDs only, no text.
 
 ### Near-miss rows and human review
 `refusal_near_miss.jsonl` holds in-domain (ML/IR) questions that sound like the corpus but are answered by a paper
