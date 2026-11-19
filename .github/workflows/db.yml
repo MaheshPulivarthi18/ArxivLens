@@ -26,6 +26,18 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U postgres -d arxivlens"
           --health-interval 5s --health-timeout 5s --health-retries 20
+      kafka:
+        image: apache/kafka:3.7.0
+        env:
+          KAFKA_NODE_ID: 1
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+        ports: ["9092:9092"]
+        options: --health-cmd "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092" --health-interval 5s --health-timeout 10s --health-retries 30
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/arxivlens?sslmode=disable
     steps:
@@ -70,3 +82,7 @@ jobs:
         run: |
           go vet -tags integration ./internal/query/
           go test -tags integration -count=1 -v -timeout 20m -run 'TestHNSW|TestSearchProvenance' ./internal/query/
+      - name: DLQ reader on real Kafka (3 partitions, 1,500 records, paged fetches)
+        run: |
+          go vet -tags integration ./internal/dlq/
+          KAFKA_BROKERS=localhost:9092 go test -tags integration -race -count=1 -v -timeout 10m ./internal/dlq/
