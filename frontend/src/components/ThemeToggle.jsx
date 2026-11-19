@@ -17,14 +17,15 @@ const OPTIONS = {
 export default function ThemeToggle() {
   // The pre-paint script in index.html already set the class; this only mirrors the stored choice.
   const [pref, setPref] = useState(getStoredTheme)
-  const [resolved, setResolved] = useState(() => resolveTheme(getStoredTheme(), systemPrefersDark()))
+  const [osDark, setOsDark] = useState(systemPrefersDark)
+  const resolved = resolveTheme(pref, osDark)
+
+  // Track the OS scheme; in "system" mode an OS change re-applies the theme without reload.
+  useEffect(() => watchSystemTheme(setOsDark), [])
 
   useEffect(() => {
-    setResolved(applyTheme(pref))
-    if (pref !== "system") return undefined
-    // In "system" mode an OS theme change applies without reload.
-    return watchSystemTheme(() => setResolved(applyTheme("system")))
-  }, [pref])
+    applyTheme(pref)
+  }, [pref, osDark])
 
   useEffect(() => {
     // Other tabs follow a change made here.
