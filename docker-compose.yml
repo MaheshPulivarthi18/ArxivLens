@@ -33,7 +33,9 @@ x-heartbeat-check: &heartbeat_check |
 
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    # pgvector >= 0.8.0 required (hnsw.iterative_scan); this digest ships 0.8.7. Same pin as .github/workflows/db.yml.
+    # Re-pin: CONTRIBUTING.md "Pinned images".
+    image: pgvector/pgvector:pg16@sha256:484e838076e04939d27d3e176e91c86eea96236126023be8d3059761122e579f
     container_name: arxivlens-postgres
     environment:
       POSTGRES_USER: postgres

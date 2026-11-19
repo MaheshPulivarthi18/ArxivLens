@@ -1,0 +1,67 @@
+name: Image pins
+
+# OPS-H9: every digest-pinned image (`image: <name>@sha256:<digest>`) in docker-compose.yml and the workflows must
+# still resolve. Chainguard's free registry serves only `latest`, so an old digest can disappear; this job says which
+# image to re-pin before stack.yml breaks. Also checks that compose and db.yml use the same pgvector pin.
+# No secrets, read-only. Re-pin runbook: CONTRIBUTING.md "Pinned images".
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 5 * * 1" # weekly, Monday 05:23 UTC
+  pull_request:
+    paths:
+      - docker-compose.yml
+      - .github/workflows/db.yml
+      - .github/workflows/image-pins.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-pins-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pins:
+    name: Pinned digests resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint the changed workflows (actionlint)
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color .github/workflows/db.yml .github/workflows/image-pins.yml
+      - name: Same pgvector pin in docker-compose.yml and db.yml
+        run: |
+          compose="$(grep -oE 'pgvector/pgvector:[^[:space:]"]+' docker-compose.yml | sort -u)"
+          db="$(grep -oE 'pgvector/pgvector:[^[:space:]"]+' .github/workflows/db.yml | sort -u)"
+          echo "docker-compose.yml: $compose"; echo "db.yml:             $db"
+          if [ -z "$compose" ] || [ "$compose" != "$db" ]; then
+            echo "::error::pgvector image differs between docker-compose.yml and db.yml; pin both to the same digest"; exit 1
+          fi
+          case "$compose" in *@sha256:*) ;; *) echo "::error::pgvector image $compose is not digest-pinned"; exit 1;; esac
+      - name: Every pinned digest resolves (docker manifest inspect)
+        run: |
+          check_pin() { # $1 = name[:tag]@sha256:<digest>; prints the image name on failure
+            local out
+            if out="$(docker manifest inspect "$1" 2>&1 >/dev/null)"; then
+              echo "ok      $1"
+            else
+              echo "::error::Pinned image ${1%@*} no longer resolves at ${1#*@} (${out:-no output}). Re-pin it: CONTRIBUTING.md \"Pinned images\"."
+              return 1
+            fi
+          }
+          mapfile -t pins < <(grep -hoE 'image:[[:space:]]*[^[:space:]]+@sha256:[0-9a-f]{64}' docker-compose.yml .github/workflows/*.yml \
+            | sed -E 's/^image:[[:space:]]*//' | sort -u)
+          echo "${#pins[@]} pinned images:"; printf '  %s\n' "${pins[@]}"
+          # compose pins pgvector, minio and minio-client by digest; fewer means the grep stopped matching
+          if [ "${#pins[@]}" -lt 3 ]; then echo "::error::found ${#pins[@]} digest pins, expected >= 3"; exit 1; fi
+
+          echo "Self-test: a wrong digest must fail and name the image"
+          bad="${pins[0]%@*}@sha256:$(printf '0%.0s' {1..64})"
+          if msg="$(check_pin "$bad")"; then echo "::error::self-test: $bad resolved, want failure"; exit 1; fi
+          echo "$msg" | sed 's/^::error::/  (expected) /'
+          case "$msg" in *"${pins[0]%@*}"*"Re-pin"*) ;; *) echo "::error::self-test: message does not name ${pins[0]%@*}"; exit 1;; esac
+
+          failed=0
+          for p in "${pins[@]}"; do check_pin "$p" || failed=1; done
+          exit "$failed"
