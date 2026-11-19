@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"reflect"
 	"regexp"
@@ -13,7 +14,8 @@ import (
 	"testing"
 )
 
-// RET-2 (ADR-0014): search hits carry the paper version; page is omitted for every hit.
+// RET-2 (ADR-0014): search hits carry the paper version. ING-11b: page is the recorded start page
+// (paper_chunk_pages), omitted when there is no row.
 
 func intPtr(v int) *int { return &v }
 
@@ -82,6 +84,14 @@ func TestSearchHitProvenanceTravelsWithHit(t *testing.T) {
 		{"fallback rerank error", true, errors.New("boom"), nil, []int64{1, 2, 3, 4, 5}},
 		{"fallback timeout", true, fmt.Errorf("w: %w", context.DeadlineExceeded), nil, []int64{1, 2, 3, 4, 5}},
 		{"fallback count mismatch", true, nil, func(p []string) []float32 { return make([]float32, len(p)-1) }, []int64{1, 2, 3, 4, 5}},
+		// ADR-0017 fallback (RRF order, RerankScore 0) for the other two reasons (RET-2 QA nit 3)
+		{"fallback NaN score", true, nil, byRank(func(r int) float32 {
+			if r == 3 {
+				return float32(math.NaN())
+			}
+			return float32(r)
+		}), []int64{1, 2, 3, 4, 5}},
+		{"fallback canceled", true, fmt.Errorf("w: %w", context.Canceled), nil, []int64{1, 2, 3, 4, 5}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -100,11 +110,23 @@ func TestSearchHitProvenanceTravelsWithHit(t *testing.T) {
 			if got := ids(hits); !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("order = %v, want %v", got, tc.want)
 			}
+			withPage := 0
 			for _, h := range hits {
+				if h.Page != nil {
+					withPage++
+				}
+				if tc.err != nil || tc.name == "fallback NaN score" {
+					if h.RerankScore != 0 {
+						t.Errorf("chunk %d: fallback RerankScore = %v, want 0", h.ChunkID, h.RerankScore)
+					}
+				}
 				if h.Version != provVersion(h.ChunkID) || !reflect.DeepEqual(h.Page, provPage(h.ChunkID)) {
 					t.Errorf("chunk %d: (version, page) = (%d, %v), want (%d, %v)",
 						h.ChunkID, h.Version, h.Page, provVersion(h.ChunkID), provPage(h.ChunkID))
 				}
+			}
+			if withPage == 0 {
+				t.Errorf("no hit carries a non-nil Page, so the case proves nothing about Page")
 			}
 		})
 	}
@@ -113,10 +135,12 @@ func TestSearchHitProvenanceTravelsWithHit(t *testing.T) {
 // outerSelectColumns returns the result column names of hybridSearchSQL's outer SELECT, in order.
 func outerSelectColumns(t *testing.T, sql string) []string {
 	t.Helper()
-	i := strings.LastIndex(sql, "SELECT ")
+	// The outer SELECT starts a line at two tabs; the CTE arms sit at three and the page subquery is inline.
+	i := strings.LastIndex(sql, "\n\t\tSELECT ")
 	if i < 0 {
 		t.Fatalf("outer SELECT not found in hybridSearchSQL")
 	}
+	i += len("\n\t\t")
 	j := strings.Index(sql[i:], "FROM paper_chunks c")
 	if j < 0 {
 		t.Fatalf("outer FROM not found in hybridSearchSQL")
@@ -150,7 +174,7 @@ func outerSelectColumns(t *testing.T, sql string) []string {
 // column/scan mismatch fails here rather than only on real pgvector (db.yml).
 func TestSearchSQLColumnsMatchScan(t *testing.T) {
 	field := map[string]string{"c.id": "ChunkID", "c.content": "Content", "p.arxiv_id": "ArxivID", "p.title": "Title",
-		"section_title": "SectionTitle", "p.version": "Version", "rrf_score": "RRFScore"}
+		"section_title": "SectionTitle", "p.version": "Version", "page": "Page", "rrf_score": "RRFScore"}
 	var fromSQL []string
 	for _, c := range outerSelectColumns(t, hybridSearchSQL) {
 		f, ok := field[c]
@@ -171,22 +195,29 @@ func TestSearchSQLColumnsMatchScan(t *testing.T) {
 	for _, m := range regexp.MustCompile(`&h\.(\w+)`).FindAllSubmatch(scans[0][1], -1) {
 		fromScan = append(fromScan, string(m[1]))
 	}
-	want := []string{"ChunkID", "Content", "ArxivID", "Title", "SectionTitle", "Version", "RRFScore"}
+	want := []string{"ChunkID", "Content", "ArxivID", "Title", "SectionTitle", "Version", "Page", "RRFScore"}
 	if !reflect.DeepEqual(fromSQL, want) || !reflect.DeepEqual(fromScan, want) {
 		t.Fatalf("SELECT fields %v, scan fields %v, want both %v", fromSQL, fromScan, want)
 	}
 }
 
-// AC4: RET-2 only adds ", p.version" to the outer SELECT. Everything else (both RRF arms, rrf_score,
-// joins, ORDER BY, LIMIT) is byte-identical to the query before RET-2 (golden copy below).
+// pageColumn is the outer-SELECT line ING-11b adds: a PK lookup, so it can't add or drop hits (design ING-11 Q3).
+const pageColumn = "\n\t\t       (SELECT cp.page_start FROM paper_chunk_pages cp WHERE cp.chunk_id = c.id) AS page,"
+
+// AC4: RET-2 only adds ", p.version" and ING-11b only adds pageColumn to the outer SELECT. Everything else
+// (both RRF arms, rrf_score, joins, ORDER BY, LIMIT) is byte-identical to the query before RET-2 (golden copy below).
 func TestSearchSQLOuterSelectOnly(t *testing.T) {
 	if strings.Count(hybridSearchSQL, " p.version,") != 1 {
 		t.Fatalf("hybridSearchSQL must name p.version exactly once")
 	}
+	if strings.Count(hybridSearchSQL, pageColumn) != 1 {
+		t.Fatalf("hybridSearchSQL must hold the page subquery line exactly once")
+	}
 	if vectorHitsSQL != goldenVectorHitsSQL {
 		t.Fatalf("vectorHitsSQL changed:\n%s", vectorHitsSQL)
 	}
-	if got := strings.Replace(hybridSearchSQL, " p.version,", "", 1); got != goldenHybridSearchSQL {
+	got := strings.Replace(strings.Replace(hybridSearchSQL, " p.version,", "", 1), pageColumn, "", 1)
+	if got != goldenHybridSearchSQL {
 		t.Fatalf("hybridSearchSQL changed beyond the outer SELECT:\n got %q\nwant %q", got, goldenHybridSearchSQL)
 	}
 }

@@ -62,3 +62,39 @@ def test_chunk_embeddings_and_pgvector_cosine_ops():
         assert top_dist < 1e-3, f"Self-distance should be ~0.0, got {top_dist}"
 
     conn.close()
+
+
+def test_embedded_chunks_have_recorded_start_pages():
+    """ING-11b (design ING-11 condition 4): the real pipeline writes paper_chunk_pages for every chunk.
+
+    For every 'embedded' paper, each paper_chunks row has a paper_chunk_pages row, its page_start is at least the
+    section's page_number, and page_start never decreases with chunk_index (sections and windows are in reading
+    order). Not grouped by section_id: the processor's title-keyed section map can merge repeated titles.
+    """
+    conn = psycopg.connect(config.postgres_url)
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT p.arxiv_id, p.version, c.chunk_index, c.page_number, cp.page_start
+            FROM papers p
+            JOIN paper_chunks c ON c.paper_id = p.id
+            LEFT JOIN paper_chunk_pages cp ON cp.chunk_id = c.id
+            WHERE p.status = 'embedded'
+            ORDER BY p.id, c.chunk_index;
+        """)
+        rows = cur.fetchall()
+    conn.close()
+    assert rows, "no chunks of embedded papers to check"
+
+    problems, prev = [], {}
+    for arxiv_id, version, idx, page_number, page_start in rows:
+        key = f"{arxiv_id}v{version} chunk {idx}"
+        if page_start is None:
+            problems.append(f"{key}: no paper_chunk_pages row")
+            continue
+        if page_number is None or page_start < page_number:
+            problems.append(f"{key}: page_start {page_start} < page_number {page_number}")
+        last = prev.get((arxiv_id, version))
+        if last is not None and page_start < last:
+            problems.append(f"{key}: page_start {page_start} < previous chunk's {last}")
+        prev[(arxiv_id, version)] = page_start
+    assert not problems, f"{len(problems)} of {len(rows)} chunks: " + "; ".join(problems[:10])
