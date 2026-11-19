@@ -2,37 +2,81 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Theme tokens (docs/design/FE-0.md §1). Light = paper/ink, dark = warm near-black.
+   One accent (ink blue) = --primary = links, primary action and focus --ring.
+   Red is reserved for --unsupported and --destructive. */
 @layer base {
   :root {
-    --background: 222 47% 7%;
-    --foreground: 210 40% 98%;
+    --background: 40 23% 97%;
+    --foreground: 222 22% 13%;
 
-    --card: 222 47% 9%;
-    --card-foreground: 210 40% 98%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 22% 13%;
 
-    --popover: 222 47% 9%;
-    --popover-foreground: 210 40% 98%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 22% 13%;
 
-    --primary: 158 64% 45%;
-    --primary-foreground: 222 47% 7%;
+    --primary: 216 60% 32%;
+    --primary-foreground: 40 23% 98%;
 
-    --secondary: 217 33% 17%;
-    --secondary-foreground: 210 40% 98%;
+    --secondary: 40 14% 91%;
+    --secondary-foreground: 222 22% 13%;
 
-    --muted: 217 33% 14%;
-    --muted-foreground: 215 20.2% 65.1%;
+    --muted: 40 14% 93%;
+    --muted-foreground: 220 9% 37%;
 
-    --accent: 199 89% 48%;
-    --accent-foreground: 210 40% 98%;
+    --accent: 214 45% 93%;
+    --accent-foreground: 216 60% 26%;
 
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
+    --destructive: 2 64% 40%;
+    --destructive-foreground: 40 23% 98%;
 
-    --border: 217 33% 18%;
-    --input: 217 33% 18%;
-    --ring: 158 64% 45%;
+    /* --border is a decorative hairline (cards, dividers): no contrast minimum.
+       --input is the outline of form controls and meets WCAG 1.4.11 (>= 3:1 on background and card).
+       Rule: every form control or control-identifying outline uses border-input, never border-border. */
+    --border: 40 10% 85%;
+    --input: 220 8% 55%;
+    --ring: 216 60% 32%;
 
-    --radius: 0.65rem;
+    /* Citation trust states: tinted chip background + chip text (FE-3/FE-4). */
+    --supported: 140 32% 91%;
+    --supported-foreground: 145 55% 22%;
+    --unsupported: 4 70% 94%;
+    --unsupported-foreground: 2 64% 33%;
+    --unchecked: 38 55% 90%;
+    --unchecked-foreground: 30 70% 24%;
+
+    --radius: 0.375rem;
+  }
+
+  .dark {
+    --background: 30 7% 8%;
+    --foreground: 40 20% 90%;
+    --card: 30 6% 11%;
+    --card-foreground: 40 20% 90%;
+    --popover: 30 6% 12%;
+    --popover-foreground: 40 20% 90%;
+    --primary: 214 72% 72%;
+    --primary-foreground: 220 35% 10%;
+    --secondary: 30 5% 18%;
+    --secondary-foreground: 40 20% 90%;
+    --muted: 30 5% 16%;
+    --muted-foreground: 35 8% 64%;
+    --accent: 214 22% 20%;
+    --accent-foreground: 214 70% 86%;
+    --destructive: 2 62% 44%;
+    --destructive-foreground: 40 23% 98%;
+
+    /* Same rule as :root: controls use border-input (>= 3:1), --border is decorative. */
+    --border: 30 5% 20%;
+    --input: 30 5% 42%;
+    --ring: 214 72% 72%;
+    --supported: 145 28% 15%;
+    --supported-foreground: 140 45% 72%;
+    --unsupported: 4 38% 17%;
+    --unsupported-foreground: 4 80% 80%;
+    --unchecked: 38 35% 15%;
+    --unchecked-foreground: 40 70% 72%;
   }
 }
 
@@ -41,13 +85,13 @@
     @apply border-border;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply font-sans bg-background text-foreground;
     font-feature-settings: "rlig" 1, "calt" 1;
     -webkit-font-smoothing: antialiased;
   }
 }
 
-/* Custom subtle scrollbar */
+/* Custom subtle scrollbar (token-tinted, follows the theme) */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -60,5 +104,5 @@
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: hsl(var(--muted-foreground));
+  background: hsl(var(--input));
 }

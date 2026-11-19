@@ -5,9 +5,21 @@
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🔬</text></svg>" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ArxivLens — Academic Literature Search & Grounded Synthesis</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@500;600;700&display=swap" rel="stylesheet">
+    <meta name="color-scheme" content="light dark" />
+    <!-- Pre-paint theme: sets .dark before first paint and before React mounts (no flash).
+         Key and DEFAULT_THEME must match src/lib/theme.js. -->
+    <script>
+      (function () {
+        var DEFAULT_THEME = 'dark'; // interim until FE-3 flips it to 'system'; same as DEFAULT_THEME in src/lib/theme.js
+        var pref = DEFAULT_THEME;
+        try { pref = localStorage.getItem('arxivlens-theme') || pref; } catch (e) {}
+        if (pref !== 'light' && pref !== 'dark' && pref !== 'system') pref = DEFAULT_THEME;
+        var dark = pref === 'dark' || (pref === 'system' && !!window.matchMedia &&
+          window.matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.classList.toggle('dark', dark);
+        document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
