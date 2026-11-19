@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -148,6 +149,21 @@ func (d *DB) UpdatePaperDownloaded(ctx context.Context, arxivID string, version 
 		return fmt.Errorf("paper not found for arxiv_id=%s version=%d", arxivID, version)
 	}
 	return nil
+}
+
+// PaperVersionStatus returns the stored status and sha256 (empty if NULL) of one paper version.
+// A missing row is not an error: it returns ("", "", nil).
+func (d *DB) PaperVersionStatus(ctx context.Context, arxivID string, version int) (status, sha256 string, err error) {
+	err = d.Pool.QueryRow(ctx,
+		`SELECT status, COALESCE(sha256, '') FROM papers WHERE arxiv_id = $1 AND version = $2`,
+		arxivID, version).Scan(&status, &sha256)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("failed to read paper status: %w", err)
+	}
+	return status, sha256, nil
 }
 
 // RecordProcessedEvent checks and inserts event into the ledger (Layer 2 idempotency).
