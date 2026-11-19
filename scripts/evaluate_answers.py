@@ -177,6 +177,7 @@ def evaluate(answer_cases: List[Dict[str, Any]], refusal_cases: List[Dict[str, A
     total_citations = supported_citations = hits = refused_answers = 0
     cited_units = total_units = 0
     misses: List[str] = []
+    refused_ids: List[str] = []  # answer-set refusals only; misses also holds wrong-paper answers
     reason_counts: Dict[str, int] = {}
     records: List[Dict[str, Any]] = []
 
@@ -203,7 +204,9 @@ def evaluate(answer_cases: List[Dict[str, Any]], refusal_cases: List[Dict[str, A
     for case in answer_cases:
         resp, outcome = gated_call(case, "answer")
         if outcome != "answered":
-            refused_answers += outcome == "refusal"
+            if outcome == "refusal":
+                refused_answers += 1
+                refused_ids.append(case["id"])
             misses.append(case["id"])
             continue
         citations = resp.get("citations") or []
@@ -258,6 +261,7 @@ def evaluate(answer_cases: List[Dict[str, Any]], refusal_cases: List[Dict[str, A
         "verification_unavailable_count": verification_unavailable,
         "error_case_ids": errors,
         "expected_paper_miss_ids": misses,
+        "answer_refused_ids": refused_ids,
         "refusal_failure_ids": false_answers,
         # report-only (EVAL-6)
         "citation_coverage": cited_units / total_units if total_units else None,
@@ -277,6 +281,11 @@ def print_report(m: Dict[str, Any]) -> None:
     print(f"Supported citations      : {m['supported_citation_rate']:.2%} ({m['citations_total']} citations)")
     print(f"Answers citing expected  : {m['expected_paper_hit_rate']:.2%} of {m['answer_cases']}")
     print(f"In-corpus refused        : {m['answer_refusal_rate']:.2%}")
+    # IDs only, never question or answer text (EVAL-10)
+    if m.get("answer_refused_ids"):
+        print(f"  refused IDs            : {', '.join(m['answer_refused_ids'])}")
+    if m.get("expected_paper_miss_ids"):
+        print(f"  miss IDs               : {', '.join(m['expected_paper_miss_ids'])}")
     print(f"Correct refusals         : {m['correct_refusal_rate']:.2%} of {m['refusal_cases']}")
     if m["ask_p95_ms"] is not None:
         print(f"Latency p50 / p95 (ms)   : {m['ask_p50_ms']:.0f} / {m['ask_p95_ms']:.0f}")
@@ -287,6 +296,8 @@ def print_report(m: Dict[str, Any]) -> None:
     cov, nm = m["citation_coverage"], m["near_miss_correct_refusal_rate"]
     print(f"Citation coverage        : {'n/a' if cov is None else f'{cov:.2%}'}")
     print(f"Near-miss refusals       : {'n/a' if nm is None else f'{nm:.2%}'} of {m['near_miss_cases']}")
+    if m.get("near_miss_failure_ids"):
+        print(f"  near-miss answered IDs : {', '.join(m['near_miss_failure_ids'])}")
     print(f"refusal_reason counts    : {m['refusal_reason_counts'] or '{}'}")
 
 
