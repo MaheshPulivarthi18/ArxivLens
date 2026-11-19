@@ -123,11 +123,6 @@ func (c *Crawler) Crawl(ctx context.Context, searchQuery string, limit int) (int
 			arxivID := paperRec.ArxivID
 			version := paperRec.Version
 			title := paperRec.Title
-			abstract := paperRec.Abstract
-			authors := paperRec.Authors
-			categories := paperRec.Categories
-			pubTime := paperRec.PublishedAt
-			pdfURL := paperRec.SourceURL
 
 			// 1. Natural-key upsert into database (Layer 1 idempotency)
 			_, err := c.database.UpsertDiscoveredPaper(ctx, paperRec)
@@ -136,18 +131,7 @@ func (c *Crawler) Crawl(ctx context.Context, searchQuery string, limit int) (int
 			}
 
 			// 2. Publish envelope to papers.discovered (key = arxiv_id)
-			payload := map[string]interface{}{
-				"arxiv_id":     arxivID,
-				"version":      version,
-				"title":        title,
-				"abstract":     abstract,
-				"authors":      authors,
-				"categories":   categories,
-				"published_at": pubTime.Format(time.RFC3339),
-				"source_url":   pdfURL,
-			}
-
-			envelope := events.NewEventEnvelope(events.TopicPapersDiscovered, arxivID, version, payload)
+			envelope := events.NewEventEnvelope(events.TopicPapersDiscovered, arxivID, version, discoveredPayload(paperRec))
 			if err := c.producer.Publish(ctx, events.TopicPapersDiscovered, envelope); err != nil {
 				log.Printf("[Crawler] Failed to publish event for %s: %v", arxivID, err)
 				continue
@@ -168,6 +152,20 @@ func (c *Crawler) Crawl(ctx context.Context, searchQuery string, limit int) (int
 
 	log.Printf("[Crawler] Crawl finished. Total discovered: %d", totalDiscovered)
 	return totalDiscovered, nil
+}
+
+// discoveredPayload is the papers.discovered payload of p, shared by Crawl and the crawl loop.
+func discoveredPayload(p *db.PaperRecord) map[string]interface{} {
+	return map[string]interface{}{
+		"arxiv_id":     p.ArxivID,
+		"version":      p.Version,
+		"title":        p.Title,
+		"abstract":     p.Abstract,
+		"authors":      p.Authors,
+		"categories":   p.Categories,
+		"published_at": p.PublishedAt.Format(time.RFC3339),
+		"source_url":   p.SourceURL,
+	}
 }
 
 // parseAtomFeed maps an arXiv Atom API response body to paper records.
