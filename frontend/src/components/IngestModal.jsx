@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { DownloadCloud, CheckCircle2, AlertCircle, Loader2, FileText, ArrowRight, ExternalLink } from 'lucide-react';
+import { DownloadCloud, CheckCircle2, AlertCircle, Loader2, ArrowRight } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from './ui/dialog';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';

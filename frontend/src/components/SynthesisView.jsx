@@ -1,5 +1,5 @@
 import React from 'react';
-import { FileText, Copy, Download, ShieldCheck, Check, Sparkles } from 'lucide-react';
+import { FileText, Copy, Download, ShieldCheck } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent, CardFooter } from './ui/card';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';

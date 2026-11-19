@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
-import { Search, Sparkles, AlertCircle, Stethoscope, Cpu, Activity, Dna } from 'lucide-react';
+import { Search, Sparkles, AlertCircle, Stethoscope, Cpu, Activity } from 'lucide-react';
 import { Button } from './ui/button';
-import { Badge } from './ui/badge';
 
 const SUGGESTED_QUERIES = [
   {

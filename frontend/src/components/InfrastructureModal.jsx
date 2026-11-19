@@ -1,9 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { Settings, Server, Database, Activity, RefreshCw, Cpu, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { Settings, Activity, RefreshCw, AlertTriangle } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from './ui/dialog';
-import { Card, CardHeader, CardTitle, CardContent } from './ui/card';
+import { Card } from './ui/card';
 import { Button } from './ui/button';
-import { Badge } from './ui/badge';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from './ui/tabs';
 
 export default function InfrastructureModal({ isOpen, onClose, onShowToast }) {
