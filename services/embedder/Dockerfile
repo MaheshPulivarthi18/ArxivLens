@@ -9,8 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # CPU torch by default (same as CI); override with --build-arg TORCH_INDEX_URL=.../whl/cu121 for CUDA.
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
-COPY requirements-m0.txt .
-RUN pip install --no-cache-dir --extra-index-url ${TORCH_INDEX_URL} -r requirements-m0.txt minio ulid-py fastapi uvicorn
+COPY requirements.txt .
+RUN pip install --no-cache-dir --extra-index-url ${TORCH_INDEX_URL} -r requirements.txt
 
 COPY shared/ shared/
 COPY scripts/ scripts/

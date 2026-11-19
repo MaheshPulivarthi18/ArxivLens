@@ -1,0 +1,4 @@
+# Dev and test deps: runtime (requirements.txt) plus test-only tools. `make setup-py` installs this file.
+-r requirements.txt
+pytest>=8.0.0
+opentelemetry-sdk  # tests/test_m5_m6_telemetry_eval.py imports opentelemetry

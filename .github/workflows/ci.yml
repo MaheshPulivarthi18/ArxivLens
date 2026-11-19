@@ -46,7 +46,7 @@ jobs:
       - name: Install deps (CPU-only torch)
         run: |
           python -m pip install --upgrade pip
-          pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements-m0.txt minio ulid-py fastapi uvicorn
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements-dev.txt
       - run: make test-py
       - name: Kafka client tests (commit-after-process, DLQ, shutdown; fakes only)
         run: python -m pytest -v tests/test_kafka_client.py
