@@ -217,6 +217,7 @@ pytest tests/test_m0.py                    # Unit: chunker, embedder, citation v
 pytest tests/test_evals_data.py            # Unit: eval datasets — schema, sizes, corpus membership, unique IDs (no infra)
 make test-full                             # Full suite M0–M6 (host venv, make setup-py): needs make stack-up, make migrate, download + query running
 make eval                                  # Quality gate vs Product PRD §8 (scripts/eval_gate.py); see evals/README.md
+gh workflow run eval.yml                   # CI eval (also nightly, or Actions → Eval → Run workflow): gate table in the job log, results JSON in the run artifact, baseline in evals/BASELINE.md
 python scripts/evaluate_retrieval.py       # paper-level Recall@5 / MRR / NDCG@5 (+ chunk precision@5) across BM25, vector, RRF, RRF+rerank
 python scripts/evaluate_answers.py         # /v1/ask: supported citations, refusals, p50/p95 latency
 python scripts/benchmark_hnsw.py           # pgvector HNSW ef_search sweep (p50/p95/p99, QPS)
