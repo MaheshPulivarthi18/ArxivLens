@@ -12,5 +12,11 @@ export default defineConfig({
         changeOrigin: true,
       }
     }
-  }
+  },
+  // Vitest (FE-1): `npm test`. jsdom only, no network: components get fixture data via props.
+  test: {
+    environment: 'jsdom',
+    setupFiles: ['./src/test/setup.js'],
+    include: ['src/**/*.test.{js,jsx}'],
+  },
 })

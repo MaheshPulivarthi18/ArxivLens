@@ -64,6 +64,7 @@ export default function HeroSearch({ onSearch, loading }) {
           <Search className="w-5 h-5 text-muted-foreground ml-3 shrink-0" />
           <input
             type="text"
+            aria-label="Research question"
             className="w-full bg-transparent px-3 py-2 text-sm sm:text-base text-foreground placeholder:text-muted-foreground outline-none"
             placeholder="Ask a clinical question, methodology, or benchmark..."
             value={query}
