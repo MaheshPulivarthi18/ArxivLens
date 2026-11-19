@@ -9,6 +9,7 @@ const TooltipProvider = ({ delayDuration = 300, ...props }) => (
 TooltipProvider.displayName = "TooltipProvider"
 
 // Wraps Root in its own Provider so callers don't need a top-level provider.
+// The innermost Provider wins, so a top-level TooltipProvider does not change these tooltips' delay.
 const Tooltip = ({ delayDuration = 300, ...props }) => (
   <TooltipPrimitive.Provider delayDuration={delayDuration}>
     <TooltipPrimitive.Root {...props} />

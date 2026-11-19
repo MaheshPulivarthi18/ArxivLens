@@ -25,8 +25,8 @@ const ScrollArea = React.forwardRef(({ className, children, ...props }, ref) => 
     className={cn("relative overflow-hidden", className)}
     {...props}
   >
-    {/* The viewport is focusable for keyboard scrolling, so it gets the FV ring. */}
-    <ScrollAreaPrimitive.Viewport className="h-full w-full rounded-[inherit] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background">
+    {/* The viewport is focusable for keyboard scrolling, so it gets the FV ring. Inset, because Root's overflow-hidden clips an outset ring. */}
+    <ScrollAreaPrimitive.Viewport className="h-full w-full rounded-[inherit] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
       {children}
     </ScrollAreaPrimitive.Viewport>
     <ScrollBar />
