@@ -1252,3 +1252,21 @@ def test_retrieval_set_covers_every_query_kind():
     for c in _jsonl("retrieval.jsonl"):
         counts[c["kind"]] = counts.get(c["kind"], 0) + 1
     assert set(counts) == RETRIEVAL_KINDS and min(counts.values()) >= 6, counts
+
+
+def test_claims_and_citation_fields_leave_eval_results_unchanged():
+    """AI-8b AC6: claims[] (= the answer's sentences on the quoted path) and the ADR-0014 citation fields don't change
+    classify, coverage_units or case_record, for an extractive answer and for a refusal."""
+    new = {"paper_version": 2, "page": 4, "quote": "X holds.", "status": "supported"}
+    answered = {"answer": "X holds [1]. Y is uncited. Z holds [2].", "citations": [_cite(1), _cite(2)]}
+    with_claims = {**answered, "answer_kind": "quoted", "citations": [{**c, **new} for c in answered["citations"]],
+                   "claims": [{"text": "X holds.", "status": "supported", "markers": [1]},
+                              {"text": "Y is uncited.", "status": "unverified", "markers": []},
+                              {"text": "Z holds.", "status": "supported", "markers": [2]}]}
+    refused = {**A_REFUSAL, "citations": [{**c, "paper_version": 2, "page": 4, "status": "unsupported"}
+                                   for c in A_REFUSAL["citations"]]}
+    for old, cur in ((answered, with_claims), (A_REFUSAL, refused)):
+        assert evaluate_answers.classify(cur) == evaluate_answers.classify(old)
+        assert evaluate_answers.case_record("a1", "answer", cur, 5.0) == evaluate_answers.case_record("a1", "answer", old, 5.0)
+    assert evaluate_answers.coverage_units(with_claims) == evaluate_answers.coverage_units(answered) == (2, 3)
+    assert evaluate_answers.case_record("a1", "answer", with_claims, 5.0)["total_units"] == 3
