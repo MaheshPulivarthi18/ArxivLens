@@ -1,5 +1,5 @@
 import React from 'react';
-import { Microscope, BookOpen, Layers, Settings, PlusCircle, DownloadCloud } from 'lucide-react';
+import { Microscope, BookOpen, Layers, Settings, DownloadCloud } from 'lucide-react';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 
