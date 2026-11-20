@@ -19,7 +19,10 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make lint-go
-      - run: make test-go
+      - name: Go unit tests (make test-go, race detector)
+        run: make test-go
+        env:
+          GOFLAGS: -race
       - name: Kafka consumer tests (verbose, race, coverage)
         run: go test -race -count=1 -v -coverprofile=c.out ./internal/kafka/ && go tool cover -func=c.out | grep consumer.go
       - name: LLM package tests (verbose, race, per-file coverage)
