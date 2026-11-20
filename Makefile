@@ -48,8 +48,8 @@ test-go: ## Go unit tests
 test-py: ## Python unit tests: M0 + eval data + worker heartbeat + processor pages (M0 downloads BGE model on first run)
 	$(PYTEST) -q tests/test_m0.py tests/test_evals_data.py tests/test_worker_heartbeat.py tests/test_processor_pages.py tests/test_verify.py tests/test_arxiv_replay.py
 
-test-fe: ## Frontend tests (available after FE-1)
-	@cd frontend && if npm run | grep -q " test"; then npm test; else echo "no frontend tests yet (FE-1)"; fi
+test-fe: ## Frontend tests (Vitest; run npm ci in frontend/ first)
+	cd frontend && npm test
 
 test-full: ## All suites M0-M6 (needs make stack-up, make migrate, arxivlens download + query on the host). TESTS=<paths/node IDs>, PYTEST_ARGS=<extra args>
 	$(PYTEST) -q $(TESTS) $(PYTEST_ARGS)
