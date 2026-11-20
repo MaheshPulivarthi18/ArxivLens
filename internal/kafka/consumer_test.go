@@ -380,3 +380,40 @@ func TestConsumerPollErrorAfterCancel(t *testing.T) {
 		})
 	}
 }
+
+// deadlinePoll blocks in PollFetches until ctx ends, then returns ctx's own error on partition -1 (franz-go's shutdown shape).
+type deadlinePoll struct{ *fake }
+
+func (p *deadlinePoll) PollFetches(ctx context.Context) kgo.Fetches {
+	p.add("poll(deadline)")
+	<-ctx.Done()
+	return fetchOf(kgo.FetchPartition{Partition: -1, Err: ctx.Err()})
+}
+
+// OPS-H6c: pins the deadline case (M9): a ctx that ends by deadline during PollFetches also logs no "Poll error".
+func TestConsumerPollErrorAfterDeadline(t *testing.T) {
+	var buf bytes.Buffer
+	defer log.SetOutput(log.Writer())
+	log.SetOutput(&buf)
+	f, c := newFake(t, nil)
+	c.client = &deadlinePoll{f}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*ms)
+	defer cancel()
+	err := c.Start(ctx, f.handle)
+	out := buf.String()
+	if err != nil {
+		t.Errorf("Start = %v, want nil", err)
+	}
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Errorf("ctx.Err() = %v, want context.DeadlineExceeded (the row must end by deadline, not cancel)", ctx.Err())
+	}
+	if n := len(f.grep("poll(deadline)")); n != 1 {
+		t.Errorf("poll(deadline) reached %d times, want 1: %v", n, f.log)
+	}
+	if !strings.Contains(out, "Context cancelled, shutting down") {
+		t.Errorf("log missing %q:\n%s", "Context cancelled, shutting down", out)
+	}
+	if strings.Contains(out, "Poll error") {
+		t.Errorf("log contains %q, want none:\n%s", "Poll error", out)
+	}
+}
