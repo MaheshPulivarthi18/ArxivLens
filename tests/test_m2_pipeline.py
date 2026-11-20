@@ -91,7 +91,9 @@ def test_embedded_chunks_have_recorded_start_pages():
         if page_start is None:
             problems.append(f"{key}: no paper_chunk_pages row")
             continue
-        if page_number is None or page_start < page_number:
+        if page_number is None:
+            problems.append(f"{key}: page row but NULL page_number")
+        elif page_start < page_number:
             problems.append(f"{key}: page_start {page_start} < page_number {page_number}")
         last = prev.get((arxiv_id, version))
         if last is not None and page_start < last:
