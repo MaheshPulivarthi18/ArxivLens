@@ -1054,6 +1054,77 @@ def test_print_table_shows_report_only_block(capsys):
     assert "Citation coverage" in capsys.readouterr().out
 
 
+
+# EVAL-6b: a non-string refusal_reason (malformed response) is one error case, never a crash or "no reason".
+NON_STRING_REASONS = [["x"], {"k": 1}, 7, True, [], 0]
+
+
+@pytest.mark.parametrize("reason", NON_STRING_REASONS, ids=repr)
+@pytest.mark.parametrize("base", [EARLY, ANSWERED], ids=["no_citations", "with_citations"])
+def test_classify_non_string_refusal_reason_is_error(base, reason):
+    assert evaluate_answers.classify({**base, "refusal_reason": reason}) == "error"
+
+
+@pytest.mark.parametrize("reason", [None, ""], ids=["null", "empty"])
+def test_classify_null_or_empty_reason_means_no_reason(reason):
+    assert evaluate_answers.classify({**EARLY, "refusal_reason": reason}) == "refusal"
+    assert evaluate_answers.classify({**ANSWERED, "refusal_reason": reason}) == "answered"
+
+
+def test_evaluate_completes_on_non_string_refusal_reason():
+    bad = {**EARLY, "refusal_reason": ["x"]}
+    m = _run(bad, bad, near_miss=True, nm_resp=A_REFUSAL)
+    assert m["error_case_ids"] == ["a1", "x1"] and m["ask_error_count"] == 2
+    assert m["correct_refusal_rate"] == 0.0 and m["refusal_failure_ids"] == ["x1"]
+    # string values only: the near-miss A-refusal is counted, the list value is not (it is an error instead)
+    assert m["refusal_reason_counts"] == {"all_citations_unsupported": 1}
+    assert all(isinstance(k, str) for k in m["refusal_reason_counts"])
+    assert [(r["id"], r["outcome"], r["refusal_reason"]) for r in m["cases"]] == \
+        [("a1", "error", None), ("x1", "error", None), ("n1", "refusal", "all_citations_unsupported")]
+    json.dumps(m)
+
+
+def _main_with_fake_ask(monkeypatch, tmp_path, argv):
+    seen = []
+
+    def fake_make_http_ask(api_url, timeout_s, max_citations=5):
+        def ask(question):
+            seen.append(question)
+            return EARLY, 10.0
+        return ask
+
+    monkeypatch.setattr(evaluate_answers, "make_http_ask", fake_make_http_ask)
+    out = tmp_path / "answers.json"
+    assert evaluate_answers.main(argv + ["--json-out", str(out)]) == 0
+    raw = out.read_text(encoding="utf-8")
+    return json.loads(raw), raw, seen
+
+
+def _real_questions(name):
+    return [r["question"] for r in _jsonl(name)]
+
+
+def test_main_loads_real_sets_including_near_miss(monkeypatch, tmp_path, capsys):
+    m, raw, seen = _main_with_fake_ask(monkeypatch, tmp_path, [])
+    with open(os.path.join(EVALS, "refusal_near_miss.jsonl"), encoding="utf-8") as f:
+        nm_lines = sum(1 for line in f if line.strip())
+    assert nm_lines >= 10 and m["near_miss_cases"] == nm_lines
+    answers, refusals, nm = (_real_questions(n) for n in ("answer.jsonl", "refusal.jsonl", "refusal_near_miss.jsonl"))
+    assert m["answer_cases"] == len(answers) and m["refusal_cases"] == len(refusals)
+    assert seen == answers + refusals + nm
+    for q in answers + refusals + nm:  # no question text in the results JSON
+        assert q not in raw, q
+
+
+def test_main_near_miss_empty_skips_the_set(monkeypatch, tmp_path, capsys):
+    m, raw, seen = _main_with_fake_ask(monkeypatch, tmp_path, ["--near-miss", ""])
+    assert m["near_miss_cases"] == 0 and m["near_miss_correct_refusal_rate"] is None
+    nm = _real_questions("refusal_near_miss.jsonl")
+    assert not set(seen) & set(nm)
+    assert seen == _real_questions("answer.jsonl") + _real_questions("refusal.jsonl")
+    for q in seen:
+        assert q not in raw, q
+
 # --- EVAL-10: refused, missed and near-miss-failed case IDs in the summary (IDs only, no text) ---
 
 ID_LABELS = ("  refused IDs ", "  miss IDs ", "  near-miss answered IDs ")
@@ -1126,6 +1197,15 @@ def test_report_prints_no_id_lines_without_failures(capsys):
     out = capsys.readouterr().out
     assert _id_lines(out) == {} and "IDs" not in out, out
 
+
+
+def test_failed_refusal_set_call_is_error_and_refusal_failure():
+    # EVAL-10a: a refusal-set call that fails (ask returns None) is never a correct refusal and never an answer-set ID.
+    m = _run(ANSWERED, None)
+    assert m["refusal_failure_ids"] == ["x1"] and m["error_case_ids"] == ["x1"]
+    assert m["correct_refusal_rate"] == 0.0 and m["ask_error_count"] == 1
+    for key in ("expected_paper_miss_ids", "answer_refused_ids"):
+        assert "x1" not in m[key], key
 
 # --- EVAL-7: blind human review (synthetic fixtures only; agents never write real judgments) ---
 
