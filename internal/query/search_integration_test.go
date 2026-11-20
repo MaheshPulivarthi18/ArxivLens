@@ -1,10 +1,12 @@
 //go:build integration
 
-// HNSW integration test for the vector arm of the hybrid query (OPS-H5). It needs a migrated
-// PostgreSQL + pgvector database and seeds a deterministic synthetic corpus into it:
+// HNSW integration test for the vector arm of the hybrid query (OPS-H5). It needs an empty, migrated
+// PostgreSQL + pgvector database and seeds a deterministic synthetic corpus (synth.* papers) into it:
 //
 //	DATABASE_URL=postgres://... go test -tags integration -v -run TestHNSW ./internal/query/
 //
+// The seed adds chunks to every paper, so the test refuses a DB that holds other papers (skips locally,
+// fails when CI is set). It deletes leftover synth.* papers first and its own corpus afterwards (OPS-H5b).
 // It plans and runs the production constants (vectorHitsSQL, hybridSearchSQL, hnswSearchSettings),
 // not copies, and logs EXPLAIN (ANALYZE, BUFFERS) plus result count and Recall@5 against an exact scan.
 package query
@@ -67,7 +69,23 @@ func TestHNSWVectorHits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer d.Close()
+	t.Cleanup(d.Close) // registered first so it runs last, after the corpus cleanup (t.Cleanup is LIFO)
+	others, err := itPrepare(ctx, d.Pool)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if others > 0 {
+		const why = "DB holds %d non-synth papers; the seed adds synthetic chunks to every paper, so use an empty, migrated DB"
+		if os.Getenv("CI") != "" { // never let a skip pass as green in db.yml
+			t.Fatalf(why, others)
+		}
+		t.Skipf(why, others)
+	}
+	t.Cleanup(func() { // runs even when the test fails; FK cascades remove chunks, embeddings and pages
+		if _, err := d.Pool.Exec(ctx, itDeleteSynthSQL); err != nil {
+			t.Errorf("cleanup: %v", err)
+		}
+	})
 	conn, err := d.Pool.Acquire(ctx) // one session: the seed uses temp tables
 	if err != nil {
 		t.Fatal(err)
@@ -232,6 +250,82 @@ func TestHNSWVectorHits(t *testing.T) {
 				hnswSearchSettings+"; "+m.settings, hybridSearchSQL, vh+", 'synthetic chunk', 20")
 		}
 	}
+}
+
+const itDeleteSynthSQL = `DELETE FROM papers WHERE arxiv_id LIKE 'synth.%'`
+
+// itPrepare deletes synth.* papers left by an earlier crashed run and returns how many other papers remain.
+func itPrepare(ctx context.Context, pool *pgxpool.Pool) (int, error) {
+	if _, err := pool.Exec(ctx, itDeleteSynthSQL); err != nil {
+		return 0, err
+	}
+	var others int
+	err := pool.QueryRow(ctx, `SELECT count(*) FROM papers WHERE arxiv_id NOT LIKE 'synth.%'`).Scan(&others)
+	return others, err
+}
+
+// TestHNSWSeedCleanup runs after TestHNSWVectorHits (file order) and checks that it left no corpus behind,
+// and that itPrepare removes leftovers and counts foreign papers.
+func TestHNSWSeedCleanup(t *testing.T) {
+	url := os.Getenv("DATABASE_URL")
+	if url == "" {
+		t.Skip("DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	d, err := db.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(d.Close) // registered first so it runs last
+	count := func(sql string) int {
+		t.Helper()
+		var n int
+		if err := d.Pool.QueryRow(ctx, sql).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	const synthPapers = `SELECT count(*) FROM papers WHERE arxiv_id LIKE 'synth.%'`
+
+	// (a) Before anything here deletes rows: TestHNSWVectorHits removed its corpus.
+	if n, c := count(synthPapers), count(`SELECT count(*) FROM paper_chunks WHERE content LIKE 'synthetic chunk %'`); n != 0 || c != 0 {
+		t.Errorf("(a) leftover corpus after TestHNSWVectorHits: %d synth.* papers, %d synthetic chunks; want 0, 0", n, c)
+	}
+
+	cleanup := func() {
+		if _, err := d.Pool.Exec(ctx, `DELETE FROM papers WHERE arxiv_id = 'synth.99999' OR arxiv_id LIKE 'hnswb.%'`); err != nil {
+			t.Errorf("cleanup: %v", err)
+		}
+	}
+	if _, err := d.Pool.Exec(ctx, `DELETE FROM papers WHERE arxiv_id LIKE 'hnswb.%'`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cleanup)
+
+	// (b) A leftover from a crashed run is removed by itPrepare.
+	if _, err := d.Pool.Exec(ctx, `INSERT INTO papers (arxiv_id, title) VALUES ('synth.99999', 'Leftover synthetic paper')`); err != nil {
+		t.Fatal(err)
+	}
+	base, err := itPrepare(ctx, d.Pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := count(synthPapers); n != 0 {
+		t.Errorf("(b) itPrepare left %d synth.* papers; want 0", n)
+	}
+
+	// (c) A foreign paper is reported as one more other paper.
+	if _, err := d.Pool.Exec(ctx, `INSERT INTO papers (arxiv_id, title) VALUES ('hnswb.foreign', 'Foreign paper')`); err != nil {
+		t.Fatal(err)
+	}
+	others, err := itPrepare(ctx, d.Pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if others != base+1 {
+		t.Errorf("(c) itPrepare reported %d other papers after inserting hnswb.foreign; want %d", others, base+1)
+	}
+	t.Logf("itPrepare: %d other papers before, %d after inserting hnswb.foreign", base, others)
 }
 
 // itRun runs sql in a read-only transaction after settings and returns the first column (chunk IDs) in order.
