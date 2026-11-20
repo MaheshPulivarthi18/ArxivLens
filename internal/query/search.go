@@ -214,7 +214,8 @@ func (s *SearchEngine) fetchCandidates(ctx context.Context, queryString string, 
 
 // rerankAndSort scores hits with one Rerank call, orders them by fused rerank and RRF rank (ADR-0017; ties keep
 // RRF order), applies the top-5 paper cap (ADR-0016) and truncates to limit. On a rerank error, a score-count mismatch
-// or a NaN score it keeps RRF order, leaves RerankScore at 0 and logs the trace ID.
+// or a NaN or ±Inf score it keeps RRF order, leaves RerankScore at 0 and logs the trace ID. ±Inf falls back like NaN:
+// encoding/json can't encode it, so /v1/search would send a truncated body.
 func rerankAndSort(ctx context.Context, rr reranker, query string, hits []SearchHit, limit int) []SearchHit {
 	if len(hits) == 0 {
 		return hits
@@ -240,6 +241,10 @@ func rerankAndSort(ctx context.Context, rr reranker, query string, hits []Search
 		for _, sc := range scores {
 			if math.IsNaN(float64(sc)) {
 				reason = "NaN score"
+				break
+			}
+			if math.IsInf(float64(sc), 0) {
+				reason = "Inf score"
 				break
 			}
 		}
