@@ -60,15 +60,20 @@ jobs:
           # compose pins pgvector, minio and minio-client by digest; fewer means the grep stopped matching
           if [ "${#pins[@]}" -lt 3 ]; then echo "::error::found ${#pins[@]} digest pins, expected >= 3"; exit 1; fi
 
-          failed=0; resolved=()
+          failed=(); resolved=()
           for p in "${pins[@]}"; do
             if resolve "$p"; then
               echo "ok      $p"; resolved+=("$p")
             else
-              echo "::error::Pinned image ${p%@*} no longer resolves at ${p#*@} ($err). Re-pin it: CONTRIBUTING.md \"Pinned images\"."
-              failed=1
+              echo "FAIL    $p ($err)"
+              failed+=("Pinned image ${p%@*} no longer resolves at ${p#*@} ($err). Re-pin it: CONTRIBUTING.md \"Pinned images\".")
             fi
           done
+          # Nothing resolved: the tool or registry is the likelier cause, so don't tell anyone to re-pin every image.
+          if [ "${#resolved[@]}" -eq 0 ]; then
+            echo "::error::no pin resolved: check the tool/registry before re-pinning (all ${#pins[@]} pins failed, FAIL lines above)"; exit 1
+          fi
+          for m in "${failed[@]}"; do echo "::error::$m"; done
 
           # Self-test, only on images whose real pin just resolved (positive control): the all-zero digest of the same
           # image must fail with a not-found error, so a broken tool or registry outage can't pass as "digest gone".
@@ -76,10 +81,9 @@ jobs:
           for p in "${resolved[@]}"; do
             if resolve "${p%@*}@$zero"; then echo "::error::self-test: ${p%@*}@$zero resolved, want not found"; exit 1; fi
             msg="Pinned image ${p%@*} no longer resolves at $zero ($err)"
-            case "$msg" in *"${p%@*}"*) ;; *) echo "::error::self-test: message does not name ${p%@*}"; exit 1;; esac
             if ! printf '%s' "$err" | grep -qiE 'not found|manifest unknown|404'; then
               echo "::error::self-test: ${p%@*}@$zero failed with an unexpected error, not 'not found': $err"; exit 1
             fi
             echo "  (expected) $msg"
           done
-          exit "$failed"
+          if [ "${#failed[@]}" -gt 0 ]; then exit 1; fi
