@@ -50,7 +50,7 @@ export default function PapersLibrary({ onBackToSearch }) {
             <Search className="w-4 h-4 text-muted-foreground absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
-              className="bg-card border border-border rounded-lg pl-9 pr-3 py-1.5 text-xs sm:text-sm text-foreground placeholder:text-muted-foreground outline-none focus:border-emerald-500 w-48 sm:w-64"
+              className="bg-card border border-border rounded-lg pl-9 pr-3 py-1.5 text-xs sm:text-sm text-foreground placeholder:text-muted-foreground outline-none focus:border-primary w-48 sm:w-64"
               placeholder="Filter by title or ID..."
               value={filterText}
               onChange={(e) => setFilterText(e.target.value)}
@@ -85,7 +85,7 @@ export default function PapersLibrary({ onBackToSearch }) {
               {loading ? (
                 <tr>
                   <td colSpan="5" className="py-12 text-center text-muted-foreground text-sm">
-                    <div className="w-5 h-5 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto mb-2" />
+                    <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-2" />
                     <span>Loading indexed research catalog...</span>
                   </td>
                 </tr>
@@ -99,7 +99,7 @@ export default function PapersLibrary({ onBackToSearch }) {
                 filteredPapers.map((p) => (
                   <tr key={p.ID || p.ArxivID} className="hover:bg-muted/20 transition-colors">
                     <td className="py-3.5 px-4 font-mono text-xs text-muted-foreground whitespace-nowrap">
-                      {p.ArxivID} <span className="text-muted-foreground/60">(v{p.Version})</span>
+                      {p.ArxivID} <span className="text-muted-foreground">(v{p.Version})</span>
                     </td>
                     <td className="py-3.5 px-4 font-medium text-foreground max-w-md">
                       {p.Title}
@@ -114,8 +114,8 @@ export default function PapersLibrary({ onBackToSearch }) {
                       </div>
                     </td>
                     <td className="py-3.5 px-4 whitespace-nowrap">
-                      <Badge variant="clinical" className="gap-1 text-[11px]">
-                        <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                      <Badge variant="clinical" className="gap-1 text-[11px] border-border bg-supported text-supported-foreground">
+                        <CheckCircle2 className="w-3 h-3 text-supported-foreground" />
                         <span>{p.Status}</span>
                       </Badge>
                     </td>
@@ -124,7 +124,7 @@ export default function PapersLibrary({ onBackToSearch }) {
                         asChild
                         variant="ghost"
                         size="sm"
-                        className="text-xs text-emerald-400 hover:text-emerald-300 hover:bg-emerald-500/10 gap-1.5 h-7"
+                        className="text-xs text-primary hover:text-accent-foreground hover:bg-accent gap-1.5 h-7"
                       >
                         <a href={`https://arxiv.org/pdf/${p.ArxivID}.pdf`} target="_blank" rel="noreferrer">
                           <span>View PDF</span>

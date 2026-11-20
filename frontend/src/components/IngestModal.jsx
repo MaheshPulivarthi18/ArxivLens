@@ -59,7 +59,7 @@ export default function IngestModal({ isOpen, onClose, onIngestSuccess, onAskAbo
       <DialogContent className="sm:max-w-xl">
         <DialogHeader>
           <div className="flex items-center gap-2">
-            <div className="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-400">
+            <div className="p-1.5 rounded-lg bg-accent text-accent-foreground">
               <DownloadCloud className="w-5 h-5" />
             </div>
             <div>
@@ -79,7 +79,7 @@ export default function IngestModal({ isOpen, onClose, onIngestSuccess, onAskAbo
             <div className="flex gap-2">
               <input
                 type="text"
-                className="flex-1 bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground outline-none focus:border-emerald-500 font-mono"
+                className="flex-1 bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground outline-none focus:border-primary font-mono"
                 placeholder="e.g. 2608.20154 or https://arxiv.org/abs/2608.20154"
                 value={inputVal}
                 onChange={(e) => setInputVal(e.target.value)}
@@ -111,23 +111,23 @@ export default function IngestModal({ isOpen, onClose, onIngestSuccess, onAskAbo
 
           {loading && (
             <div className="p-4 rounded-lg bg-muted/40 border border-border text-center space-y-2">
-              <Loader2 className="w-6 h-6 animate-spin text-emerald-400 mx-auto" />
+              <Loader2 className="w-6 h-6 animate-spin text-primary mx-auto" />
               <div className="text-xs text-foreground font-medium">{step}</div>
               <p className="text-[11px] text-muted-foreground">Zero disk buffering • Streaming to MinIO S3 & GPU embedding</p>
             </div>
           )}
 
           {error && (
-            <div className="flex items-center gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-xs">
-              <AlertCircle className="w-4 h-4 shrink-0 text-red-400" />
+            <div className="flex items-center gap-2 p-3 rounded-lg bg-destructive/10 border border-destructive/30 text-unsupported-foreground text-xs">
+              <AlertCircle className="w-4 h-4 shrink-0 text-unsupported-foreground" />
               <span>{error}</span>
             </div>
           )}
 
           {result && (
-            <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 space-y-3 animate-in fade-in duration-200">
+            <div className="p-4 rounded-xl bg-supported border border-border space-y-3 animate-in fade-in duration-200">
               <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 text-emerald-400 font-semibold text-xs">
+                <div className="flex items-center gap-2 text-supported-foreground font-semibold text-xs">
                   <CheckCircle2 className="w-4 h-4" />
                   <span>Paper Successfully Ingested & Vector Indexed!</span>
                 </div>
@@ -149,7 +149,7 @@ export default function IngestModal({ isOpen, onClose, onIngestSuccess, onAskAbo
                 </div>
                 <div className="bg-background/80 p-2 rounded border border-border/80 text-center">
                   <div className="text-[10px] text-muted-foreground uppercase">Embeddings</div>
-                  <div className="text-base font-bold text-emerald-400 font-title">{result.embeddings}</div>
+                  <div className="text-base font-bold text-primary font-title">{result.embeddings}</div>
                 </div>
               </div>
 
