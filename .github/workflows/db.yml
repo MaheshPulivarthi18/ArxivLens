@@ -83,10 +83,10 @@ jobs:
       - name: pgvector >= 0.8.0 (hnsw.iterative_scan, OPS-H5)
         run: |
           MIN=0.8.0
-          # true when $1 >= $2 (dotted versions, numeric per component)
-          version_ge() { [ -n "$1" ] && [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]; }
+          # true when $1 >= $2 (dotted versions, numeric per component); false unless $1 is all digits and dots
+          version_ge() { [[ $1 =~ ^[0-9]+(\.[0-9]+)*$ ]] && [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]; }
           echo "Dry run of the comparison against MIN=$MIN:"
-          for v in 0.5.1 0.7.4 0.7.99 ""; do
+          for v in 0.5.1 0.7.4 0.7.99 "" missing abc 0.8.0-dev; do
             if version_ge "$v" "$MIN"; then echo "::error::self-test: '$v' passed, want fail"; exit 1; fi
             echo "  '$v' -> fail (expected)"
           done
