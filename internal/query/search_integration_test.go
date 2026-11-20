@@ -81,6 +81,11 @@ func TestHNSWVectorHits(t *testing.T) {
 		}
 		t.Skipf(why, others)
 	}
+	t.Cleanup(func() { // runs even when the test fails; FK cascades remove chunks, embeddings and pages
+		if _, err := d.Pool.Exec(ctx, itDeleteSynthSQL); err != nil {
+			t.Errorf("cleanup: %v", err)
+		}
+	})
 	conn, err := d.Pool.Acquire(ctx) // one session: the seed uses temp tables
 	if err != nil {
 		t.Fatal(err)
