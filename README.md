@@ -135,6 +135,9 @@ Check one paper:
 cd frontend && npm install && npm run dev     # UI on http://localhost:5173 (proxies /v1 → :8080)
 ```
 
+The theme button in the navbar switches between Light, Dark and System (follows your OS); the choice is stored in your
+browser (`localStorage`), and the first visit starts in Dark.
+
 ### Option: Python workers on the host (Apple-silicon MPS acceleration)
 
 Docker on macOS has no MPS, so for GPU-speed embedding on a Mac start infra only and run the three Python processes
