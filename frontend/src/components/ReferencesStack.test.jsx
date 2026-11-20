@@ -7,6 +7,7 @@ import {
   unsupportedCitation,
   unverifiedCitation,
   refusalA,
+  refusalB,
   refusalC,
 } from '../test/fixtures';
 
@@ -83,6 +84,21 @@ describe('ReferencesStack', () => {
     expect(document.body.textContent).not.toMatch(/0\.0%|verified/i);
     // every passage stays one click from its PDF
     expect(screen.getAllByRole('link', { name: /open pdf/i })).toHaveLength(2);
+  });
+
+  it('refusal B: "Unsupported · 22.0%" and "Not checked" chips under "2 passages"', () => {
+    renderStack(refusalB.citations, vi.fn(), refusalB.refusal_reason);
+    const heading = screen.getByRole('heading', { name: /Retrieved passages \(no answer was shown\)/ });
+    expect(heading).toHaveTextContent('2 passages');
+    expect(within(card(1)).getByText('Unsupported · 22.0%')).toBeInTheDocument();
+    expect(within(card(2)).getByText('Not checked')).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/0\.0%|verified/i);
+  });
+
+  it('refusal mode with one passage: heading badge reads "1 passage"', () => {
+    renderStack([refusalA.citations[0]], vi.fn(), refusalA.refusal_reason);
+    const heading = screen.getByRole('heading', { name: /Retrieved passages \(no answer was shown\)/ });
+    expect(heading).toHaveTextContent(/\b1 passage$/);
   });
 
   it('refusal C: every chip reads "Not checked"', () => {

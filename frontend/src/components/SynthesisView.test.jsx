@@ -2,7 +2,15 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, within, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import SynthesisView from './SynthesisView';
-import { quotedAnswer, synthesizedAnswer, mixedAnswer, refusalA, refusalB, refusalC } from '../test/fixtures';
+import {
+  quotedAnswer,
+  synthesizedAnswer,
+  mixedAnswer,
+  earlyRefusal,
+  refusalA,
+  refusalB,
+  refusalC,
+} from '../test/fixtures';
 
 const COPY_A = /A draft answer was written, but none of its statements was supported by the passages it cited, so it isn't shown\. The passages that were found are listed as evidence\./;
 const COPY_B = /Citation checking is unavailable right now, so the answer couldn't be checked and isn't shown\. The passages that were found are listed as evidence\. Try again in a moment\./;
@@ -88,6 +96,12 @@ describe('SynthesisView', () => {
     expect(document.activeElement).toBe(link);
   });
 
+  it('a refusal with one passage links "Read the 1 retrieved passage"', () => {
+    renderView({ ...refusalA, citations: [refusalA.citations[0]] });
+    const panel = screen.getByRole('status', { name: /no answer shown/i });
+    expect(within(panel).getByRole('link', { name: 'Read the 1 retrieved passage' })).toBeInTheDocument();
+  });
+
   it('a refusal with zero citations still renders the panel, without a link', () => {
     renderView({ ...refusalA, citations: [] });
     const panel = screen.getByRole('status', { name: /no answer shown/i });
@@ -107,6 +121,11 @@ describe('SynthesisView', () => {
   it('answer-mode footer summarises how many citations are supported', () => {
     renderView(mixedAnswer);
     expect(screen.getByText('1 of 3 citations supported')).toBeInTheDocument();
+  });
+
+  it('answer-mode footer with no citations reads "0 of 0 citations supported"', () => {
+    renderView(earlyRefusal);
+    expect(screen.getByText('0 of 0 citations supported')).toBeInTheDocument();
   });
 
   it('Export Note writes "## References" and each entry ends with its chip text', async () => {
