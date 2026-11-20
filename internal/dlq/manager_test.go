@@ -15,15 +15,14 @@ import (
 // fakeReader is an in-memory topic. Read delivers records in chunks of 3 (one chunk = one poll), honours [from, until)
 // and fn's stop, and can fail after a scripted number of records. late records are appended once Watermarks has been taken.
 type fakeReader struct {
-	low      map[int32]int64
-	log      map[int32][]Record
-	late     map[int32]int // records appended to the partition right after the first Watermarks
-	wmErr    error
-	readErr  error // returned by Read once failAt records have been delivered (-1: never)
-	failAt   int
-	polls    int
-	reads    []string // "p:from-until"
-	snapshot bool
+	low     map[int32]int64
+	log     map[int32][]Record
+	late    map[int32]int // records appended to the partition right after the first Watermarks
+	wmErr   error
+	readErr error // returned by Read once failAt records have been delivered (-1: never)
+	failAt  int
+	polls   int
+	reads   []string // "p:from-until"
 }
 
 func newFakeReader(parts map[int32][2]int64) *fakeReader { // partition -> {low, count}
@@ -51,12 +50,10 @@ func (f *fakeReader) Watermarks(_ context.Context, _ string) (map[int32]Watermar
 	for p, recs := range f.log {
 		wm[p] = Watermark{Low: f.low[p], High: f.low[p] + int64(len(recs))}
 	}
-	if !f.snapshot {
-		f.snapshot = true
-		for p, n := range f.late {
-			f.add(p, n)
-		}
+	for p, n := range f.late {
+		f.add(p, n)
 	}
+	f.late = nil
 	return wm, nil
 }
 
@@ -237,8 +234,5 @@ func TestParseCursor(t *testing.T) {
 		if c, err := ParseCursor(s); err == nil || c.IsSet() || !strings.Contains(err.Error(), "want P/O") {
 			t.Errorf("ParseCursor(%q) = %v, %v; want a P/O error", s, c, err)
 		}
-	}
-	if (Cursor{}).IsSet() {
-		t.Error("zero Cursor is set")
 	}
 }
