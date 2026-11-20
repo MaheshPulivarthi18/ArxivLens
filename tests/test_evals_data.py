@@ -1095,6 +1095,30 @@ def test_report_names_refused_missed_and_near_miss_ids(capsys):
         assert text not in out and text not in dumped, text
 
 
+@pytest.mark.parametrize("err_resp", [None, B_RESPONSE], ids=["failed_call", "verification_unavailable"])
+def test_errored_cases_are_misses_and_near_miss_failures_not_refusals(capsys, err_resp):
+    # EVAL-10a: both paths classify as outcome "error"; an errored answer-set case is a miss, never a refusal,
+    # and an errored near-miss case counts as a near-miss failure (evals/README.md: "errors included").
+    answers = [{"id": "a7", "question": "Q-REFUSED-err", "expected_arxiv_ids": ["1706.03762"]},
+               {"id": "a9", "question": "Q-ERRORED-ans", "expected_arxiv_ids": ["1706.03762"]}]
+    nm = [{"id": "n6", "question": "Q-ERRORED-nm"}]
+    canned = {"Q-REFUSED-err": EARLY, "Q-ERRORED-ans": err_resp, "Q-ERRORED-nm": err_resp}
+    m = evaluate_answers.evaluate(answers, [], lambda q: (canned[q], 50.0), nm)
+    assert [r["outcome"] for r in m["cases"]] == ["refusal", "error", "error"]
+    assert m["error_case_ids"] == ["a9"] and m["expected_paper_miss_ids"] == ["a7", "a9"]
+    assert m["answer_refused_ids"] == ["a7"] and "a9" not in m["answer_refused_ids"]
+    assert m["near_miss_failure_ids"] == ["n6"] and m["near_miss_error_ids"] == ["n6"]
+    evaluate_answers.print_report(m)
+    out = capsys.readouterr().out
+    lines = _id_lines(out)
+    assert lines["  refused IDs "].split(": ", 1)[1] == "a7", out
+    assert lines["  miss IDs "].split(": ", 1)[1] == "a7, a9", out
+    assert lines["  near-miss answered IDs "].split(": ", 1)[1] == "n6", out
+    dumped = json.dumps(m)
+    for text in ("Q-REFUSED-err", "Q-ERRORED-ans", "Q-ERRORED-nm", B_RESPONSE["answer"], EARLY["answer"], "passage text"):
+        assert text not in out and text not in dumped, text
+
+
 def test_report_prints_no_id_lines_without_failures(capsys):
     m = _run(ANSWERED, EARLY, near_miss=True, nm_resp=EARLY)
     assert m["answer_refused_ids"] == [] and m["expected_paper_miss_ids"] == [] and m["near_miss_failure_ids"] == []
