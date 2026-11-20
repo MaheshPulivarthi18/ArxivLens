@@ -101,9 +101,32 @@ func markers(cs []Citation) []int {
 
 // checkCitationInvariants is AI-8a AC1: every citation has paper_version and a status in the enum, supported ==
 // (status == supported), and a quote only on a supported citation, in its content. A response without answer_kind
-// is a refusal (design condition 3) and never has a supported citation.
+// is a refusal (design condition 3) and never has a supported citation. AI-8b AC1: a refusal has no claims and no
+// prompt_version keys; any other response has claims, each with text, a status in the enum equal to claimStatus of
+// its citations, and non-nil markers, which are the markers of citations[o:o+len(markers)] (ordering invariant);
+// prompt_version is synthesisPromptVersion exactly when the answer is synthesized.
 func checkCitationInvariants(t *testing.T, resp *AskResponse) {
 	t.Helper()
+	top, _ := json.Marshal(resp)
+	if resp.AnswerKind == "" && (strings.Contains(string(top), `"claims":`) || strings.Contains(string(top), `"prompt_version":`)) {
+		t.Errorf("refusal has claims or prompt_version: %s", top)
+	}
+	if resp.PromptVersion != map[bool]string{true: synthesisPromptVersion}[resp.AnswerKind == AnswerSynthesized] {
+		t.Errorf("answer_kind %q with prompt_version %q", resp.AnswerKind, resp.PromptVersion)
+	}
+	o := 0
+	for i, cl := range resp.Claims {
+		n := len(cl.Markers)
+		if cl.Text == "" || cl.Markers == nil || o+n > len(resp.Citations) ||
+			cl.Status != claimStatus(resp.Citations[o:o+n]) || !reflect.DeepEqual(markers(resp.Citations[o:o+n]), cl.Markers) {
+			t.Errorf("claim %d %+v breaks the AI-8b AC1 invariants at citation offset %d: %+v", i, cl, o, resp.Citations)
+			return
+		}
+		o += n
+	}
+	if resp.AnswerKind != "" && (len(resp.Claims) == 0 || o != len(resp.Citations)) {
+		t.Errorf("answer_kind %q: claims %+v cover %d of %d citations", resp.AnswerKind, resp.Claims, o, len(resp.Citations))
+	}
 	for i, c := range resp.Citations {
 		raw, _ := json.Marshal(c)
 		if !strings.Contains(string(raw), `"paper_version":`) || (c.Status != StatusSupported && c.Status != StatusUnsupported &&
@@ -531,6 +554,22 @@ func TestAskResponseShapeAndConstructor(t *testing.T) {
 	if got, want := sortedKeys(refused), []string{"answer", "citations", "refusal_reason", "trace_id"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("refusal response keys %v, want %v", got, want)
 	}
+	// AI-8b (ADR-0014): claims and prompt_version appear only when set; every key keeps its JSON type.
+	full, _ = json.Marshal(AskResponse{Citations: []Citation{}, RefusalReason: "r", AnswerKind: AnswerQuoted, SynthesisAvailable: true,
+		Claims: []Claim{{Markers: []int{}}}, PromptVersion: synthesisPromptVersion})
+	m = nil
+	_ = json.Unmarshal(full, &m)
+	types = map[string]string{"answer": "string", "citations": "[]interface {}", "trace_id": "string", "refusal_reason": "string",
+		"answer_kind": "string", "synthesis_available": "bool", "claims": "[]interface {}", "prompt_version": "string"}
+	claim, _ := m["claims"].([]any)
+	if got := fmt.Sprint(claim); len(m) != len(types) || got != "[map[markers:[] status: text:]]" {
+		t.Errorf("response keys %v, claims %s", sortedKeys(full), got)
+	}
+	for k, want := range types {
+		if got := fmt.Sprintf("%T", m[k]); got != want {
+			t.Errorf("response key %q has JSON type %s, want %s", k, got, want)
+		}
+	}
 	se, ec := &SearchEngine{}, &EmbedClient{}
 	if r := NewRAGService(se, ec); r.searchEngine != searcher(se) || r.verifier != verifier(ec) || r.extractor != reranker(ec) {
 		t.Errorf("dependencies not wired: %+v", r)
@@ -734,7 +773,7 @@ func TestAskRefusesVerificationUnavailable(t *testing.T) {
 		resp.Citations[1].Supported || resp.Citations[1].Score != 0 {
 		t.Errorf("quote with verifier down: %+v", resp)
 	}
-	checkCitationInvariants(t, &AskResponse{Citations: resp.Citations, AnswerKind: AnswerQuoted}) // AskWith sets the kind
+	checkCitationInvariants(t, &AskResponse{Citations: resp.Citations, Claims: resp.Claims, AnswerKind: AnswerQuoted}) // AskWith sets the kind
 	if lines := strings.Split(strings.TrimSpace(buf.String()), "\n"); len(lines) != 1 || !strings.Contains(lines[0], "unverified=1 citations=2 pairs=2 verify_errors=1") {
 		t.Errorf("log = %q, want one unverified line for the paraphrase only", buf.String())
 	}
@@ -790,9 +829,9 @@ func TestAskKeepsAnswerWithOneSupportedCitation(t *testing.T) {
 		resp.Citations[1].Supported || resp.Citations[1].Score != 0.2 || resp.Citations[2].Supported {
 		t.Errorf("citations %+v, want [1] supported 0.9, [2] and [3] unsupported 0.2", resp.Citations)
 	}
-	checkCitationInvariants(t, &AskResponse{Citations: resp.Citations, AnswerKind: AnswerQuoted}) // AskWith sets the kind
+	checkCitationInvariants(t, &AskResponse{Citations: resp.Citations, Claims: resp.Claims, AnswerKind: AnswerQuoted}) // AskWith sets the kind
 	raw, _ := json.Marshal(resp)
-	if got, want := sortedKeys(raw), []string{"answer", "citations", "trace_id"}; !reflect.DeepEqual(got, want) {
+	if got, want := sortedKeys(raw), []string{"answer", "citations", "claims", "trace_id"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("JSON keys %v, want %v", got, want)
 	}
 	if buf.Len() != 0 {
@@ -1115,7 +1154,7 @@ func TestCitationStatusRule(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			captureLog(t)
 			r, ctx := &RAGService{verifier: tc.v}, context.Background()
-			quoted, _ := r.checkCitations(ctx, "A paraphrase only NLI can check [1].", batchHits())
+			quoted, _, _ := r.checkCitations(ctx, "A paraphrase only NLI can check [1].", batchHits())
 			// The claim is verbatim in passage 2 only, so it is kept and its NLI-scored citation 1 is shown.
 			quote := map[string]string{"fabricated quote at 0.9": "The Results section shows"}[tc.name] // not in passage 1: LLM citation 1 unsupported at 0.9
 			want := map[string]string{"extractive": tc.want, "llm": map[bool]string{false: tc.want, true: U}[quote != ""]}
@@ -1268,5 +1307,93 @@ func TestCitationProvenance(t *testing.T) {
 				t.Errorf("v%d %s: %s", tc.version, resp.AnswerKind, raw)
 			}
 		}
+	}
+}
+
+// AI-8b AC2-AC4: claims list the answer's statements in order with their markers; prompt_version names the prompt.
+func TestAskClaims(t *testing.T) {
+	captureLog(t)
+	ctx := context.Background()
+	S, U, V := StatusSupported, StatusUnsupported, StatusUnverified
+	hasKey := func(resp *AskResponse, key string) bool {
+		raw, _ := json.Marshal(resp)
+		return strings.Contains(string(raw), `"`+key+`":`)
+	}
+	quoted, _ := newRAG(batchHits(), nil).Ask(ctx, "q", nil, 3)
+	var want []Claim
+	for i, sec := range []string{"Method", "Results", "Discussion"} {
+		want = append(want, Claim{"The " + sec + " section shows that the proposed method improves accuracy on every benchmark.", S, []int{i + 1}})
+	}
+	if checkCitationInvariants(t, quoted); quoted.AnswerKind != AnswerQuoted || !reflect.DeepEqual(quoted.Claims, want) || hasKey(quoted, "prompt_version") {
+		t.Errorf("extractive: kind %q claims %+v", quoted.AnswerKind, quoted.Claims)
+	}
+	// LLM: claim 1 (passage 1 at 0.1) is dropped; claim 2 is kept with both markers, one supported.
+	r, _ := llmRAG(batchHits(), byPassage(map[string]float64{"Method": 0.1, "Results": 0.2, "Discussion": 0.8}), llmtest.Reply(twoClaims))
+	synth, _ := r.Ask(ctx, "q", nil, 3)
+	if checkCitationInvariants(t, synth); synth.AnswerKind != AnswerSynthesized || synth.PromptVersion != "synthesis-v1" || !hasKey(synth, "prompt_version") ||
+		!reflect.DeepEqual(synth.Claims, []Claim{{"Results confirm the gain.", S, []int{2, 3}}}) || !reflect.DeepEqual(statuses(synth.Citations), []string{U, S}) {
+		t.Errorf("synthesized: %+v", synth)
+	}
+	r, _ = llmRAG(batchHits(), simVerifier(constSim(1)), llmtest.Reply(twoClaims))
+	quick, _ := r.AskWith(ctx, "q", nil, 3, AskOptions{Quick: true})
+	if checkCitationInvariants(t, quick); quick.AnswerKind != AnswerQuoted || len(quick.Claims) != 3 || hasKey(quick, "prompt_version") {
+		t.Errorf("quick: %+v", quick)
+	}
+	// Direct checkCitations: an uncited fragment is an unverified claim with markers []; markers keep occurrence order,
+	// duplicates included, and out-of-range markers are not markers.
+	answer := "The Method section shows that the proposed method improves accuracy on every benchmark [1]. An uncited fragment. Results confirm it [2][9][2]."
+	cites, claims, _ := (&RAGService{verifier: simVerifier(constSim(0.3))}).checkCitations(ctx, answer, batchHits())
+	if checkCitationInvariants(t, &AskResponse{Citations: cites, Claims: claims, AnswerKind: AnswerQuoted}); !reflect.DeepEqual(claims, []Claim{
+		{want[0].Text, S, []int{1}}, {"An uncited fragment.", V, []int{}}, {"Results confirm it.", U, []int{2, 2}}}) {
+		t.Errorf("direct claims %+v", claims)
+	}
+	if raw, _ := json.Marshal(claims[1]); string(raw) != `{"text":"An uncited fragment.","status":"unverified","markers":[]}` {
+		t.Errorf("uncited claim JSON %s", raw)
+	}
+	// A claim whose citation was never checked (verifier down) is unverified, not unsupported.
+	quoteThenParaphrase := want[0].Text[:len(want[0].Text)-1] + " [1]. A paraphrase that only NLI could check [2]."
+	_, claims, _ = (&RAGService{verifier: &fakeVerifier{err: errors.New("down")}}).checkCitations(ctx, quoteThenParaphrase, batchHits())
+	if !reflect.DeepEqual(claims, []Claim{{want[0].Text, S, []int{1}}, {"A paraphrase that only NLI could check.", V, []int{2}}}) {
+		t.Errorf("verifier down claims %+v", claims)
+	}
+	// claimStatus by literal value: any supported citation wins, else any unverified, else unsupported.
+	for _, tc := range []struct {
+		in   []string
+		want string
+	}{{nil, V}, {[]string{U}, U}, {[]string{V}, V}, {[]string{U, V}, V}, {[]string{V, U}, V}, {[]string{U, S}, S}, {[]string{V, S}, S}, {[]string{U, U}, U}} {
+		var cs []Citation
+		for _, st := range tc.in {
+			cs = append(cs, Citation{Status: st})
+		}
+		if got := claimStatus(cs); got != tc.want {
+			t.Errorf("claimStatus(%v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	// AC4 (design condition 7): "e.g." and "0.5" inside the quoted sentence do not split it; one claim.
+	sent := "Regularisers such as dropout, e.g. at rate 0.5, improve accuracy on every benchmark"
+	h := ragHit(1, "Method", 0.9)
+	h.Content = "Paper — Method\n\n" + sent + "."
+	one, _ := newRAG([]SearchHit{h}, nil).Ask(ctx, "q", nil, 3)
+	if checkCitationInvariants(t, one); !reflect.DeepEqual(one.Claims, []Claim{{sent + ".", S, []int{1}}}) {
+		t.Errorf("e.g./0.5 sentence: answer %q claims %+v", one.Answer, one.Claims)
+	}
+	// AC3: every refusal path has neither key; the early refusal keeps citations [] and no refusal_reason.
+	paraphrase := "The proposed method is reported to raise benchmark accuracy [1]. Training follows the described setup [2]."
+	refusals := map[string]*AskResponse{
+		reasonAllUnsupported:          (&RAGService{verifier: simVerifier(constSim(0.3))}).finalize(ctx, "t", paraphrase, batchHits()),
+		reasonVerificationUnavailable: (&RAGService{verifier: &fakeVerifier{err: errors.New("down")}}).finalize(ctx, "t", paraphrase, batchHits()),
+		"no in-range marker":          (&RAGService{verifier: simVerifier(constSim(0.9))}).finalize(ctx, "t", "Claim [9].", batchHits()),
+	}
+	r, _ = llmRAG(batchHits(), simVerifier(constSim(1)), llmtest.Reply(`{"claims": [], "insufficient_evidence": true}`))
+	refusals[reasonInsufficientEvidence], _ = r.Ask(ctx, "q", nil, 3)
+	refusals["early"], _ = newRAG([]SearchHit{ragHit(1, "Method", 0.2)}, nil).Ask(ctx, "q", nil, 3)
+	for name, resp := range refusals {
+		checkCitationInvariants(t, resp)
+		if resp.AnswerKind != "" || resp.Claims != nil || hasKey(resp, "claims") || hasKey(resp, "prompt_version") {
+			t.Errorf("%s: %+v", name, resp)
+		}
+	}
+	if early := refusals["early"]; early.Citations == nil || len(early.Citations) != 0 || hasKey(early, "refusal_reason") {
+		t.Errorf("early refusal %+v", early)
 	}
 }
