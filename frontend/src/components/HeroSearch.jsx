@@ -55,7 +55,7 @@ export default function HeroSearch({ onSearch, loading }) {
         Query Peer-Reviewed Research Literature
       </h1>
       <p className="text-sm sm:text-base text-muted-foreground max-w-2xl mx-auto mb-6">
-        Ask biomedical, AI, and clinical research questions. Every claim is mathematically verified against underlying PostgreSQL vector embeddings.
+        Ask research questions about the indexed arXiv papers. Every answer cites the passages it came from, and each citation is labelled supported, unsupported or not checked.
       </p>
 
       {/* Main Clinical Search Bar */}

@@ -6,12 +6,15 @@ import {
   supportedCitation,
   unsupportedCitation,
   unverifiedCitation,
+  refusalA,
+  refusalB,
+  refusalC,
 } from '../test/fixtures';
 
 const VERIFIED = /\bVerified\b/;
 
-function renderStack(citations, onCopy = vi.fn()) {
-  render(<ReferencesStack citations={citations} activeMarker={null} onCopy={onCopy} />);
+function renderStack(citations, onCopy = vi.fn(), refusalReason) {
+  render(<ReferencesStack citations={citations} activeMarker={null} onCopy={onCopy} refusalReason={refusalReason} />);
   return onCopy;
 }
 
@@ -36,9 +39,16 @@ describe('ReferencesStack', () => {
     );
   });
 
-  it('labels a supported citation as Verified with its score', () => {
-    renderStack([supportedCitation]);
-    expect(within(card(1)).getByText(/87\.3% Verified/)).toBeInTheDocument();
+  it('answer mode: chips read "Supported · 87.3%" and "Unsupported · 12.0%", heading "References"', () => {
+    renderStack([supportedCitation, unsupportedCitation]);
+    expect(within(card(1)).getByText('Supported · 87.3%')).toBeInTheDocument();
+    expect(within(card(2)).getByText('Unsupported · 12.0%')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /^References/ })).toHaveAttribute('id', 'references-heading');
+    expect(screen.getByText('Click [n] in text to inspect')).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/verified/i);
+    // the old cosine gauge is gone; the score appears once, in the chip
+    expect(screen.queryByText(/Cosine/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
   });
 
   it('flags supported: false visibly and never calls it Verified', () => {
@@ -56,10 +66,51 @@ describe('ReferencesStack', () => {
     expect(screen.queryByText(VERIFIED)).not.toBeInTheDocument();
   });
 
-  it('shows an unchecked citation (verifier outage, score 0) as Unverified, not "0.0% Verified"', () => {
+  it('shows an unchecked citation (verifier outage, score 0) as "Not checked", with no percentage', () => {
     renderStack([unverifiedCitation]);
-    expect(screen.getByText(/Unverified · 0\.0%/)).toBeInTheDocument();
-    expect(screen.queryByText(VERIFIED)).not.toBeInTheDocument();
+    expect(within(card(3)).getByText('Not checked')).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/0\.0%|verified/i);
+  });
+
+  it('refusal A: heading "Retrieved passages (no answer was shown)", "Unsupported · 31.0%" and "Not checked" chips, no "0.0%"', () => {
+    renderStack(refusalA.citations, vi.fn(), refusalA.refusal_reason);
+    const heading = screen.getByRole('heading', { name: /Retrieved passages \(no answer was shown\)/ });
+    expect(heading).toHaveAttribute('id', 'references-heading');
+    expect(heading).toHaveAttribute('tabindex', '-1');
+    expect(heading).toHaveTextContent('2 passages');
+    expect(within(card(1)).getByText('Unsupported · 31.0%')).toBeInTheDocument();
+    expect(within(card(2)).getByText('Not checked')).toBeInTheDocument();
+    expect(screen.queryByText('Click [n] in text to inspect')).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/0\.0%|verified/i);
+    // every passage stays one click from its PDF
+    expect(screen.getAllByRole('link', { name: /open pdf/i })).toHaveLength(2);
+  });
+
+  it('refusal B: "Unsupported · 22.0%" and "Not checked" chips under "2 passages"', () => {
+    renderStack(refusalB.citations, vi.fn(), refusalB.refusal_reason);
+    const heading = screen.getByRole('heading', { name: /Retrieved passages \(no answer was shown\)/ });
+    expect(heading).toHaveTextContent('2 passages');
+    expect(within(card(1)).getByText('Unsupported · 22.0%')).toBeInTheDocument();
+    expect(within(card(2)).getByText('Not checked')).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/0\.0%|verified/i);
+  });
+
+  it('refusal mode with one passage: heading badge reads "1 passage"', () => {
+    renderStack([refusalA.citations[0]], vi.fn(), refusalA.refusal_reason);
+    const heading = screen.getByRole('heading', { name: /Retrieved passages \(no answer was shown\)/ });
+    expect(heading).toHaveTextContent(/\b1 passage$/);
+  });
+
+  it('refusal C: every chip reads "Not checked"', () => {
+    renderStack(refusalC.citations, vi.fn(), refusalC.refusal_reason);
+    expect(screen.getByRole('heading', { name: /Retrieved passages \(no answer was shown\)/ })).toBeInTheDocument();
+    expect(screen.getAllByText('Not checked')).toHaveLength(2);
+    expect(document.body.textContent).not.toMatch(/0\.0%|verified|\bSupported\b/i);
+  });
+
+  it('refusal mode: a legacy citation without status and score 0 reads "Not checked"', () => {
+    renderStack([{ ...unverifiedCitation, status: undefined }], vi.fn(), 'all_citations_unsupported');
+    expect(screen.getByText('Not checked')).toBeInTheDocument();
   });
 
   it('Copy BibTeX passes an @article{arxiv_... entry to onCopy', async () => {
