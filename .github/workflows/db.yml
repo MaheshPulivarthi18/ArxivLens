@@ -2,6 +2,7 @@ name: DB
 
 # Real PostgreSQL + pgvector checks (OPS-H5): migrations on a fresh DB are idempotent and create the
 # HNSW index; the vector arm of the hybrid query is planned and measured against an exact scan.
+# OPS-H9: pgvector >= 0.8.0 check (hnsw.iterative_scan) and the EVAL-5 real_postgres eval-data test.
 on:
   pull_request:
   push:
@@ -17,7 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: pgvector/pgvector:pg16
+        # Same pin as docker-compose.yml (image-pins.yml checks they match). Re-pin: CONTRIBUTING.md "Pinned images".
+        image: pgvector/pgvector:pg16@sha256:484e838076e04939d27d3e176e91c86eea96236126023be8d3059761122e579f
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -78,6 +80,41 @@ jobs:
           $PSQL -At < /tmp/snapshot.sql > /tmp/run2.txt
           diff -u /tmp/run1.txt /tmp/run2.txt
           echo "Schema identical after run 2: $(wc -l < /tmp/run2.txt) objects (extensions, columns, indexes)"
+      - name: pgvector >= 0.8.0 (hnsw.iterative_scan, OPS-H5)
+        run: |
+          MIN=0.8.0
+          # true when $1 >= $2 (dotted versions, numeric per component)
+          version_ge() { [ -n "$1" ] && [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]; }
+          echo "Dry run of the comparison against MIN=$MIN:"
+          for v in 0.5.1 0.7.4 0.7.99 ""; do
+            if version_ge "$v" "$MIN"; then echo "::error::self-test: '$v' passed, want fail"; exit 1; fi
+            echo "  '$v' -> fail (expected)"
+          done
+          for v in 0.8.0 0.8.7 0.10.0 1.0.0; do
+            if ! version_ge "$v" "$MIN"; then echo "::error::self-test: '$v' failed, want pass"; exit 1; fi
+            echo "  '$v' -> pass (expected)"
+          done
+          GOT="$($PSQL -At -c "SELECT extversion FROM pg_extension WHERE extname = 'vector'")"
+          echo "pg_extension vector extversion: '${GOT}'"
+          if ! version_ge "$GOT" "$MIN"; then
+            echo "::error::pgvector extension is '${GOT:-missing}', need >= $MIN (hnsw.iterative_scan in search.go). Re-pin the postgres image: CONTRIBUTING.md \"Pinned images\"."
+            exit 1
+          fi
+          echo "pgvector $GOT >= $MIN: ok"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Eval-data SQL on real Postgres (EVAL-5, tests/test_evals_data.py -k real_postgres)
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          set -o pipefail
+          python -m pip install --quiet "psycopg[binary]>=3.1.0" "pytest>=8.0.0"
+          python -m pytest -v -rA tests/test_evals_data.py -k real_postgres | tee /tmp/real_postgres.txt
+          # A skip (no DATABASE_URL, psycopg missing) must not pass as green.
+          if grep -Eq '[0-9]+ skipped' /tmp/real_postgres.txt || ! grep -Eq '[1-9][0-9]* passed' /tmp/real_postgres.txt; then
+            echo "::error::real_postgres tests did not all run and pass (skipped or none collected)"; exit 1
+          fi
       - name: HNSW plan + recall + search provenance (real search.go SQL)
         run: |
           go vet -tags integration ./internal/query/

@@ -66,9 +66,11 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run lint
-      - name: Test (if FE-1 has added a test script)
-        run: if npm run | grep -q " test"; then npm test; else echo "no frontend tests yet"; fi
+      - name: Test
+        run: npm run test --if-present
       - run: npm run build
+      - name: dist/ report (fonts, CSS)
+        run: ../.github/scripts/frontend-dist-report.sh dist
 
   agent-ownership:
     name: Agent ownership check

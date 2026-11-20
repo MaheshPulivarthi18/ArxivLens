@@ -1,9 +1,18 @@
 import React from 'react';
-import { ExternalLink, FileCode, ShieldCheck, BookOpen } from 'lucide-react';
+import { ExternalLink, FileCode, ShieldCheck, ShieldAlert, BookOpen } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent, CardFooter } from './ui/card';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import { Progress } from './ui/progress';
+
+// Verification label for a citation (QA-4, PRD §7): only a supported citation may say "Verified".
+// `status` (ADR-0014) is preferred; `supported` is the fallback for responses without it.
+function verification(cit) {
+  const status = cit.status || (cit.supported ? 'supported' : 'unsupported');
+  if (status === 'supported' && cit.supported !== false) return { ok: true, label: 'Verified' };
+  if (status === 'unverified') return { ok: false, label: 'Unverified' };
+  return { ok: false, label: 'Unsupported' };
+}
 
 export default function ReferencesStack({ citations, activeMarker, onCopy }) {
   if (!citations || citations.length === 0) {
@@ -45,11 +54,14 @@ export default function ReferencesStack({ citations, activeMarker, onCopy }) {
         const pdfURL = cit.pdf_url || `https://arxiv.org/pdf/${cit.arxiv_id}.pdf`;
         const scorePct = cit.score * 100;
         const scoreFormatted = scorePct.toFixed(1);
+        const check = verification(cit);
 
         return (
           <Card
             key={cit.marker}
             id={`ref-${cit.marker}`}
+            role="article"
+            aria-label={`Citation [${cit.marker}]: ${cit.title}`}
             className={`transition-all duration-300 ${
               isHighlighted
                 ? 'border-emerald-500 ring-2 ring-emerald-500/20 bg-card shadow-lg shadow-emerald-950/20'
@@ -67,10 +79,17 @@ export default function ReferencesStack({ citations, activeMarker, onCopy }) {
                   </Badge>
                 </div>
 
-                <Badge variant={cit.supported ? 'verified' : 'secondary'} className="gap-1 text-[11px]">
-                  <ShieldCheck className="w-3 h-3 text-emerald-400" />
-                  <span>{scoreFormatted}% Verified</span>
-                </Badge>
+                {check.ok ? (
+                  <Badge variant="verified" className="gap-1 text-[11px]">
+                    <ShieldCheck className="w-3 h-3 text-emerald-400" aria-hidden="true" />
+                    <span>{scoreFormatted}% Verified</span>
+                  </Badge>
+                ) : (
+                  <Badge variant="secondary" className="gap-1 text-[11px] border-amber-500/40 text-amber-300">
+                    <ShieldAlert className="w-3 h-3 text-amber-400" aria-hidden="true" />
+                    <span>{check.label} · {scoreFormatted}%</span>
+                  </Badge>
+                )}
               </div>
 
               <CardTitle className="text-sm font-semibold text-foreground mt-2 leading-snug">
@@ -104,7 +123,7 @@ export default function ReferencesStack({ citations, activeMarker, onCopy }) {
                 size="sm"
                 className="text-xs text-emerald-400 hover:text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/10 gap-1.5 h-7"
               >
-                <a href={pdfURL} target="_blank" rel="noreferrer">
+                <a href={pdfURL} target="_blank" rel="noreferrer" aria-label={`Open PDF for [${cit.marker}] (opens in a new tab)`}>
                   <ExternalLink className="w-3 h-3" />
                   <span>Open PDF ↗</span>
                 </a>
@@ -114,6 +133,7 @@ export default function ReferencesStack({ citations, activeMarker, onCopy }) {
                 variant="ghost"
                 size="sm"
                 onClick={() => handleBibTeXCopy(cit)}
+                aria-label={`Copy BibTeX for [${cit.marker}]`}
                 className="text-xs text-muted-foreground hover:text-foreground gap-1.5 h-7"
               >
                 <FileCode className="w-3 h-3" />

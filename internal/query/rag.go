@@ -88,6 +88,34 @@ type AskResponse struct {
 	// SynthesisAvailable is true when an LLM is configured but this answer was quoted because the caller asked for
 	// the quick answer: the client can ask again without Quick for a synthesized one.
 	SynthesisAvailable bool `json:"synthesis_available,omitempty"`
+	// Claims are the answer's statements in order (ADR-0014). Claim i's citations are Citations[o:o+len(Markers)],
+	// o the sum of the earlier claims' len(Markers). Absent on every refusal.
+	Claims []Claim `json:"claims,omitempty"`
+	// PromptVersion names the prompt that wrote a synthesized answer; empty otherwise.
+	PromptVersion string `json:"prompt_version,omitempty"`
+}
+
+// Claim is one statement of the answer: its marker-free text, claimStatus of its citations, and its in-range
+// markers in citation order (never nil: [] for a sentence without one).
+type Claim struct {
+	Text    string `json:"text"`
+	Status  string `json:"status"`
+	Markers []int  `json:"markers"`
+}
+
+// claimStatus: supported if any citation is, else unverified if any is (or there are none), else unsupported.
+func claimStatus(cites []Citation) string {
+	unverified := len(cites) == 0
+	for _, c := range cites {
+		if c.Status == StatusSupported {
+			return StatusSupported
+		}
+		unverified = unverified || c.Status == StatusUnverified
+	}
+	if unverified {
+		return StatusUnverified
+	}
+	return StatusUnsupported
 }
 
 // Answer kinds (AskResponse.AnswerKind).
@@ -307,18 +335,19 @@ func (r *RAGService) finalizeClaims(ctx context.Context, traceID string, claims 
 
 	var b strings.Builder
 	var cites []Citation
-	kept := 0
+	var out []Claim
 	for i, c := range claims {
 		if !keep[i] {
 			continue
 		}
-		kept++
 		if b.Len() > 0 {
 			b.WriteString(" ")
 		}
 		b.WriteString(withMarkers(c.Text, c.Citations))
 		cites = append(cites, perClaim[i]...)
+		out = append(out, Claim{Text: c.Text, Status: claimStatus(perClaim[i]), Markers: c.Citations})
 	}
+	kept := len(out)
 	id, src := traceIDFrom(ctx)
 	if check.unverified > 0 {
 		log.Printf("[Query Service] citation support unverified trace_id=%s trace_id_source=%s unverified=%d citations=%d pairs=%d verify_errors=%d",
@@ -328,7 +357,8 @@ func (r *RAGService) finalizeClaims(ctx context.Context, traceID string, claims 
 		if kept < len(claims) {
 			log.Printf("[Query Service] synthesis dropped unsupported claims trace_id=%s trace_id_source=%s claims=%d kept=%d", id, src, len(claims), kept)
 		}
-		return &AskResponse{Answer: b.String(), Citations: cites, TraceID: traceID, AnswerKind: AnswerSynthesized}
+		return &AskResponse{Answer: b.String(), Citations: cites, TraceID: traceID, AnswerKind: AnswerSynthesized,
+			Claims: out, PromptVersion: synthesisPromptVersion}
 	}
 	log.Printf("[Query Service] synthesis claims unsupported trace_id=%s trace_id_source=%s claims=%d citations=%d checked=%d unverified=%d",
 		id, src, len(claims), len(refs), check.checked, check.unverified)
@@ -694,10 +724,10 @@ func parseSynthesis(raw string, k int) (synthesisResult, error) {
 // sentence for the reason, every relevant hit as a citation in rank order (marker 1..K, its best
 // computed support score or 0, never supported), and one counts-only log line.
 func (r *RAGService) finalize(ctx context.Context, traceID, answer string, hits []SearchHit) *AskResponse {
-	cites, check := r.checkCitations(ctx, answer, hits)
+	cites, claims, check := r.checkCitations(ctx, answer, hits)
 	for _, c := range cites {
 		if c.Supported {
-			return &AskResponse{Answer: answer, Citations: cites, TraceID: traceID}
+			return &AskResponse{Answer: answer, Citations: cites, TraceID: traceID, Claims: claims}
 		}
 	}
 
@@ -779,7 +809,7 @@ var markerRegex = regexp.MustCompile(`\[(\d+)\]`)
 // All distinct non-quote (sentence, chunk) pairs are verified in one VerifyClaims call. No call is made when the
 // answer has no in-range marker or every cited sentence is a verbatim quote.
 func (r *RAGService) validateCitations(ctx context.Context, answer string, hits []SearchHit) []Citation {
-	cites, _ := r.checkCitations(ctx, answer, hits)
+	cites, _, _ := r.checkCitations(ctx, answer, hits)
 	return cites
 }
 
@@ -792,8 +822,9 @@ type citationCheck struct {
 	hitScored           []bool
 }
 
-// checkCitations is validateCitations plus the per-citation checked/unverified state (AI-7).
-func (r *RAGService) checkCitations(ctx context.Context, answer string, hits []SearchHit) ([]Citation, citationCheck) {
+// checkCitations is validateCitations plus one claim per answer sentence (cited or not; nil when no marker is in
+// range) and the per-citation checked/unverified state (AI-7).
+func (r *RAGService) checkCitations(ctx context.Context, answer string, hits []SearchHit) ([]Citation, []Claim, citationCheck) {
 	k := len(hits)
 	check := citationCheck{hitScore: make([]float64, k), hitScored: make([]bool, k)}
 
@@ -801,8 +832,10 @@ func (r *RAGService) checkCitations(ctx context.Context, answer string, hits []S
 	type pending struct{ hitIdx, sentIdx int }
 	var cited []pending
 	var sentTexts []string
+	var claims []Claim
 	sentIndex := map[string]int{}
 	for _, sent := range splitIntoSentences(answer) {
+		claims = append(claims, Claim{Text: normQuote(sent), Markers: []int{}})
 		for _, m := range markerRegex.FindAllStringSubmatch(sent, -1) {
 			if len(m) < 2 {
 				continue
@@ -820,10 +853,11 @@ func (r *RAGService) checkCitations(ctx context.Context, answer string, hits []S
 				sentTexts = append(sentTexts, cleanSent)
 			}
 			cited = append(cited, pending{hitIdx: markerIdx - 1, sentIdx: idx})
+			claims[len(claims)-1].Markers = append(claims[len(claims)-1].Markers, markerIdx)
 		}
 	}
 	if len(cited) == 0 {
-		return nil, check
+		return nil, nil, check
 	}
 
 	// 2. Distinct (sentence, hit) pairs in first-cited order. A verbatim quote of its passage is supported by
@@ -860,13 +894,19 @@ func (r *RAGService) checkCitations(ctx context.Context, answer string, hits []S
 		validatedCitations = append(validatedCitations, cite)
 	}
 	check.unverified = unverified
+	o := 0 // claim i's citations follow its markers (ordering invariant)
+	for i := range claims {
+		n := len(claims[i].Markers)
+		claims[i].Status = claimStatus(validatedCitations[o : o+n])
+		o += n
+	}
 	if unverified > 0 {
 		// One line per request; counts only, never passage or sentence text.
 		id, src := traceIDFrom(ctx)
 		log.Printf("[Query Service] citation support unverified trace_id=%s trace_id_source=%s unverified=%d citations=%d pairs=%d verify_errors=%d",
 			id, src, unverified, len(validatedCitations), len(pairs), verifyErrs)
 	}
-	return validatedCitations, check
+	return validatedCitations, claims, check
 }
 
 // scorePairs scores each (claim, passage) pair: 1 for a verbatim quote of the passage, else the NLI verifier's

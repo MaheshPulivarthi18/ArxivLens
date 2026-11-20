@@ -110,10 +110,15 @@ func (c *Consumer) Start(ctx context.Context, handler RecordHandler) error {
 		}
 
 		// Partition errors come next to other partitions' records: log them, then still handle those records.
+		// On a clean shutdown the poll returns ctx's own error (partition -1); that isn't a fault, so it isn't
+		// logged as one. Any other error is still logged after cancel, and ErrClientClosed is always checked first.
 		fetches := c.client.PollFetches(ctx)
 		closed := false
 		fetches.EachError(func(topic string, partition int32, err error) {
 			closed = closed || errors.Is(err, kgo.ErrClientClosed)
+			if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+				return
+			}
 			log.Printf("[Kafka Consumer] Poll error (topic=%s partition=%d): %v", topic, partition, err)
 		})
 		if closed {
