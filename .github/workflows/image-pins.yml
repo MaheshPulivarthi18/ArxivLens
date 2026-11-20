@@ -1,0 +1,85 @@
+name: Image pins
+
+# OPS-H9: every digest-pinned image (`image: <name>@sha256:<digest>`) in docker-compose.yml and the workflows must
+# still resolve. Chainguard's free registry serves only `latest`, so an old digest can disappear; this job says which
+# image to re-pin before stack.yml breaks. Also checks that compose and db.yml use the same pgvector pin.
+# No secrets, read-only. Re-pin runbook: CONTRIBUTING.md "Pinned images".
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 5 * * 1" # weekly, Monday 05:23 UTC
+  pull_request:
+    paths:
+      - docker-compose.yml
+      - .github/workflows/db.yml
+      - .github/workflows/image-pins.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-pins-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pins:
+    name: Pinned digests resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint the changed workflows (actionlint)
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9 -color .github/workflows/db.yml .github/workflows/image-pins.yml
+      - name: Same pgvector pin in docker-compose.yml and db.yml
+        run: |
+          compose="$(grep -oE 'pgvector/pgvector:[^[:space:]"]+' docker-compose.yml | sort -u)"
+          db="$(grep -oE 'pgvector/pgvector:[^[:space:]"]+' .github/workflows/db.yml | sort -u)"
+          echo "docker-compose.yml: $compose"; echo "db.yml:             $db"
+          if [ -z "$compose" ] || [ "$compose" != "$db" ]; then
+            echo "::error::pgvector image differs between docker-compose.yml and db.yml; pin both to the same digest"; exit 1
+          fi
+          case "$compose" in *@sha256:*) ;; *) echo "::error::pgvector image $compose is not digest-pinned"; exit 1;; esac
+      - name: Every pinned digest resolves (docker buildx imagetools inspect)
+        run: |
+          docker buildx version
+          zero="sha256:$(printf '0%.0s' {1..64})"
+          # resolve <name>@<digest> (tag dropped: the digest is what compose pulls). Sets $err; returns 0 only if the
+          # registry serves that digest and reports it back unchanged. `docker manifest inspect` can't be used: it
+          # rejects valid Chainguard (cgr.dev) indexes with "manifest verification failed" (QA OPS-H9 r1).
+          resolve() { # $1 = name[:tag]@sha256:<digest>
+            local ref="${1%@*}" want="${1#*@}" name out got
+            name="$ref"; case "${ref##*/}" in *:*) name="${ref%:*}";; esac
+            if ! out="$(docker buildx imagetools inspect "$name@$want" 2>&1)"; then err="$(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')"; return 1; fi
+            got="$(printf '%s\n' "$out" | awk '$1 == "Digest:" {print $2; exit}')"
+            if [ "$got" != "$want" ]; then err="registry returned digest '${got:-none}'"; return 1; fi
+            err=""
+          }
+          mapfile -t pins < <(grep -hoE 'image:[[:space:]]*[^[:space:]]+@sha256:[0-9a-f]{64}' docker-compose.yml .github/workflows/*.yml \
+            | sed -E 's/^image:[[:space:]]*//' | sort -u)
+          echo "${#pins[@]} pinned images:"; printf '  %s\n' "${pins[@]}"
+          # compose pins pgvector, minio and minio-client by digest; fewer means the grep stopped matching
+          if [ "${#pins[@]}" -lt 3 ]; then echo "::error::found ${#pins[@]} digest pins, expected >= 3"; exit 1; fi
+
+          failed=0; resolved=()
+          for p in "${pins[@]}"; do
+            if resolve "$p"; then
+              echo "ok      $p"; resolved+=("$p")
+            else
+              echo "::error::Pinned image ${p%@*} no longer resolves at ${p#*@} ($err). Re-pin it: CONTRIBUTING.md \"Pinned images\"."
+              failed=1
+            fi
+          done
+
+          # Self-test, only on images whose real pin just resolved (positive control): the all-zero digest of the same
+          # image must fail with a not-found error, so a broken tool or registry outage can't pass as "digest gone".
+          echo "Self-test: the all-zero digest of each resolved image must fail as not found"
+          for p in "${resolved[@]}"; do
+            if resolve "${p%@*}@$zero"; then echo "::error::self-test: ${p%@*}@$zero resolved, want not found"; exit 1; fi
+            msg="Pinned image ${p%@*} no longer resolves at $zero ($err)"
+            case "$msg" in *"${p%@*}"*) ;; *) echo "::error::self-test: message does not name ${p%@*}"; exit 1;; esac
+            if ! printf '%s' "$err" | grep -qiE 'not found|manifest unknown|404'; then
+              echo "::error::self-test: ${p%@*}@$zero failed with an unexpected error, not 'not found': $err"; exit 1
+            fi
+            echo "  (expected) $msg"
+          done
+          exit "$failed"

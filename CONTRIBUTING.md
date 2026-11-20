@@ -30,9 +30,34 @@ make setup-fe                              # frontend deps (npm ci)
 | `make eval-seed` | Ingests every ID in `evals/corpus.txt` via `POST /v1/papers/ingest` (≥ 3 s apart, 3 attempts on HTTP 000/5xx); exits non-zero if any ID fails, never skips one. One line per ID in `seed-ids.log` | `make stack-up`, `make migrate`, `./bin/arxivlens query` |
 | `make eval` | Quality gate over `evals/` (`scripts/eval_gate.py`): exit 0 pass, 1 gate fail, 2 could not run; results in `evals/results/<timestamp>.json` | Seeded corpus + `query` + embedder API |
 | `.github/workflows/eval.yml` | CI: whole stack, `make eval-seed`, `make eval`. Runs nightly (06:17 UTC), by hand (`gh workflow run eval.yml`, or Actions → Eval → Run workflow) and on PRs that change `eval.yml`. Budgets: 70 min for the seed step, 120 min for the job; the step summary has a `seed: <m>m<s>s for <n> IDs (<pct>% of the 70-min step budget)` line (a warning annotation at ≥ 75%), the metric table and the exit code; artifact `eval-results-<run id>` (`evals/results/*.json` + logs) kept 30 days, `eval-stack-logs-<run id>` on failure kept 7 days. The Hugging Face model cache doesn't make it faster: it removes the run's dependency on Hugging Face being up (a missing model fails loudly offline). GitHub pauses the nightly after 60 days without repo activity | GitHub runner |
+| `.github/workflows/image-pins.yml` | CI: every `image: …@sha256:…` pin in compose and the workflows still resolves (`docker buildx imagetools inspect <name>@sha256:<digest>` reports that digest; a self-test checks that an all-zero digest of the same image fails as not found), and compose and `db.yml` share one pgvector pin. Weekly (Mon 05:23 UTC), by hand (`gh workflow run image-pins.yml`) and on PRs that change `docker-compose.yml`, `db.yml` or `image-pins.yml`. See [Pinned images](#pinned-images) | GitHub runner |
 
 Frontend (from `frontend/`): `npm run dev` (:5173, proxies `/v1` → :8080), `npm run lint`, `npm run build`.
 Python services run in compose via `make stack-up`; on the host (Apple-silicon MPS): `python services/processor/worker.py`, `python services/embedder/worker.py`, `python services/embedder/api.py` (:8081).
+
+## Pinned images
+
+Images that can change under the same tag are pinned by digest, the same reference in `docker-compose.yml` and
+`.github/workflows/db.yml`:
+
+- **Postgres + pgvector** (`pgvector/pgvector:pg16@sha256:…`): needs **pgvector ≥ 0.8.0**, because `search.go` sets
+  `SET LOCAL hnsw.iterative_scan = strict_order` (added in 0.8.0); without it, a category-filtered vector arm can
+  return fewer than 50 hits. `db.yml` fails and prints the installed `extversion` if it is lower.
+- **MinIO** (`cgr.dev/chainguard/minio:latest@sha256:…`, `cgr.dev/chainguard/minio-client:latest-dev@sha256:…`):
+  Chainguard's free registry serves only `latest`/`latest-dev`, so an old digest can disappear. `image-pins.yml`
+  fails weekly with `Pinned image <name> no longer resolves` when that happens.
+
+To re-pin (on a branch, via PR):
+1. Resolve the current digest of the tag, on any machine with Docker:
+   `docker buildx imagetools inspect pgvector/pgvector:pg16` (or `cgr.dev/chainguard/minio:latest`); copy the top-level
+   `Digest:` (the multi-arch index, so arm64 and amd64 both work).
+2. For pgvector, check the version it ships: `docker run --rm -e POSTGRES_PASSWORD=x -d --name pgv <image>` then
+   `docker exec pgv psql -U postgres -Atc "CREATE EXTENSION vector; SELECT extversion FROM pg_extension WHERE extname = 'vector'"`
+   must print ≥ 0.8.0 (`docker rm -f pgv` after).
+3. Replace the digest in `docker-compose.yml` (and in `db.yml` for pgvector; both must match), keeping the tag before `@`.
+4. Verify: `docker buildx imagetools inspect <name>@sha256:<digest>` (tag dropped) exits 0 and prints the same `Digest:`
+   locally (not `docker manifest inspect`: it rejects valid cgr.dev digests with "manifest verification failed"); on the PR, `image-pins.yml`, `db.yml`
+   (pgvector version step) and `stack.yml` (compose) are green.
 
 ## Layout
 
