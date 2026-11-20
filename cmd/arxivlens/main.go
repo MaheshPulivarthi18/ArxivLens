@@ -276,7 +276,20 @@ func newQueryCmd() *cobra.Command {
 	return cmd
 }
 
+// dlqReader is the DLQ topic reader the CLI builds per command; *dlq.KafkaReader in production, a fake in dlq_test.go.
+type dlqReader interface {
+	dlq.Reader
+	Close()
+}
+
+// newDLQCmd wires the franz-go reader. TODO(OPS-H7a2b): list/inspect on newDLQCmdWith.
 func newDLQCmd() *cobra.Command {
+	return newDLQCmdWith(func() (dlqReader, error) { return nil, fmt.Errorf("TODO") })
+}
+
+// newDLQCmdWith: TODO(OPS-H7a2b) list (--partition, --from, --page-size, --limit, --all) and inspect on Manager.List.
+func newDLQCmdWith(newReader func() (dlqReader, error)) *cobra.Command {
+	_ = newReader
 	dlqCmd := &cobra.Command{
 		Use:   "dlq",
 		Short: "Manage and replay dead-letter queue (DLQ) messages",
