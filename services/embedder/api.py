@@ -6,11 +6,14 @@ Endpoints:
   POST /internal/embed   {"texts": [...], "is_query": bool} -> {"vectors": [[...]]}
   POST /internal/rerank  {"query": "...", "passages": [...]} -> {"scores": [...]}
   POST /internal/verify  {"pairs": [{"claim": "...", "passage": "..."}]} -> {"scores": [...]} (P(entailment))
+  POST /internal/ingest  {"arxiv_id": "...", "version": 1, "pdf_storage_key": "..."}
+                         -> {"status", "arxiv_id", "sections", "chunks", "embeddings"} (on-demand chunk + embed of one paper)
   GET  /healthz          -> {"status": "ok"}
 """
 
 import logging
 import os
+import threading
 import time
 from typing import List, Optional, Sequence, Tuple
 import numpy as np
@@ -279,11 +282,35 @@ class IngestProcessResponse(BaseModel):
     chunks: int
     embeddings: int
 
+# On-demand ingest workers, built once per process on first use (AI-12). The whole pipeline runs under one lock:
+# TokenChunker's tokenizer and the workers are not documented thread-safe, and ingest is one paper per call.
+# A failed construction leaves the slot None, so the next request retries.
+_ingest_lock = threading.Lock()
+_processor_worker = None
+_embedder_worker = None
+
+
+def _ingest_workers():
+    """The shared (ProcessorWorker, EmbedderWorker). Call with _ingest_lock held."""
+    global _processor_worker, _embedder_worker
+    if _processor_worker is None:
+        _processor_worker = ProcessorWorker()
+    if _embedder_worker is None:
+        # Reuse the startup-loaded model; if startup failed to load it, the worker loads its own.
+        _embedder_worker = EmbedderWorker(embedder=embedder) if embedder is not None else EmbedderWorker()
+    return _processor_worker, _embedder_worker
+
+
 @app.post("/internal/ingest", response_model=IngestProcessResponse)
 def ingest_paper_endpoint(req: IngestProcessRequest):
+    with _ingest_lock:
+        return _ingest_paper(req)
+
+
+def _ingest_paper(req: IngestProcessRequest) -> IngestProcessResponse:
     try:
+        processor, embedder_worker = _ingest_workers()
         # Step 1: Typography chunking
-        processor = ProcessorWorker()
         download_envelope = EventEnvelope(
             event_id=str(ulid.new()),
             event_type=TOPIC_PAPERS_DOWNLOADED,
@@ -308,7 +335,6 @@ def ingest_paper_endpoint(req: IngestProcessRequest):
             p_id = paper_id_row[0] if paper_id_row else None
         conn.close()
 
-        embedder_worker = EmbedderWorker()
         chunk_envelope = EventEnvelope(
             event_id=str(ulid.new()),
             event_type=TOPIC_PAPERS_CHUNKED,

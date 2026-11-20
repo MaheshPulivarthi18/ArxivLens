@@ -150,3 +150,158 @@ def test_startup_handler_is_load_models_and_loads_verifier(monkeypatch):
         monkeypatch.setattr(api, name, None)
     api.load_models()
     assert loaded == ["cpu"]
+
+
+# --- /internal/ingest reuses its workers and the startup-loaded model (AI-12). Fakes only, no infra. ---
+
+class _FakeCursor:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        pass
+
+    def fetchone(self):
+        return (7,)  # paper id and every count
+
+
+class _FakeConn:
+    def cursor(self):
+        return _FakeCursor()
+
+    def close(self):
+        pass
+
+
+@pytest.fixture
+def ingest(monkeypatch):
+    """Fresh worker slots, fake DB, and counting fake workers. Returns a namespace the test can tune."""
+    import threading
+    import time
+
+    import psycopg
+    from services.embedder import api
+
+    monkeypatch.setattr(api, "_processor_worker", None)
+    monkeypatch.setattr(api, "_embedder_worker", None)
+    monkeypatch.setattr(api, "embedder", None)
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: _FakeConn())
+
+    st = SimpleNamespace(proc_inits=0, emb_inits=[], proc_calls=0, emb_calls=0, log=[],
+                         proc_init_sleep=0.0, call_sleep=0.0, proc_init_failures=0)
+    guard = threading.Lock()
+
+    def record(kind):
+        with guard:
+            st.log.append((kind, threading.get_ident()))
+
+    class FakeProcessor:
+        def __init__(self):
+            time.sleep(st.proc_init_sleep)
+            with guard:
+                st.proc_inits += 1
+                if st.proc_init_failures:
+                    st.proc_init_failures -= 1
+                    raise RuntimeError("minio down")
+
+        def process_message(self, envelope, msg):
+            record("enter")
+            time.sleep(st.call_sleep)
+            st.proc_calls += 1
+            record("exit")
+
+    class FakeEmbedderWorker:
+        def __init__(self, **kwargs):
+            with guard:
+                st.emb_inits.append(kwargs)
+
+        def process_message(self, envelope, msg):
+            record("enter")
+            time.sleep(st.call_sleep)
+            st.emb_calls += 1
+            record("exit")
+
+    monkeypatch.setattr(api, "ProcessorWorker", FakeProcessor)
+    monkeypatch.setattr(api, "EmbedderWorker", FakeEmbedderWorker)
+    st.api = api
+    st.req = api.IngestProcessRequest(arxiv_id="2608.20331", version=1, pdf_storage_key="pdfs/2608.20331v1.pdf")
+    return st
+
+
+def test_ingest_builds_each_worker_once(ingest):
+    for _ in range(2):
+        resp = ingest.api.ingest_paper_endpoint(ingest.req)
+        assert resp.status == "success" and resp.chunks == 7 and resp.embeddings == 7
+    assert ingest.proc_inits == 1 and len(ingest.emb_inits) == 1
+    assert ingest.proc_calls == 2 and ingest.emb_calls == 2
+
+
+def test_ingest_embedder_worker_gets_startup_model(ingest, monkeypatch):
+    sentinel = object()
+    monkeypatch.setattr(ingest.api, "embedder", sentinel)
+    ingest.api.ingest_paper_endpoint(ingest.req)
+    assert len(ingest.emb_inits) == 1 and ingest.emb_inits[0].get("embedder") is sentinel
+
+
+def test_ingest_embedder_worker_loads_own_model_without_startup_model(ingest):
+    ingest.api.ingest_paper_endpoint(ingest.req)  # fixture sets api.embedder = None
+    assert len(ingest.emb_inits) == 1 and ingest.emb_inits[0].get("embedder") is None
+
+
+def test_embedder_worker_uses_injected_model(monkeypatch):
+    from services.common.config import config
+    from services.embedder import worker
+
+    def boom(**kw):
+        raise AssertionError("BGEEmbedder must not be built when a model is injected")
+
+    monkeypatch.setattr(worker, "BGEEmbedder", boom)
+    x = object()
+    assert worker.EmbedderWorker(embedder=x).embedder is x
+
+    built = []
+    monkeypatch.setattr(worker, "BGEEmbedder", lambda **kw: built.append(kw) or SimpleNamespace(kw=kw))
+    w = worker.EmbedderWorker()
+    assert built == [{"model_name": config.embedding_model}] and w.embedder.kw == built[0]
+
+
+def test_ingest_concurrent_first_requests_build_once_and_do_not_overlap(ingest):
+    import threading
+
+    ingest.proc_init_sleep = 0.2  # widen the race on first construction
+    ingest.call_sleep = 0.05      # widen the race between pipelines
+    results, errors = [], []
+
+    def call():
+        try:
+            results.append(ingest.api.ingest_paper_endpoint(ingest.req).status)
+        except Exception as e:  # pragma: no cover - surfaced by the asserts below
+            errors.append(e)
+
+    threads = [threading.Thread(target=call) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    assert not errors and results == ["success", "success"]
+    # Every process_message exits before the next one enters, in the same thread.
+    log = ingest.log
+    no_overlap = len(log) == 8 and all(log[i][0] == "enter" and log[i + 1] == ("exit", log[i][1]) for i in range(0, 8, 2))
+    # One assert so a failure reports both properties: built once, and no interleaved pipelines.
+    assert {"proc_inits": ingest.proc_inits, "emb_inits": len(ingest.emb_inits), "no_overlap": no_overlap} == \
+        {"proc_inits": 1, "emb_inits": 1, "no_overlap": True}, log
+
+
+def test_ingest_failed_worker_construction_is_not_cached(ingest):
+    from fastapi import HTTPException
+
+    ingest.proc_init_failures = 1
+    with pytest.raises(HTTPException) as e:
+        ingest.api.ingest_paper_endpoint(ingest.req)
+    assert e.value.status_code == 500
+    assert ingest.api._processor_worker is None
+    assert ingest.api.ingest_paper_endpoint(ingest.req).status == "success"
+    assert ingest.proc_inits == 2 and ingest.proc_calls == 1

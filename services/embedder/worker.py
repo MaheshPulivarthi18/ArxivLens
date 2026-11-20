@@ -29,8 +29,9 @@ logger = logging.getLogger("embedder")
 
 
 class EmbedderWorker:
-    def __init__(self):
-        self.embedder = BGEEmbedder(model_name=config.embedding_model)
+    def __init__(self, embedder=None):
+        # The API passes the BGEEmbedder it loaded at startup so on-demand ingest doesn't load a second copy (AI-12).
+        self.embedder = embedder if embedder is not None else BGEEmbedder(model_name=config.embedding_model)
         self.model_name = config.embedding_model
         self.consumer_group = "embedder-v1"
         self.batch_size = 32
