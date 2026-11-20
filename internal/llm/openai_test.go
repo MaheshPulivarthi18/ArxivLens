@@ -582,7 +582,7 @@ func TestTLSError(t *testing.T) {
 			name:    "handshake failed",
 			url:     func(t *testing.T) string { return notTLSServer(t, garbage) },
 			detail:  "transport: TLS handshake failed",
-			absent:  []string{"127.0.0.1", "garbage", `\r\n`, "record", "first record"},
+			absent:  []string{"127.0.0.1", "garbage", "\r\n", "record", "first record"},
 			rawType: func(err error) bool { return errors.As(err, new(tls.RecordHeaderError)) },
 		},
 	}
