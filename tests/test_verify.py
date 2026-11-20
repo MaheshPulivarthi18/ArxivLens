@@ -191,7 +191,7 @@ def ingest(monkeypatch):
     monkeypatch.setattr(psycopg, "connect", lambda *a, **k: _FakeConn())
 
     st = SimpleNamespace(proc_inits=0, emb_inits=[], proc_calls=0, emb_calls=0, log=[],
-                         proc_init_sleep=0.0, call_sleep=0.0, proc_init_failures=0)
+                         proc_init_sleep=0.0, call_sleep=0.0, proc_init_failures=0, emb_init_failures=0)
     guard = threading.Lock()
 
     def record(kind):
@@ -217,6 +217,9 @@ def ingest(monkeypatch):
         def __init__(self, **kwargs):
             with guard:
                 st.emb_inits.append(kwargs)
+                if st.emb_init_failures:
+                    st.emb_init_failures -= 1
+                    raise RuntimeError("model load failed")
 
         def process_message(self, envelope, msg):
             record("enter")
@@ -305,3 +308,79 @@ def test_ingest_failed_worker_construction_is_not_cached(ingest):
     assert ingest.api._processor_worker is None
     assert ingest.api.ingest_paper_endpoint(ingest.req).status == "success"
     assert ingest.proc_inits == 2 and ingest.proc_calls == 1
+
+
+def test_embed_is_not_serialized_behind_an_in_flight_ingest(ingest, monkeypatch):
+    """Pins that /internal/embed does not take _ingest_lock. /v1/search and /v1/ask call it for every query, and an ingest
+    holds the lock for 30-80 s, so a query must be served from the shared startup model while an ingest is in progress.
+    Also pins that the ingest's EmbedderWorker got that same model object (AI-12)."""
+    import threading
+    import time
+
+    import numpy as np
+
+    api = ingest.api
+    calls = []
+
+    class FakeModel:
+        def embed_texts(self, texts, is_query):
+            calls.append((list(texts), is_query, api._ingest_lock.locked()))
+            return np.zeros((len(texts), 768), dtype=np.float32)
+
+    model = FakeModel()
+    monkeypatch.setattr(api, "embedder", model)
+    ingest.call_sleep = 0.5  # the ingest holds the lock for >= 1 s (two process_message calls)
+    out = {}
+
+    def run_ingest():
+        try:
+            out["resp"] = api.ingest_paper_endpoint(ingest.req)
+        except Exception as e:  # pragma: no cover - surfaced by the asserts below
+            out["err"] = e
+
+    t = threading.Thread(target=run_ingest, daemon=True)
+    t.start()
+    deadline = time.monotonic() + 5
+    while not any(kind == "enter" for kind, _ in ingest.log) and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert ingest.log and ingest.log[0][0] == "enter", "ingest never entered process_message"
+
+    # Run the embed call in its own thread with a bounded wait, so a mutant that locks embed fails instead of hanging.
+    emb = {}
+    def run_embed():
+        emb["resp"] = api.embed_texts_endpoint(api.EmbedRequest(texts=["q"], is_query=True))
+        emb["locked"] = api._ingest_lock.locked()
+        emb["exits"] = sum(kind == "exit" for kind, _ in ingest.log)
+
+    e = threading.Thread(target=run_embed, daemon=True)
+    e.start()
+    e.join(timeout=5)
+    t.join(timeout=5)
+    assert not t.is_alive() and "err" not in out and out["resp"].status == "success"
+    assert "resp" in emb, "embed call did not return"
+    assert emb["resp"].dim == 768 and len(emb["resp"].vectors) == 1 and len(emb["resp"].vectors[0]) == 768
+    # Returned while the ingest still held the lock and before its first process_message exited.
+    at_return = {"locked_at_return": emb["locked"], "exits_at_return": emb["exits"]}
+    assert at_return == {"locked_at_return": True, "exits_at_return": 0}
+    # Same model object: the ingest's EmbedderWorker was built with it, and the embed endpoint called it.
+    assert len(ingest.emb_inits) == 1 and ingest.emb_inits[0].get("embedder") is model
+    assert calls == [(["q"], True, True)]
+
+
+def test_ingest_failed_embedder_build_keeps_cached_processor(ingest):
+    """Pins that an EmbedderWorker build failure after the ProcessorWorker is built leaves the processor cached and the
+    embedder slot empty: the request is a 500, the next one retries only the embedder and succeeds, and the processor is
+    never rebuilt (no extra MinIO/tokenizer setup per failed ingest)."""
+    from fastapi import HTTPException
+
+    api = ingest.api
+    ingest.emb_init_failures = 1
+    with pytest.raises(HTTPException) as e:
+        api.ingest_paper_endpoint(ingest.req)
+    assert e.value.status_code == 500
+    proc = api._processor_worker
+    assert proc is not None and ingest.proc_inits == 1
+    assert api._embedder_worker is None
+    assert api.ingest_paper_endpoint(ingest.req).status == "success"
+    assert ingest.proc_inits == 1 and api._processor_worker is proc
+    assert len(ingest.emb_inits) == 2 and ingest.emb_calls == 1
