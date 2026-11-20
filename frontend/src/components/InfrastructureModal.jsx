@@ -35,7 +35,7 @@ export default function InfrastructureModal({ isOpen, onClose, onShowToast }) {
       <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <div className="flex items-center gap-2">
-            <div className="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-400">
+            <div className="p-1.5 rounded-lg bg-accent text-accent-foreground">
               <Settings className="w-4 h-4" />
             </div>
             <div>
@@ -54,7 +54,7 @@ export default function InfrastructureModal({ isOpen, onClose, onShowToast }) {
               <span>Pipeline DAG & Stats</span>
             </TabsTrigger>
             <TabsTrigger value="dlq" className="gap-2">
-              <AlertTriangle className="w-4 h-4 text-amber-400" />
+              <AlertTriangle className="w-4 h-4 text-muted-foreground" />
               <span>Dead-Letter Queue (DLQ)</span>
             </TabsTrigger>
           </TabsList>
@@ -86,7 +86,7 @@ export default function InfrastructureModal({ isOpen, onClose, onShowToast }) {
                   🧠 BGE (mps)
                 </div>
                 <div className="text-muted-foreground">→</div>
-                <div className="bg-card border border-emerald-500/40 text-emerald-400 px-2.5 py-1.5 rounded-lg shrink-0">
+                <div className="bg-card border border-primary/40 text-primary px-2.5 py-1.5 rounded-lg shrink-0">
                   🐘 pgvector
                 </div>
               </div>
@@ -99,7 +99,7 @@ export default function InfrastructureModal({ isOpen, onClose, onShowToast }) {
                 <div className="text-xl font-bold font-title text-foreground mt-1">
                   {stats.total_papers}
                 </div>
-                <div className="text-[10px] text-emerald-400 mt-0.5">100% Embedded</div>
+                <div className="text-[10px] text-primary mt-0.5">100% Embedded</div>
               </Card>
 
               <Card className="bg-card/70 border-border/70 p-3">
@@ -120,10 +120,10 @@ export default function InfrastructureModal({ isOpen, onClose, onShowToast }) {
 
               <Card className="bg-card/70 border-border/70 p-3">
                 <div className="text-[11px] font-mono text-muted-foreground uppercase">HNSW QPS</div>
-                <div className="text-xl font-bold font-title text-emerald-400 mt-1">
+                <div className="text-xl font-bold font-title text-primary mt-1">
                   2,513.9
                 </div>
-                <div className="text-[10px] text-emerald-400 mt-0.5">ef_search = 80</div>
+                <div className="text-[10px] text-primary mt-0.5">ef_search = 80</div>
               </Card>
             </div>
           </TabsContent>
@@ -160,7 +160,7 @@ export default function InfrastructureModal({ isOpen, onClose, onShowToast }) {
                   <tr>
                     <td className="py-2.5 px-3"><code>9999.00001</code></td>
                     <td className="py-2.5 px-3">
-                      <span className="text-red-400 font-semibold">FileDataError (Corrupt PDF)</span>
+                      <span className="text-unsupported-foreground font-semibold">FileDataError (Corrupt PDF)</span>
                     </td>
                     <td className="py-2.5 px-3 text-muted-foreground">3 / 3</td>
                     <td className="py-2.5 px-3 text-muted-foreground"><code>00-4bf92f357...</code></td>
