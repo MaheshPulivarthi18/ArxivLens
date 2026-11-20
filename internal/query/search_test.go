@@ -189,6 +189,14 @@ func TestHybridSearchRerankFallback(t *testing.T) {
 		}
 		return float32(r)
 	})
+	infAt3 := func(sign int) func([]string) []float32 {
+		return byRank(func(r int) float32 {
+			if r == 3 {
+				return float32(math.Inf(sign))
+			}
+			return float32(r)
+		})
+	}
 	cases := []struct {
 		name       string
 		err        error
@@ -200,6 +208,9 @@ func TestHybridSearchRerankFallback(t *testing.T) {
 		{"too few scores", nil, sized(-1), `reason="score count mismatch"`},
 		{"too many scores", nil, sized(+1), `reason="score count mismatch"`},
 		{"NaN score", nil, nanAt3, `reason="NaN score"`},
+		{"canceled", fmt.Errorf("wrapped: %w", context.Canceled), nil, `reason="rerank canceled"`},
+		{"+Inf score", nil, infAt3(+1), `reason="Inf score"`},
+		{"-Inf score", nil, infAt3(-1), `reason="Inf score"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -223,6 +234,9 @@ func TestHybridSearchRerankFallback(t *testing.T) {
 				if h.RerankScore != 0 {
 					t.Fatalf("RerankScore = %v on fallback, want 0", h.RerankScore)
 				}
+			}
+			if _, err := json.Marshal(hits); err != nil {
+				t.Fatalf("json.Marshal(hits) = %v, want no error", err)
 			}
 			line := buf.String()
 			for _, want := range []string{"rerank fallback", "trace_id=" + traceID + " ", "trace_id_source=ctx", tc.wantReason, "pool=20"} {
