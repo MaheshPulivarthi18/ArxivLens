@@ -261,7 +261,7 @@ func itPrepare(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 	}
 	var others int
 	err := pool.QueryRow(ctx, `SELECT count(*) FROM papers WHERE arxiv_id NOT LIKE 'synth.%'`).Scan(&others)
-	return 0, err // MUTANT (c)
+	return others, err
 }
 
 // TestHNSWSeedCleanup runs after TestHNSWVectorHits (file order) and checks that it left no corpus behind,
