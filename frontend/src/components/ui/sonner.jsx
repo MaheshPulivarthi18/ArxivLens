@@ -4,7 +4,9 @@ import { cn } from "../../lib/utils"
 
 // Sonner's CSS variables point at our tokens. The tokens flip with `.dark` on <html>, so toasts
 // follow the theme with no `theme` prop. Callers use `import { toast } from "sonner"`.
-const Toaster = React.forwardRef(({ className, style, ...props }, ref) => (
+// Sonner hard-codes the description colour (#3f3f3f) unless its own theme is dark, so the
+// description gets a token class too. The `!` beats sonner's (0,3,0) selector.
+const Toaster = React.forwardRef(({ className, style, toastOptions, ...props }, ref) => (
   <Sonner
     ref={ref}
     className={cn("toaster", className)}
@@ -17,6 +19,13 @@ const Toaster = React.forwardRef(({ className, style, ...props }, ref) => (
       ...style,
     }}
     {...props}
+    toastOptions={{
+      ...toastOptions,
+      classNames: {
+        ...toastOptions?.classNames,
+        description: cn("!text-muted-foreground", toastOptions?.classNames?.description),
+      },
+    }}
   />
 ))
 Toaster.displayName = "Toaster"
