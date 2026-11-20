@@ -96,10 +96,10 @@ func TestReadStopsAtSnapshot_Integration(t *testing.T) {
 			t.Fatalf("read partition %d: %v", p, err)
 		}
 	}
-	t.Logf("TestReadStopsAtSnapshot: read %d records (%d undecodable) from 3 partitions, watermarks %v, in %d polls (FetchMaxBytes=%d); 15 records written after the snapshot were not returned",
+	t.Logf("TestReadStopsAtSnapshot: read %d records (%d undecodable) from 3 partitions, watermarks %v, in %d non-empty polls (FetchMaxBytes=%d); 15 records written after the snapshot were not returned",
 		total, undecodable, wm, r.Polls(), r.FetchMaxBytes)
 	if total != 1500 || len(seen) != 1499 || undecodable != 1 || r.Polls() < 5 {
-		t.Errorf("got %d records, %d distinct keys, %d undecodable, %d polls; want 1500, 1499, 1, >= 5", total, len(seen), undecodable, r.Polls())
+		t.Errorf("got %d records, %d distinct keys, %d undecodable, %d non-empty polls; want 1500, 1499, 1, >= 5", total, len(seen), undecodable, r.Polls())
 	}
 
 	r.StallTimeout = 3 * time.Second // until past the high watermark: a stall error, not "end"

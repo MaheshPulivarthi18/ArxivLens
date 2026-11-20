@@ -44,7 +44,13 @@ func (c Cursor) String() string { return fmt.Sprintf("%d/%d", c.Partition, c.Off
 
 // ParseCursor parses "P/O": two non-negative integers.
 func ParseCursor(s string) (Cursor, error) {
-	panic("skeleton")
+	ps, offs, ok := strings.Cut(s, "/")
+	p, errP := strconv.ParseInt(ps, 10, 32)
+	o, errO := strconv.ParseInt(offs, 10, 64)
+	if !ok || errP != nil || errO != nil || p < 0 || o < 0 {
+		return Cursor{}, fmt.Errorf("dlq: cursor %q: want P/O, two non-negative integers such as 3/17", s)
+	}
+	return Cursor{Partition: int32(p), Offset: o, set: true}, nil
 }
 
 // ListOptions: Partition restricts the listing to one partition. From starts at partition P offset O, then the later
@@ -67,17 +73,81 @@ type Page struct {
 // List reads up to PageSize records, in partition then offset order, below the start-time high watermarks (design OPS-H7 Q2, Q3).
 // A stall or poll error is returned, never treated as end of topic; Page then holds the records read before it.
 func (m *Manager) List(ctx context.Context, topic string, opt ListOptions) (Page, error) {
-	panic("skeleton")
+	size, wm := opt.PageSize, opt.Snapshot
+	if size <= 0 {
+		size = DefaultPageSize
+	}
+	if wm == nil {
+		var err error
+		if wm, err = m.reader.Watermarks(ctx, topic); errors.Is(err, kerr.UnknownTopicOrPartition) {
+			return Page{}, &missingTopicError{topic, err}
+		} else if err != nil {
+			return Page{}, err
+		}
+	}
+	page := Page{Watermarks: wm}
+	parts, err := listPartitions(wm, opt)
+	if err != nil {
+		return page, err
+	}
+	for i, p := range parts {
+		from := wm[p].Low
+		if opt.From.set && p == opt.From.Partition {
+			if from > opt.From.Offset {
+				page.Warnings = append(page.Warnings, fmt.Sprintf("WARNING partition %d: offsets %d..%d expired", p, opt.From.Offset, from-1))
+			} else {
+				from = opt.From.Offset
+			}
+		}
+		err := m.reader.Read(ctx, topic, p, from, wm[p].High, func(r Record) bool {
+			page.Records = append(page.Records, r)
+			return len(page.Records) < size
+		})
+		if err != nil {
+			return page, err
+		}
+		if len(page.Records) >= size {
+			page.Next = nextCursor(wm, parts[i+1:], page.Records[len(page.Records)-1])
+			return page, nil
+		}
+	}
+	return page, nil
 }
 
 // listPartitions: the partitions List reads, in order, after the Partition and From filters.
 func listPartitions(wm map[int32]Watermark, opt ListOptions) ([]int32, error) {
-	panic("skeleton")
+	var parts []int32
+	for p := range wm {
+		if (opt.Partition == nil || p == *opt.Partition) && (!opt.From.set || p >= opt.From.Partition) {
+			parts = append(parts, p)
+		}
+	}
+	sort.Slice(parts, func(i, j int) bool { return parts[i] < parts[j] })
+	if opt.Partition != nil && opt.From.set && *opt.Partition != opt.From.Partition {
+		return nil, fmt.Errorf("dlq: --from %s is not in --partition %d", opt.From, *opt.Partition)
+	}
+	if want := opt.Partition; want != nil || opt.From.set {
+		if want == nil {
+			want = &opt.From.Partition
+		}
+		if _, ok := wm[*want]; !ok {
+			return nil, fmt.Errorf("dlq: partition %d does not exist (the topic has %d partitions)", *want, len(wm))
+		}
+	}
+	return parts, nil
 }
 
-// nextCursor: the position after last, or the Low of the next non-empty partition in rest; unset at end of topic.
+// nextCursor: the position after last, or the Low of the first non-empty partition in rest; unset at end of topic.
 func nextCursor(wm map[int32]Watermark, rest []int32, last Record) Cursor {
-	panic("skeleton")
+	if last.Offset+1 < wm[last.Partition].High {
+		return Cursor{Partition: last.Partition, Offset: last.Offset + 1, set: true}
+	}
+	for _, p := range rest {
+		if wm[p].Low < wm[p].High {
+			return Cursor{Partition: p, Offset: wm[p].Low, set: true}
+		}
+	}
+	return Cursor{}
 }
 
 // missingTopicError: AC6 message; it wraps kerr.UnknownTopicOrPartition from Watermarks.

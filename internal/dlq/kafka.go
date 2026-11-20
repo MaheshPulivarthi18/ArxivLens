@@ -34,6 +34,8 @@ type Reader interface {
 	Read(ctx context.Context, topic string, p int32, from, until int64, fn func(Record) bool) error
 }
 
+var _ Reader = (*KafkaReader)(nil)
+
 // ErrPartitionStalled: a partition made no progress for StallTimeout while its position was below until (wrapped, errors.Is).
 var ErrPartitionStalled = errors.New("dlq: partition stalled")
 
@@ -58,7 +60,7 @@ func NewKafkaReader(brokers []string) (*KafkaReader, error) {
 
 func (r *KafkaReader) Close() { r.admin.Close() }
 
-// Polls is the number of polls, across all Read calls, that returned at least one record.
+// Polls counts non-empty polls: polls, across all Read calls, that returned at least one record. Empty polls are not counted.
 func (r *KafkaReader) Polls() int64 { return r.polls.Load() }
 
 // Watermarks: one Metadata request, then ListOffsets at -2 (log start) and -1 (high watermark), sharded to the leaders by franz-go.
