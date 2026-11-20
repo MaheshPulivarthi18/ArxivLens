@@ -1,20 +1,13 @@
 import React from 'react';
-import { ExternalLink, FileCode, ShieldCheck, ShieldAlert, BookOpen } from 'lucide-react';
+import { ExternalLink, FileCode, ShieldCheck, ShieldAlert, Info, BookOpen } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent, CardFooter } from './ui/card';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
-import { Progress } from './ui/progress';
+import { citationState } from '../lib/citations';
 
-// Verification label for a citation (QA-4, PRD §7): only a supported citation may say "Verified".
-// `status` (ADR-0014) is preferred; `supported` is the fallback for responses without it.
-function verification(cit) {
-  const status = cit.status || (cit.supported ? 'supported' : 'unsupported');
-  if (status === 'supported' && cit.supported !== false) return { ok: true, label: 'Verified' };
-  if (status === 'unverified') return { ok: false, label: 'Unverified' };
-  return { ok: false, label: 'Unsupported' };
-}
+const CHIP_ICONS = { supported: ShieldCheck, unsupported: ShieldAlert, unchecked: Info };
 
-export default function ReferencesStack({ citations, activeMarker, onCopy }) {
+export default function ReferencesStack({ citations, activeMarker, onCopy, refusalReason }) {
   if (!citations || citations.length === 0) {
     return (
       <Card className="border-border/60 bg-card/60 p-6 text-center text-muted-foreground text-sm">
@@ -40,21 +33,24 @@ export default function ReferencesStack({ citations, activeMarker, onCopy }) {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between px-1">
-        <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
-          <span>Referenced Studies & Evidence</span>
+        <h3
+          id="references-heading"
+          tabIndex={-1}
+          className="text-sm font-semibold text-foreground flex items-center gap-2 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <span>{refusalReason ? 'Retrieved passages (no answer was shown)' : 'References'}</span>
           <Badge variant="secondary" className="text-xs px-2 py-0">
-            {citations.length} cited
+            {citations.length} {refusalReason ? (citations.length === 1 ? 'passage' : 'passages') : 'cited'}
           </Badge>
         </h3>
-        <span className="text-xs text-muted-foreground">Click [n] in text to inspect</span>
+        {!refusalReason && <span className="text-xs text-muted-foreground">Click [n] in text to inspect</span>}
       </div>
 
       {citations.map((cit) => {
         const isHighlighted = activeMarker === cit.marker;
         const pdfURL = cit.pdf_url || `https://arxiv.org/pdf/${cit.arxiv_id}.pdf`;
-        const scorePct = cit.score * 100;
-        const scoreFormatted = scorePct.toFixed(1);
-        const check = verification(cit);
+        const check = citationState(cit, { refusal: !!refusalReason });
+        const ChipIcon = CHIP_ICONS[check.kind];
 
         return (
           <Card
@@ -79,17 +75,10 @@ export default function ReferencesStack({ citations, activeMarker, onCopy }) {
                   </Badge>
                 </div>
 
-                {check.ok ? (
-                  <Badge variant="verified" className="gap-1 text-[11px]">
-                    <ShieldCheck className="w-3 h-3 text-emerald-400" aria-hidden="true" />
-                    <span>{scoreFormatted}% Verified</span>
-                  </Badge>
-                ) : (
-                  <Badge variant="secondary" className="gap-1 text-[11px] border-amber-500/40 text-amber-300">
-                    <ShieldAlert className="w-3 h-3 text-amber-400" aria-hidden="true" />
-                    <span>{check.label} · {scoreFormatted}%</span>
-                  </Badge>
-                )}
+                <Badge variant={check.kind} className="gap-1 text-[11px]" title={check.tooltip}>
+                  <ChipIcon className="w-3 h-3" aria-hidden="true" />
+                  <span>{check.text}</span>
+                </Badge>
               </div>
 
               <CardTitle className="text-sm font-semibold text-foreground mt-2 leading-snug">
@@ -101,15 +90,6 @@ export default function ReferencesStack({ citations, activeMarker, onCopy }) {
             </CardHeader>
 
             <CardContent className="p-4 pt-1">
-              {/* Groundedness Gauge */}
-              <div className="space-y-1 mb-3">
-                <div className="flex justify-between text-[11px] text-muted-foreground">
-                  <span>Cosine Semantic Support:</span>
-                  <span className="font-mono text-emerald-400 font-semibold">{scoreFormatted}%</span>
-                </div>
-                <Progress value={Math.min(100, Math.max(0, scorePct))} className="h-1.5" />
-              </div>
-
               {/* Exact Raw Text Quote */}
               <div className="text-xs font-mono text-slate-300 bg-background/80 border-l-2 border-emerald-500 rounded-r-md p-3 max-h-36 overflow-y-auto leading-relaxed whitespace-pre-wrap">
                 {cit.content || `"${cit.title} — [Section: ${cit.section}]"`}

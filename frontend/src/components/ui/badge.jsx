@@ -16,10 +16,14 @@ const badgeVariants = cva(
         outline: "text-foreground",
         clinical:
           "border-emerald-500/30 bg-emerald-500/10 text-emerald-400 font-medium",
-        verified:
-          "border-teal-500/30 bg-teal-500/15 text-teal-300 font-medium",
+        supported:
+          "border-transparent bg-supported text-supported-foreground font-medium",
+        unsupported:
+          "border-transparent bg-unsupported text-unsupported-foreground font-medium",
+        unchecked:
+          "border-transparent bg-unchecked text-unchecked-foreground font-medium",
         arxiv:
-          "border-cyan-500/30 bg-cyan-500/10 text-cyan-400 font-mono text-[11px]",
+          "border-border bg-secondary text-secondary-foreground font-mono text-[11px]",
       },
     },
     defaultVariants: {

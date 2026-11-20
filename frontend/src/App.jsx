@@ -211,6 +211,7 @@ export default function App() {
                     citations={searchResult.citations}
                     activeMarker={activeMarker}
                     onCopy={handleCopy}
+                    refusalReason={searchResult.refusal_reason}
                   />
                 </div>
               </div>

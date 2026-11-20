@@ -60,11 +60,49 @@ export const synthesizedAnswer = {
   answer_kind: 'synthesized',
 };
 
-// ADR-0003 refusal: answer withheld, passages still returned as evidence.
-export const refusalAnswer = {
+// Answer mode with all three states: supported, unsupported, and unchecked (a kept claim's other citation).
+export const mixedAnswer = {
+  answer: 'Hybrid search finds the passages [1] and an entailment check rejects weak ones [2] [3].',
+  citations: [supportedCitation, unsupportedCitation, unverifiedCitation],
+  trace_id: 'trace-mixed-0001',
+  answer_kind: 'quoted',
+};
+
+// Early refusal (rag.go): nothing relevant was retrieved, no refusal_reason.
+export const earlyRefusal = {
+  answer: 'No indexed papers are relevant to this question.',
+  citations: [],
+  trace_id: 'trace-early-0001',
+};
+
+// ADR-0003 refusals: answer withheld, passages still returned as evidence.
+// A: a check ran on the first passage (best score 0.31); the second was never checked.
+export const refusalA = {
   answer:
     "I couldn't verify any statement of a draft answer against the retrieved passages, so no answer is shown. The passages found are listed below.",
-  citations: [unsupportedCitation, unverifiedCitation],
-  trace_id: 'trace-refusal-0001',
+  citations: [{ ...unsupportedCitation, marker: 1, score: 0.31 }, { ...unverifiedCitation, marker: 2 }],
+  trace_id: 'trace-refusal-a',
   refusal_reason: 'all_citations_unsupported',
 };
+
+// B: the checker was unavailable for at least one passage.
+export const refusalB = {
+  answer: 'Verification is unavailable right now, so no answer is shown.',
+  citations: [{ ...unsupportedCitation, marker: 1, score: 0.22 }, { ...unverifiedCitation, marker: 2 }],
+  trace_id: 'trace-refusal-b',
+  refusal_reason: 'verification_unavailable',
+};
+
+// C (LLM path only): every passage unchecked, score 0.
+export const refusalC = {
+  answer: 'The retrieved passages are insufficient to answer this question.',
+  citations: [{ ...unverifiedCitation, marker: 1 }, { ...unverifiedCitation, marker: 2, chunk_id: 304 }],
+  trace_id: 'trace-refusal-c',
+  refusal_reason: 'insufficient_evidence',
+};
+
+// Citation variants for the status rule (design FE-3 §1).
+export const contradictorySupported = { ...supportedCitation, status: 'supported', supported: false };
+export const partialCitation = { ...supportedCitation, status: 'partially_supported', supported: false };
+export const contradictedCitation = { ...supportedCitation, status: 'contradicted', supported: false };
+export const legacyRefusalZero = { ...unverifiedCitation, status: undefined, score: 0, supported: false };
