@@ -18,8 +18,10 @@ const buttonVariants = cva(
           "bg-secondary text-secondary-foreground shadow-sm hover:bg-secondary/80",
         ghost: "hover:bg-muted hover:text-foreground",
         link: "text-primary underline-offset-4 hover:underline",
+        // Deprecated (FE-0 design §6): kept so callers can move to `default` without a flag day.
+        // FE-0f: theme tokens instead of the emerald/teal gradient (white on it was < 4.5:1, WCAG 1.4.3).
         clinical:
-          "bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow hover:from-emerald-500 hover:to-teal-500 font-semibold",
+          "bg-primary text-primary-foreground shadow-sm hover:bg-primary/90 font-semibold",
       },
       size: {
         default: "h-9 px-4 py-2",
