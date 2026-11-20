@@ -256,9 +256,6 @@ const itDeleteSynthSQL = `DELETE FROM papers WHERE arxiv_id LIKE 'synth.%'`
 
 // itPrepare deletes synth.* papers left by an earlier crashed run and returns how many other papers remain.
 func itPrepare(ctx context.Context, pool *pgxpool.Pool) (int, error) {
-	if _, err := pool.Exec(ctx, itDeleteSynthSQL); err != nil {
-		return 0, err
-	}
 	var others int
 	err := pool.QueryRow(ctx, `SELECT count(*) FROM papers WHERE arxiv_id NOT LIKE 'synth.%'`).Scan(&others)
 	return others, err
