@@ -92,9 +92,27 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+// writeJSON marshals v before touching headers or status, so an unencodable
+// value (e.g. a NaN or ±Inf float64) becomes a logged 500 instead of a 200 with
+// an empty or truncated body. On success the body is byte-identical to
+// what a json.Encoder writes: HTML-escaped and followed by a newline.
+func writeJSON(w http.ResponseWriter, status int, v any, route, traceID string) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		if traceID == "" {
+			traceID = "-"
+		}
+		log.Printf("[Query Service] encode response failed route=%s trace_id=%s: %v", route, traceID, err)
+		http.Error(w, "failed to encode response", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	w.WriteHeader(status)
+	_, _ = w.Write(append(body, '\n'))
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"}, "/healthz", "")
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -115,12 +133,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"query": req.Query,
 		"count": len(hits),
 		"hits":  hits,
-	})
+	}, "/v1/search", "")
 }
 
 func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
@@ -141,8 +158,7 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusOK, resp, "/v1/ask", resp.TraceID)
 }
 
 func (s *Server) handlePaperStatus(w http.ResponseWriter, r *http.Request) {
@@ -161,8 +177,7 @@ func (s *Server) handlePaperStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(paper)
+	writeJSON(w, http.StatusOK, paper, "/v1/papers/{arxiv_id}/status", "")
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -172,8 +187,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(stats)
+	writeJSON(w, http.StatusOK, stats, "/v1/stats", "")
 }
 
 func (s *Server) handleIngestPaper(w http.ResponseWriter, r *http.Request) {
@@ -199,14 +213,11 @@ func (s *Server) handleIngestPaper(w http.ResponseWriter, r *http.Request) {
 
 	res, err := s.ingester.IngestPaper(r.Context(), input)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}, "/v1/papers/ingest", "")
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(res)
+	writeJSON(w, http.StatusOK, res, "/v1/papers/ingest", "")
 }
 
 type DiscoverAPIRequest struct {
@@ -233,12 +244,9 @@ func (s *Server) handleDiscoverPaper(w http.ResponseWriter, r *http.Request) {
 
 	res, err := s.ingester.DiscoverAndIngest(r.Context(), query)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()}, "/v1/papers/discover", "")
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(res)
+	writeJSON(w, http.StatusOK, res, "/v1/papers/discover", "")
 }
