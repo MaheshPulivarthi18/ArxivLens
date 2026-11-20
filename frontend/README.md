@@ -1,16 +1,23 @@
-# React + Vite
+# ArxivLens frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React 19 + Vite 8 + Tailwind 3 UI for asking questions over indexed arXiv papers and inspecting the cited evidence.
 
-Currently, two official plugins are available:
+## Commands
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Run from `frontend/`:
 
-## React Compiler
+| Command | What |
+|---|---|
+| `npm ci` | Install the exact dependencies from `package-lock.json` |
+| `npm run dev` | Dev server on :5173; proxies `/v1` to the query API on :8080 |
+| `npm run lint` | oxlint |
+| `npm test` | Vitest component tests (jsdom, no network); test files are `src/**/*.test.jsx` |
+| `npm run build` | Production build |
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+CI runs `npm ci`, `npm run lint`, `npm test` and `npm run build` on every PR.
 
-## Expanding the Oxlint configuration
+## Tests
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+- Setup: `src/test/setup.js` (jest-dom matchers, cleanup after each test).
+- Fixtures: `src/test/fixtures.js` holds `/v1/ask` responses shaped like `AskResponse` / `Citation` in `internal/query/rag.go`.
+- Assert on visible text and roles, not class names, so restyles don't break tests.
