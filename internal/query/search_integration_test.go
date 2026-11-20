@@ -74,9 +74,9 @@ func TestHNSWVectorHits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
-	if others > 0 {
+	if skip, fatal := hnswGuard(others, os.Getenv("CI") != ""); fatal || skip {
 		const why = "DB holds %d non-synth papers; the seed adds synthetic chunks to every paper, so use an empty, migrated DB"
-		if os.Getenv("CI") != "" { // never let a skip pass as green in db.yml
+		if fatal { // never let a skip pass as green in db.yml
 			t.Fatalf(why, others)
 		}
 		t.Skipf(why, others)
@@ -264,6 +264,37 @@ func itPrepare(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 	return others, err
 }
 
+// hnswGuard decides whether TestHNSWVectorHits refuses a DB that holds others non-synth papers:
+// fatal under CI (a skip must never pass as green in db.yml), skip otherwise.
+func hnswGuard(others int, ci bool) (skip, fatal bool) {
+	if others > 0 {
+		return !ci, ci
+	}
+	return false, false
+}
+
+// TestHNSWGuard pins hnswGuard; it needs no DATABASE_URL.
+func TestHNSWGuard(t *testing.T) {
+	for _, tc := range []struct {
+		others          int
+		ci, skip, fatal bool
+	}{
+		{others: 0, ci: false},
+		{others: 0, ci: true},
+		{others: 1, ci: false, skip: true},
+		{others: 1, ci: true, fatal: true},
+		{others: 5, ci: false, skip: true},
+		{others: 5, ci: true, fatal: true},
+	} {
+		t.Run(fmt.Sprintf("others=%d/ci=%t", tc.others, tc.ci), func(t *testing.T) {
+			if skip, fatal := hnswGuard(tc.others, tc.ci); skip != tc.skip || fatal != tc.fatal {
+				t.Errorf("hnswGuard(%d, %t) = skip %t, fatal %t; want skip %t, fatal %t",
+					tc.others, tc.ci, skip, fatal, tc.skip, tc.fatal)
+			}
+		})
+	}
+}
+
 // TestHNSWSeedCleanup runs after TestHNSWVectorHits (file order) and checks that it left no corpus behind,
 // and that itPrepare removes leftovers and counts foreign papers.
 func TestHNSWSeedCleanup(t *testing.T) {
@@ -289,7 +320,8 @@ func TestHNSWSeedCleanup(t *testing.T) {
 
 	// (a) Before anything here deletes rows: TestHNSWVectorHits removed its corpus.
 	if n, c := count(synthPapers), count(`SELECT count(*) FROM paper_chunks WHERE content LIKE 'synthetic chunk %'`); n != 0 || c != 0 {
-		t.Errorf("(a) leftover corpus after TestHNSWVectorHits: %d synth.* papers, %d synthetic chunks; want 0, 0", n, c)
+		t.Errorf("(a) leftover corpus after TestHNSWVectorHits: %d synth.* papers, %d synthetic chunks; want 0, 0"+
+			"; on a dev DB seeded before OPS-H5b run: DELETE FROM paper_chunks WHERE content LIKE 'synthetic chunk %%'", n, c)
 	}
 
 	cleanup := func() {
