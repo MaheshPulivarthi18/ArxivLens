@@ -3,6 +3,7 @@ package llm
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -524,6 +525,92 @@ func TestTransportError(t *testing.T) {
 	}
 }
 
+// tlsCertServer is an HTTPS server with httptest's self-signed certificate,
+// which the client's default roots reject.
+func tlsCertServer(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewTLSServer(http.NotFoundHandler())
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// notTLSServer accepts TCP connections, writes garbage (which must not start
+// with "HTTP/", or net/http rewrites the error) and half-closes, so the TLS
+// client reads a bad record header rather than a reset. Returns an https URL.
+func notTLSServer(t *testing.T, garbage string) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+				_, _ = io.WriteString(conn, garbage)
+				_ = conn.(*net.TCPConn).CloseWrite()
+				_, _ = io.Copy(io.Discard, conn) // drain the ClientHello until the client hangs up
+			}()
+		}
+	}()
+	return "https://" + ln.Addr().String()
+}
+
+func TestTLSError(t *testing.T) {
+	const garbage = "garbage\r\n"
+	tests := []struct {
+		name    string
+		url     func(t *testing.T) string
+		detail  string
+		absent  []string
+		rawType func(error) bool // the raw TLS error must not be reachable as a cause
+	}{
+		{
+			name:    "certificate rejected",
+			url:     tlsCertServer,
+			detail:  "transport: TLS certificate rejected",
+			absent:  []string{"127.0.0.1", "x509", "certificate signed by"},
+			rawType: func(err error) bool { return errors.As(err, new(*tls.CertificateVerificationError)) },
+		},
+		{
+			name:    "handshake failed",
+			url:     func(t *testing.T) string { return notTLSServer(t, garbage) },
+			detail:  "transport: TLS handshake failed",
+			absent:  []string{"127.0.0.1", "garbage", `\r\n`, "record", "first record"},
+			rawType: func(err error) bool { return errors.As(err, new(tls.RecordHeaderError)) },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url := tt.url(t)
+			c := newTestClient(t, url, "", 2*time.Second)
+			_, err := c.Complete(context.Background(), userReq("q"))
+			e := asError(t, err)
+			if !errors.Is(err, ErrProvider) || e.Status != 0 || e.Attempts != 1 {
+				t.Fatalf("got %v status %d attempts %d, want ErrProvider, status 0, 1 attempt", err, e.Status, e.Attempts)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, tt.detail) {
+				t.Fatalf("error %q should contain %q", msg, tt.detail)
+			}
+			for _, s := range append([]string{url, strings.TrimPrefix(url, "https://")}, tt.absent...) {
+				if strings.Contains(msg, s) {
+					t.Fatalf("error %q contains %q", msg, s)
+				}
+			}
+			if tt.rawType(err) {
+				t.Fatalf("raw TLS error reachable through the cause chain of %v", err)
+			}
+		})
+	}
+}
+
 func TestNoRedirect(t *testing.T) {
 	for _, code := range []int{301, 302, 307, 308} {
 		t.Run(strconv.Itoa(code), func(t *testing.T) {
@@ -631,6 +718,7 @@ func TestNoSecretLeaks(t *testing.T) {
 		timeout time.Duration
 		cancel  bool
 		closed  bool
+		url     func(t *testing.T) string
 		raw     func(body []byte) string // malformed HTTP from rawServer; the error must be a transport one (Status 0)
 		kind    error                    // nil → cancel
 	}{
@@ -655,12 +743,19 @@ func TestNoSecretLeaks(t *testing.T) {
 		{name: "raw: garbage response", kind: ErrProvider, raw: func(b []byte) string {
 			return string(b) + key + completion + "\r\n\r\n"
 		}},
+		// url rows build their own server; TLS fails before the key is sent, so only the error text is swept.
+		{name: "TLS: certificate rejected", kind: ErrProvider, url: tlsCertServer},
+		{name: "TLS: not a TLS server", kind: ErrProvider, url: func(t *testing.T) string {
+			return notTLSServer(t, "garbage "+prompt+key+completion+"\r\n")
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var url string
 			if tt.raw != nil {
 				url = rawServer(t, key, tt.raw)
+			} else if tt.url != nil {
+				url = tt.url(t)
 			} else if tt.closed {
 				srv := httptest.NewServer(http.NotFoundHandler())
 				url = srv.URL

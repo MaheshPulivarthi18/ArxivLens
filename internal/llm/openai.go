@@ -3,6 +3,7 @@ package llm
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -240,11 +241,18 @@ func (c *Client) attempt(ctx context.Context, body []byte, n int, key string) (*
 // net/http protocol errors quote raw server bytes (which can echo the prompt
 // or the key), and the URL is never wanted. Only the socket op and the OS
 // error survive; the cause is that errno (or nil), never the raw error.
+// TLS failures get fixed classes, checked first: a rejected server
+// certificate is "TLS certificate rejected" and a peer that doesn't speak TLS
+// is "TLS handshake failed" (both with a nil cause; the x509 text names hosts).
 func transportDetail(err error) (string, error) {
 	var op *net.OpError
 	var errno syscall.Errno
 	var dns *net.DNSError
 	switch {
+	case errors.As(err, new(*tls.CertificateVerificationError)):
+		return "TLS certificate rejected", nil
+	case errors.As(err, new(tls.RecordHeaderError)):
+		return "TLS handshake failed", nil
 	case errors.As(err, &op) && errors.As(err, &errno):
 		return op.Op + ": " + errno.Error(), errno
 	case errors.As(err, &dns):
