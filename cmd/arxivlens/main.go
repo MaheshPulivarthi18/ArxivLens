@@ -295,7 +295,7 @@ func newDLQCmd() *cobra.Command {
 		Short: "List failed events in a DLQ topic",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
-			mgr := dlq.NewManager(cfg.KafkaBrokers)
+			mgr := dlq.NewManager(cfg.KafkaBrokers, nil)
 			eventsList, err := mgr.ListEvents(ctx, topic, limit)
 			if err != nil {
 				return err
@@ -318,7 +318,7 @@ func newDLQCmd() *cobra.Command {
 		Short: "Inspect full error diagnostic context and stack trace for a paper key",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
-			mgr := dlq.NewManager(cfg.KafkaBrokers)
+			mgr := dlq.NewManager(cfg.KafkaBrokers, nil)
 			eventsList, err := mgr.ListEvents(ctx, topic, 100)
 			if err != nil {
 				return err
@@ -359,7 +359,7 @@ func newDLQCmd() *cobra.Command {
 		Short: "Republish DLQ events back to their original topics with attempt reset",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
-			mgr := dlq.NewManager(cfg.KafkaBrokers)
+			mgr := dlq.NewManager(cfg.KafkaBrokers, nil)
 			count, err := mgr.Replay(ctx, topic, errorType, limit, dryRun)
 			if err != nil {
 				return err
