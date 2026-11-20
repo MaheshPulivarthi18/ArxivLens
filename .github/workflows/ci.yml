@@ -70,7 +70,7 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - name: Test
-        run: npm run test --if-present
+        run: npm test
       - run: npm run build
       - name: dist/ report (fonts, CSS)
         run: ../.github/scripts/frontend-dist-report.sh dist
