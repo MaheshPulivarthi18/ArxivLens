@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -7,7 +8,9 @@ import {
 
 // The pre-paint script in index.html duplicates theme.js (FE-0). These tests compare the two files, so a change to
 // one without the other (e.g. FE-3 flipping DEFAULT_THEME) fails here. Never hard-code the default below.
-const html = fs.readFileSync(new URL('../../index.html', import.meta.url), 'utf8');
+// `testFile` keeps Vite's `new URL(…, import.meta.url)` asset rewrite (an http:// URL under jsdom) off this path.
+const testFile = import.meta.url;
+const html = fs.readFileSync(fileURLToPath(new URL('../../index.html', testFile).href), 'utf8');
 const inlineScripts = [...html.matchAll(/<script(?![^>]*\bsrc=)([^>]*)>([\s\S]*?)<\/script>/g)]
   .filter((m) => !/type=["']module["']/.test(m[1]))
   .map((m) => m[2]);
