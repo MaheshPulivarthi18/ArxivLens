@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
+	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -276,7 +279,61 @@ func newQueryCmd() *cobra.Command {
 	return cmd
 }
 
+// dlqReader is the DLQ topic reader the CLI builds per command; *dlq.KafkaReader in production, a fake in dlq_test.go.
+type dlqReader interface {
+	dlq.Reader
+	Close()
+}
+
 func newDLQCmd() *cobra.Command {
+	return newDLQCmdWith(func() (dlqReader, error) {
+		r, err := dlq.NewKafkaReader(cfg.KafkaBrokers)
+		if err != nil {
+			return nil, err // not a typed nil in the interface
+		}
+		return r, nil
+	})
+}
+
+// withDLQManager builds a reader, runs fn on a Manager that holds it, and closes the reader on every path.
+// list and inspect only call List through here, so List never runs on a nil-reader Manager (OPS-H7a2 AC7).
+func withDLQManager(newReader func() (dlqReader, error), fn func(context.Context, *dlq.Manager) error) error {
+	r, err := newReader()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	return fn(ctx, dlq.NewManager(nil, r))
+}
+
+// printDLQRecord prints one record as P/O first (the form --from takes); an undecodable record is never hidden.
+func printDLQRecord(w io.Writer, r dlq.Record) {
+	ev := r.Payload
+	if ev == nil {
+		fmt.Fprintf(w, "%d/%d  UNDECODABLE (%d bytes)\n", r.Partition, r.Offset, len(r.Value))
+		return
+	}
+	fmt.Fprintf(w, "%d/%d  key=%s  error=%s  failed_at=%s  -> %s\n", r.Partition, r.Offset, ev.OriginalKey, ev.ErrorType, ev.FailedAt, ev.OriginalTopic)
+	fmt.Fprintf(w, "    message: %s\n", ev.ErrorMessage)
+}
+
+// watermarkList: "0=H0 1=H1 ..." in partition order.
+func watermarkList(wm map[int32]dlq.Watermark) string {
+	parts := make([]int32, 0, len(wm))
+	for p := range wm {
+		parts = append(parts, p)
+	}
+	sort.Slice(parts, func(i, j int) bool { return parts[i] < parts[j] })
+	out := make([]string, len(parts))
+	for i, p := range parts {
+		out[i] = fmt.Sprintf("%d=%d", p, wm[p].High)
+	}
+	return strings.Join(out, " ")
+}
+
+func newDLQCmdWith(newReader func() (dlqReader, error)) *cobra.Command {
 	dlqCmd := &cobra.Command{
 		Use:   "dlq",
 		Short: "Manage and replay dead-letter queue (DLQ) messages",
@@ -288,67 +345,106 @@ func newDLQCmd() *cobra.Command {
 		errorType string
 		limit     int
 		dryRun    bool
+		partition int32
+		from      string
+		pageSize  int
+		all       bool
 	)
 
 	listCmd := &cobra.Command{
-		Use:   "list",
-		Short: "List failed events in a DLQ topic",
+		Use:          "list",
+		Short:        "List failed events in a DLQ topic as P/O lines, a page at a time, up to the high watermarks at start",
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := context.Background()
-			mgr := dlq.NewManager(cfg.KafkaBrokers, nil)
-			eventsList, err := mgr.ListEvents(ctx, topic, limit)
-			if err != nil {
-				return err
+			opt := dlq.ListOptions{PageSize: pageSize}
+			if cmd.Flags().Changed("partition") {
+				opt.Partition = &partition
 			}
-
-			fmt.Printf("=== DLQ Topic: %s (Total: %d) ===\n", topic, len(eventsList))
-			for i, ev := range eventsList {
-				fmt.Printf("[%d] Key: %-15s | Error: %-18s | FailedAt: %s\n",
-					i+1, ev.OriginalKey, ev.ErrorType, ev.FailedAt)
-				fmt.Printf("    Message: %s\n", ev.ErrorMessage)
+			if from != "" {
+				c, err := dlq.ParseCursor(from)
+				if err != nil {
+					return err
+				}
+				opt.From = c
 			}
-			return nil
+			out, errOut := cmd.OutOrStdout(), cmd.ErrOrStderr()
+			return withDLQManager(newReader, func(ctx context.Context, mgr *dlq.Manager) error {
+				fmt.Fprintf(out, "=== DLQ topic: %s ===\n", topic)
+				n := 0
+				for {
+					page, err := mgr.List(ctx, topic, opt)
+					for _, w := range page.Warnings {
+						fmt.Fprintln(errOut, w)
+					}
+					for _, r := range page.Records {
+						printDLQRecord(out, r)
+					}
+					n += len(page.Records)
+					if err != nil {
+						return err // a stall or poll error is never "end of topic"
+					}
+					if !page.Next.IsSet() {
+						fmt.Fprintf(out, "end of topic (high watermarks at start: %s; %d records)\n", watermarkList(page.Watermarks), n)
+						return nil
+					}
+					if !all {
+						fmt.Fprintf(out, "next page: arxivlens dlq list --topic %s --from %s\n", topic, page.Next)
+						return nil
+					}
+					opt.From, opt.Snapshot = page.Next, page.Watermarks // --all: one start-time snapshot for the whole run
+				}
+			})
 		},
 	}
 	listCmd.Flags().StringVar(&topic, "topic", "papers.downloaded.dlq", "DLQ topic name")
-	listCmd.Flags().IntVar(&limit, "limit", 50, "Max messages to inspect")
+	listCmd.Flags().Int32Var(&partition, "partition", 0, "List only this partition")
+	listCmd.Flags().StringVar(&from, "from", "", "Start at cursor P/O (partition P, offset O), as printed by the next-page footer")
+	listCmd.Flags().IntVar(&pageSize, "page-size", dlq.DefaultPageSize, "Records per page")
+	listCmd.Flags().IntVar(&pageSize, "limit", dlq.DefaultPageSize, "Alias of --page-size")
+	_ = listCmd.Flags().MarkHidden("limit")
+	listCmd.Flags().BoolVar(&all, "all", false, "Print every page to the end of the topic in one run")
 
 	inspectCmd := &cobra.Command{
-		Use:   "inspect",
-		Short: "Inspect full error diagnostic context and stack trace for a paper key",
+		Use:          "inspect",
+		Short:        "Inspect full error diagnostic context and stack trace for a paper key (scans the whole topic)",
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := context.Background()
-			mgr := dlq.NewManager(cfg.KafkaBrokers, nil)
-			eventsList, err := mgr.ListEvents(ctx, topic, 100)
-			if err != nil {
-				return err
-			}
-
-			found := false
-			for _, ev := range eventsList {
-				if ev.OriginalKey == key || key == "" {
-					found = true
-					fmt.Println("==================================================")
-					fmt.Printf("Original Topic: %s (Partition %d, Offset %d)\n", ev.OriginalTopic, ev.Partition, ev.Offset)
-					fmt.Printf("Paper Key:      %s\n", ev.OriginalKey)
-					fmt.Printf("Error Type:     %s\n", ev.ErrorType)
-					fmt.Printf("Error Message:  %s\n", ev.ErrorMessage)
-					fmt.Printf("Attempts:       %d\n", ev.Attempts)
-					fmt.Printf("Consumer Group: %s\n", ev.ConsumerGroup)
-					fmt.Printf("Traceparent:    %s\n", ev.Traceparent)
-					fmt.Printf("Failed At:      %s\n", ev.FailedAt)
-					fmt.Println("Stack Trace:")
-					fmt.Println(ev.StackTrace)
-					fmt.Println("==================================================")
-					if key != "" {
+			out := cmd.OutOrStdout()
+			return withDLQManager(newReader, func(ctx context.Context, mgr *dlq.Manager) error {
+				opt := dlq.ListOptions{PageSize: 500}
+				for {
+					page, err := mgr.List(ctx, topic, opt) // From is always >= the snapshot's Low here, so no expiry Warnings
+					for _, r := range page.Records {
+						ev := r.Payload
+						if key != "" && (ev == nil || ev.OriginalKey != key) {
+							continue
+						}
+						if ev == nil {
+							printDLQRecord(out, r)
+							continue
+						}
+						fmt.Fprintf(out, "%[1]s\nDLQ Record:     %d/%d\nOriginal Topic: %s (Partition %d, Offset %d)\nPaper Key:      %s\n"+
+							"Error Type:     %s\nError Message:  %s\nAttempts:       %d\nConsumer Group: %s\nTraceparent:    %s\n"+
+							"Failed At:      %s\nStack Trace:\n%s\n%[1]s\n", strings.Repeat("=", 50), r.Partition, r.Offset,
+							ev.OriginalTopic, ev.Partition, ev.Offset, ev.OriginalKey, ev.ErrorType, ev.ErrorMessage, ev.Attempts,
+							ev.ConsumerGroup, ev.Traceparent, ev.FailedAt, ev.StackTrace)
+						if key != "" {
+							return nil // first match
+						}
+					}
+					if err != nil {
+						return err
+					}
+					if !page.Next.IsSet() {
 						break
 					}
+					opt.From, opt.Snapshot = page.Next, page.Watermarks // one snapshot for the whole scan
 				}
-			}
-			if !found {
-				fmt.Printf("No DLQ events found for key: %s\n", key)
-			}
-			return nil
+				if key != "" {
+					fmt.Fprintf(out, "No DLQ events found for key: %s\n", key)
+				}
+				return nil
+			})
 		},
 	}
 	inspectCmd.Flags().StringVar(&topic, "topic", "papers.downloaded.dlq", "DLQ topic name")
