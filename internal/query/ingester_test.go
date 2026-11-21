@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -169,6 +170,57 @@ func TestIngestSpacesArxivRequests(t *testing.T) {
 			t.Fatalf("discover=%v: err = %v, want the stub's PDF 503", discover, err)
 		}
 		checkSpaced(t, stub, want...)
+	}
+}
+
+// A cancelled ingest (client gone, INGEST_TIMEOUT) sends no arXiv request: each one waits on the limiter
+// first and stops on its error.
+func TestIngestCancelledCtxSendsNoRequest(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, discover := range []bool{false, true} {
+		stub := &arxivStub{}
+		ing, err := newStubIngester(stub), error(nil)
+		if discover {
+			_, err = ing.DiscoverAndIngest(ctx, "flash attention")
+		} else {
+			_, err = ing.IngestPaper(ctx, "2307.08691")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("discover=%v: err = %v, want context.Canceled", discover, err)
+		}
+		if len(stub.reqs) != 0 {
+			t.Errorf("discover=%v: got %d arXiv requests, want 0: %+v", discover, len(stub.reqs), stub.reqs)
+		}
+	}
+}
+
+// cancelOnAtomStub serves like arxivStub and cancels the ingest's ctx while serving the id_list= request.
+type cancelOnAtomStub struct {
+	arxivStub
+	cancel context.CancelFunc
+}
+
+func (s *cancelOnAtomStub) RoundTrip(r *http.Request) (*http.Response, error) {
+	if strings.Contains(r.URL.RawQuery, "id_list=") {
+		s.cancel()
+	}
+	return s.arxivStub.RoundTrip(r)
+}
+
+// Cancelled after the Atom response: IngestPaper stops at the PDF's limiter wait, so no .pdf request.
+func TestIngestCancelledAfterAtomSendsNoPDFRequest(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stub := &cancelOnAtomStub{cancel: cancel}
+	ing := newStubIngester(&stub.arxivStub)
+	ing.httpClient.Transport = stub
+	_, err := ing.IngestPaper(ctx, "2307.08691")
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+	if len(stub.reqs) != 1 || !strings.Contains(stub.reqs[0].url, "id_list=2307.08691") {
+		t.Fatalf("arXiv requests = %+v, want only the id_list= query (no .pdf)", stub.reqs)
 	}
 }
 

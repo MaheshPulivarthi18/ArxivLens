@@ -58,8 +58,10 @@ func TestSequentialWaits(t *testing.T) {
 	}
 }
 
+// d >> slack, so this proves gaps of at least d-slack = 80 ms: a limiter that serialises callers but
+// sleeps only interval/2 fails here.
 func TestConcurrentCallersAreSpaced(t *testing.T) {
-	const n, d = 10, 30 * time.Millisecond
+	const n, d = 10, 100 * time.Millisecond
 	l := NewLimiter(d)
 	stamps := make([]time.Time, n)
 	var wg sync.WaitGroup
