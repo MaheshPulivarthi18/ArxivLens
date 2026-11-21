@@ -34,7 +34,7 @@ from scripts import evaluate_retrieval as er  # noqa: E402  (stdlib-only at impo
 GATED_MODE = er.RERANK_MODE
 BASELINE_MODES = ("BM25 Keyword", "Dense Vector")
 # Printed by print_table, never read by check_thresholds (EVAL-6). Definitions: evals/README.md.
-REPORT_ONLY_KEYS = ("citation_coverage", "near_miss_correct_refusal_rate", "verification_unavailable_count")
+REPORT_ONLY_KEYS = ("ask_full_p95_ms", "citation_coverage", "near_miss_correct_refusal_rate", "verification_unavailable_count")
 
 
 # Technical PRD §9 "Reference hardware" (Accepted 2026-11-15): latency targets are gated on the reference profile, a
@@ -202,7 +202,9 @@ def main(argv=None) -> int:
             results["answers"] = ea.evaluate(ea.load_cases(os.path.join(EVALS_DIR, "answer.jsonl")),
                                              ea.load_cases(os.path.join(EVALS_DIR, "refusal.jsonl")),
                                              ea.make_http_ask(args.api_url, args.timeout),
-                                             ea.load_cases(os.path.join(EVALS_DIR, "refusal_near_miss.jsonl")))
+                                             ea.load_cases(os.path.join(EVALS_DIR, "refusal_near_miss.jsonl")),
+                                             # ADR-0019: the 3 s latency gate times the quick first stage
+                                             quick_ask=ea.make_http_ask(args.api_url, args.timeout, quick=True))
             ea.print_report(results["answers"])
             if results["answers"]["requests_ok"] == 0:
                 raise ConnectionError(f"every /v1/ask request to {args.api_url} failed")
