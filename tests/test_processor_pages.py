@@ -192,8 +192,9 @@ def test_save_chunks_page_rows(chunk, want_sql, want_params, want_page_number):
     n = save_sections_and_chunks(conn, 7, [{"title": "Intro", "level": 1}], [chunk])
     assert n == 1 and conn.commits == 0, "must stay inside the caller's transaction (L2)"
     calls = conn.cur.calls
-    sec_sql, chunk_call = calls[0][0], calls[1]  # section id 100, chunk id 101
+    sec_sql, chunk_call = calls[0][0], calls[2]  # section id 100, chunk id 101 (calls[1]: OPS-H6d stale-vector delete)
     assert sec_sql.startswith("INSERT INTO paper_sections")
+    assert calls[1] == (STALE_VECTOR_SQL, (7, 0, "h0"))
     assert chunk_call[0].startswith("INSERT INTO paper_chunks") and chunk_call[0].endswith("RETURNING id;")
     assert chunk_call[1] == (7, 100, 0, "c0", "h0", want_page_number, 5), "page_number arg must stay chunk.get('page_number', 1)"
     page_calls = [c for c in calls if "paper_chunk_pages" in c[0]]
@@ -212,6 +213,42 @@ def test_save_chunks_page_rows_use_each_returned_id():
     page_calls = [(c[0].split()[0], c[1]) for c in conn.cur.calls if "paper_chunk_pages" in c[0]]
     assert page_calls == [("INSERT", (101, 2)), ("DELETE", (102,)), ("INSERT", (103, 5))]
     assert conn.commits == 0
+
+
+# --- OPS-H6d: a re-parse drops the vectors of changed chunks and the chunks it no longer has -----------------------
+
+STALE_VECTOR_SQL = (
+    "DELETE FROM chunk_embeddings ce USING paper_chunks pc WHERE ce.chunk_id = pc.id AND pc.paper_id = %s "
+    "AND pc.chunk_index = %s AND pc.content_hash <> %s;"
+)
+STALE_TAIL_SQL = "DELETE FROM paper_chunks WHERE paper_id = %s AND NOT (chunk_index = ANY(%s::int[]));"
+
+
+@pytest.mark.parametrize(
+    "indexes",
+    [[0, 1, 2], [0, 2, 5], [3], []],
+    ids=["contiguous", "gaps", "single-not-zero", "empty"],
+)
+def test_save_chunks_reprocess_deletes(indexes):
+    from services.common.db import save_sections_and_chunks
+
+    conn = FakeConn()
+    chunks = [_chunk(i, content_hash=f"new{i}") for i in indexes]
+    n = save_sections_and_chunks(conn, 7, [{"title": "Intro", "level": 1}], chunks)
+    assert n == len(indexes) and conn.commits == 0, "must stay inside the caller's transaction (L2)"
+    calls = conn.cur.calls
+    # AC1: one stale-vector delete per chunk, keyed on (paper_id, chunk_index, new hash), right before that chunk's upsert.
+    upserts = [k for k, c in enumerate(calls) if c[0].startswith("INSERT INTO paper_chunks")]
+    assert len(upserts) == len(indexes), calls
+    for k, i in zip(upserts, indexes):
+        assert calls[k - 1] == (STALE_VECTOR_SQL, (7, i, f"new{i}")), (i, calls[k - 1])
+        assert calls[k][1][2] == i and calls[k][1][4] == f"new{i}"
+    assert [c for c in calls if "chunk_embeddings" in c[0]] == [(STALE_VECTOR_SQL, (7, i, f"new{i}")) for i in indexes]
+    # AC3 + AC4: one tail delete scoped to the paper with exactly the new index set, after every chunk statement and
+    # just before the status update.
+    tail = [c for c in calls if c[0].startswith("DELETE FROM paper_chunks ")]
+    assert tail == [(STALE_TAIL_SQL, (7, indexes))], tail
+    assert len(calls) >= 2 and calls[-2] == tail[0] and calls[-1][0].startswith("UPDATE papers SET status = 'chunked'")
 
 
 # --- AI-11: TokenChunker records each chunk's start page (`page_start`) -------------------------------------------
