@@ -10,7 +10,7 @@
          Key and DEFAULT_THEME must match src/lib/theme.js. -->
     <script>
       (function () {
-        var DEFAULT_THEME = 'dark'; // interim until FE-3 flips it to 'system'; same as DEFAULT_THEME in src/lib/theme.js
+        var DEFAULT_THEME = 'system'; // first visit follows the OS; same as DEFAULT_THEME in src/lib/theme.js
         var pref = DEFAULT_THEME;
         try { pref = localStorage.getItem('arxivlens-theme') || pref; } catch (e) {}
         if (pref !== 'light' && pref !== 'dark' && pref !== 'system') pref = DEFAULT_THEME;

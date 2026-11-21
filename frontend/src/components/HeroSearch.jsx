@@ -46,8 +46,8 @@ export default function HeroSearch({ onSearch, loading }) {
 
   return (
     <div className="max-w-4xl mx-auto text-center my-8 sm:my-12">
-      <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-medium mb-4">
-        <Sparkles className="w-3.5 h-3.5" />
+      <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-accent border border-transparent text-primary text-xs font-medium mb-4">
+        <Sparkles className="w-3.5 h-3.5" aria-hidden="true" />
         <span>Evidence-Grounded Synthesis with Sentence-Level Verification</span>
       </div>
 
@@ -60,7 +60,7 @@ export default function HeroSearch({ onSearch, loading }) {
 
       {/* Main Clinical Search Bar */}
       <form onSubmit={handleSubmit} className="relative max-w-3xl mx-auto">
-        <div className="relative flex items-center bg-card border border-border/90 rounded-xl p-1.5 shadow-2xl shadow-black/40 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-500/20 transition-all">
+        <div className="relative flex items-center bg-card border border-border/90 rounded-xl p-1.5 shadow-2xl shadow-black/40 focus-within:border-input focus-within:ring-2 focus-within:ring-ring/30 transition-all">
           <Search className="w-5 h-5 text-muted-foreground ml-3 shrink-0" />
           <input
             type="text"
@@ -78,7 +78,7 @@ export default function HeroSearch({ onSearch, loading }) {
           >
             {loading ? (
               <>
-                <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                <div className="w-4 h-4 border-2 border-primary-foreground/30 border-t-primary-foreground rounded-full animate-spin" />
                 <span>Synthesizing...</span>
               </>
             ) : (
@@ -100,9 +100,9 @@ export default function HeroSearch({ onSearch, loading }) {
               key={idx}
               type="button"
               onClick={() => handleChipClick(item.query)}
-              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-card/80 border border-border hover:border-emerald-500/40 hover:bg-emerald-500/5 text-xs text-muted-foreground hover:text-foreground transition-all"
+              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-card/80 border border-border hover:border-input hover:bg-accent text-xs text-muted-foreground hover:text-foreground transition-all"
             >
-              <Icon className="w-3 h-3 text-emerald-400" />
+              <Icon className="w-3 h-3 text-primary" aria-hidden="true" />
               <span>{item.label}</span>
             </button>
           );

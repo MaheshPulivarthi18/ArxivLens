@@ -50,7 +50,8 @@ export default function SynthesisView({ answer, traceId, citations, onCitationCl
       parts.push(
         <button
           key={match.index}
-          className="inline-flex items-center justify-center font-mono font-bold text-xs bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500 hover:text-slate-950 px-1.5 py-0.5 rounded mx-1 transition-all hover:scale-105 active:scale-95 cursor-pointer align-baseline"
+          type="button"
+          className="inline-flex items-center justify-center font-sans text-xs font-semibold text-primary bg-accent hover:bg-accent/70 rounded px-1 mx-0.5 cursor-pointer align-baseline transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           onClick={() => onCitationClick(marker)}
           title={`Click to inspect Evidence [${marker}]`}
         >
@@ -77,12 +78,10 @@ export default function SynthesisView({ answer, traceId, citations, onCitationCl
 
   return (
     <Card className="border-border/80 bg-card/95 shadow-xl relative overflow-hidden">
-      <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-emerald-500 via-teal-500 to-cyan-500" />
-      
       <CardHeader className="pb-3 border-b border-border/60 flex flex-row items-center justify-between space-y-0">
         <div className="flex items-center gap-2.5">
-          <div className="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-400">
-            <FileText className="w-4 h-4" />
+          <div className="p-1.5 rounded-lg bg-accent text-accent-foreground">
+            <FileText className="w-4 h-4" aria-hidden="true" />
           </div>
           <div>
             <CardTitle className="text-base font-title text-foreground">
@@ -92,7 +91,7 @@ export default function SynthesisView({ answer, traceId, citations, onCitationCl
               {refusalReason ? 'Evidence only — no answer was shown' : (SUBTITLES[answerKind] || 'Grounded answer')}
             </p>
             {writing && (
-              <p className="text-xs text-emerald-400/80 mt-0.5 animate-pulse" role="status">Writing a summary from these passages…</p>
+              <p className="text-xs text-muted-foreground mt-0.5 motion-safe:animate-pulse" role="status">Writing a summary from these passages…</p>
             )}
           </div>
         </div>
@@ -102,7 +101,7 @@ export default function SynthesisView({ answer, traceId, citations, onCitationCl
         </Badge>
       </CardHeader>
 
-      <CardContent className="pt-5 text-sm sm:text-base leading-relaxed text-slate-200 font-sans">
+      <CardContent className="pt-5">
         {refusalReason ? (
           <section role="status" aria-labelledby={titleId} className="rounded-md border border-border bg-muted p-4 font-sans">
             <h3 id={titleId} className="flex items-center gap-2 text-sm font-semibold text-foreground">
@@ -120,7 +119,9 @@ export default function SynthesisView({ answer, traceId, citations, onCitationCl
             )}
           </section>
         ) : (
-          renderFormattedAnswer(answer)
+          <div className="prose font-serif sm:prose-lg max-w-none">
+            <p>{renderFormattedAnswer(answer)}</p>
+          </div>
         )}
       </CardContent>
 

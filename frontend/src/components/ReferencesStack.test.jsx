@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import ReferencesStack from './ReferencesStack';
+import { citationState } from '../lib/citations';
 import {
   supportedCitation,
   unsupportedCitation,
@@ -111,6 +112,37 @@ describe('ReferencesStack', () => {
   it('refusal mode: a legacy citation without status and score 0 reads "Not checked"', () => {
     renderStack([{ ...unverifiedCitation, status: undefined }], vi.fn(), 'all_citations_unsupported');
     expect(screen.getByText('Not checked')).toBeInTheDocument();
+  });
+
+  it('focusing a status chip opens a tooltip with its meaning (keyboard reachable)', async () => {
+    const user = userEvent.setup();
+    renderStack([supportedCitation, unsupportedCitation]);
+    const chip = within(card(1)).getByRole('button', { name: 'Supported · 87.3%' });
+    expect(chip).toHaveAttribute('type', 'button');
+    // Tab from the top of the page until the chip has focus (bounded; the heading is tabIndex -1).
+    for (let i = 0; i < 5 && document.activeElement !== chip; i += 1) await user.tab();
+    expect(chip).toHaveFocus();
+    const tip = await screen.findByRole('tooltip');
+    expect(tip).toHaveTextContent(
+      /^Supported: a check found that this passage backs the sentence citing it \(support score 87\.3%\)\.$/,
+    );
+    expect(chip).toHaveAttribute('aria-describedby', tip.id);
+    expect(tip.textContent).not.toMatch(/entails|NLI|cosine/i);
+  });
+
+  it('every chip is a button named by its text, with no title attribute (meaning not announced twice)', () => {
+    renderStack([supportedCitation, unsupportedCitation, unverifiedCitation]);
+    for (const [marker, name] of [[1, 'Supported · 87.3%'], [2, 'Unsupported · 12.0%'], [3, 'Not checked']]) {
+      expect(within(card(marker)).getByRole('button', { name })).toHaveAttribute('type', 'button');
+    }
+    expect(document.querySelectorAll('[title]')).toHaveLength(0);
+  });
+
+  it('tooltip copy names no checking method, in answer and refusal mode', () => {
+    const cits = [supportedCitation, unsupportedCitation, unverifiedCitation, ...refusalA.citations, ...refusalC.citations];
+    for (const refusal of [false, true]) {
+      for (const cit of cits) expect(citationState(cit, { refusal }).tooltip).not.toMatch(/entails|NLI|cosine/i);
+    }
   });
 
   it('Copy BibTeX passes an @article{arxiv_... entry to onCopy', async () => {
