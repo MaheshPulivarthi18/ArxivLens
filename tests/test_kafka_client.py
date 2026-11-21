@@ -340,8 +340,9 @@ def test_dlq_failure_log_has_coordinates_not_value(caplog, poison):
     assert not [r for r in caplog.records if SENTINEL in r.getMessage()]
 
 
-# OPS-H8d: every Kafka worker's compose stop_grace_period outlasts one confirmed flush, so `docker stop` never SIGKILLs it mid-flush.
-# Stdlib-only line parsing (no PyYAML in requirements-light.txt): top-level `services:` entries are 2-space keys, their own keys 4-space.
+# OPS-H8d: every Kafka worker's compose stop_grace_period outlasts one confirmed flush, so `docker stop` never SIGKILLs
+# it mid-flush. Stdlib-only line parsing (no PyYAML in requirements-light.txt): top-level `services:` entries are
+# 2-space keys, their own keys 4-space.
 COMPOSE = pathlib.Path(__file__).resolve().parents[1] / "docker-compose.yml"
 POLL_S = 1.0  # the consumer loop's consumer.poll(timeout=1.0) in ServiceKafkaConsumer.start (services/common/kafka_client.py)
 _DURATION_UNITS = {"h": 3600.0, "m": 60.0, "s": 1.0, "ms": 1e-3, "us": 1e-6, "ns": 1e-9}
@@ -376,12 +377,12 @@ def test_worker_stop_grace_period_outlasts_confirmed_flush():
     services = compose_services(COMPOSE.read_text())
     workers = {name for name, block in services.items() if any("*heartbeat_check" in line for line in block)}
     assert workers == {"processor", "embedder-worker"}, f"Kafka workers (healthcheck uses *heartbeat_check): {sorted(workers)}"
-    bound = kc.DELIVERY_TIMEOUT_S + POLL_S
+    timeout, bound = kc.DELIVERY_TIMEOUT_S, kc.DELIVERY_TIMEOUT_S + POLL_S
     for name in sorted(workers):
         values = [m.group(1) for line in services[name] if (m := re.fullmatch(r"    stop_grace_period:\s*(\S+)", line))]
         grace = compose_duration_s(values[0]) if len(values) == 1 else None
         assert grace is not None, f"{name}: stop_grace_period missing or unparseable: {values}"
-        assert grace > bound, (f"{name}: stop_grace_period {grace}s <= DELIVERY_TIMEOUT_S {kc.DELIVERY_TIMEOUT_S}s + {POLL_S}s poll")
+        assert grace > bound, f"{name}: stop_grace_period {grace}s <= DELIVERY_TIMEOUT_S {timeout}s + {POLL_S}s poll"
 
 
 @pytest.mark.parametrize("value, want", [("20s", 20.0), ("1500ms", 1.5), ("1m30s", 90.0), ("'2.5s'", 2.5),
