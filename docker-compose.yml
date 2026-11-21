@@ -188,6 +188,8 @@ services:
 
   processor:
     <<: *worker
+    # > DELIVERY_TIMEOUT_S (12 s, services/common/kafka_client.py) + 1 s poll; Docker's 10 s default SIGKILLs mid-flush.
+    stop_grace_period: 20s # not on x-worker: embedder-api merges that anchor too
     build:
       context: .
       dockerfile: services/processor/Dockerfile
@@ -205,6 +207,7 @@ services:
 
   embedder-worker:
     <<: *worker
+    stop_grace_period: 20s # same bound as processor
     build:
       context: .
       dockerfile: services/embedder/Dockerfile
