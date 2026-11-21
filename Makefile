@@ -42,7 +42,7 @@ lint-fe: ## oxlint on the frontend
 	cd frontend && npm run lint
 
 # --- tests -------------------------------------------------------------------
-test-unit: test-go test-py ## Fast tests, no infra (Go + M0 + eval data). Frontend tests: make test-fe
+test-unit: test-go test-py ## Fast tests, no infra (Go + test-py). Frontend tests: make test-fe
 
 test-go: ## Go unit tests
 	go test ./...
