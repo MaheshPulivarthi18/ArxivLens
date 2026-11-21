@@ -661,8 +661,9 @@ var (
 // parseSynthesis turns the model's reply into claims citing passages 1..k. Only a ``` / ```json fence around
 // one JSON object is tolerated. insufficient_evidence: true wins over any claims (refusal signal). Out-of-range
 // citation numbers (array or inline [n]) are dropped and counted; claims left empty or uncited are dropped and
-// counted. If every claim is dropped the result has zero claims and a nil error (synthesize refuses with all_citations_unsupported: the model asserted things it could not cite, so the
-// extractive answer must not paper over it).
+// counted. If every claim is dropped the result has zero claims and a nil error: finalizeClaims then keeps nothing
+// and synthesize falls back to the quoted answer (fallback reason claims_unsupported), which is verified on its own
+// terms and refuses by itself only if none of its citations is supported.
 func parseSynthesis(raw string, k int) (synthesisResult, error) {
 	s := strings.TrimSpace(raw)
 	if strings.HasPrefix(s, "```") {
@@ -782,6 +783,8 @@ func newCitation(marker int, hit SearchHit, score float64, status string) Citati
 
 // filterRelevantHits applies the relevance cutoff (rerank < 0.45 dropped) and the
 // auxiliary-section cutoff (appendix/supplementary/table sections need rerank >= 0.70).
+// A section is auxiliary if its title contains "appendix" or "supplementary" (substring,
+// case-insensitive) or the whole word "table"/"tables" (see isAuxiliarySection).
 func filterRelevantHits(hits []SearchHit) []SearchHit {
 	var relevantHits []SearchHit
 	for _, h := range hits {
@@ -790,13 +793,23 @@ func filterRelevantHits(hits []SearchHit) []SearchHit {
 			continue
 		}
 		// Penalize incidental supplementary/hardware table mentions unless score is high (>= 0.70)
-		lowerSec := strings.ToLower(h.SectionTitle)
-		if (strings.Contains(lowerSec, "supplementary") || strings.Contains(lowerSec, "table") || strings.Contains(lowerSec, "appendix")) && h.RerankScore < 0.70 {
+		if isAuxiliarySection(h.SectionTitle) && h.RerankScore < 0.70 {
 			continue
 		}
 		relevantHits = append(relevantHits, h)
 	}
 	return relevantHits
+}
+
+// tableWordRegex matches "table" or "tables" as a whole word: delimited by the start/end of the
+// title or a non-letter, so "Table 3", "Results tables" and "table-2" match but "Notable",
+// "Stable" and "Timetable" do not (QA-6 targets table sections, not words containing "table").
+var tableWordRegex = regexp.MustCompile(`(?i)(^|[^\pL])tables?([^\pL]|$)`)
+
+// isAuxiliarySection reports whether a section title names an appendix, supplementary or table section.
+func isAuxiliarySection(title string) bool {
+	lower := strings.ToLower(title)
+	return strings.Contains(lower, "supplementary") || strings.Contains(lower, "appendix") || tableWordRegex.MatchString(title)
 }
 
 var markerRegex = regexp.MustCompile(`\[(\d+)\]`)

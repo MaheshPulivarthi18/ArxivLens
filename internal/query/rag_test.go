@@ -164,6 +164,15 @@ func TestFilterRelevantHits(t *testing.T) {
 		{"mixed keeps order of survivors", []SearchHit{ragHit(1, "Intro", 0.8), ragHit(2, "Method", 0.3),
 			ragHit(3, "Appendix", 0.6), ragHit(4, "Results", 0.5)}, []int64{1, 4}},
 		{"empty input", nil, []int64{}},
+		// AI-14: the table rule matches the whole word "table"/"tables" only (QA-6 targets table sections).
+		{"word containing table kept: Notable", []SearchHit{ragHit(1, "Notable results", 0.5)}, []int64{1}},
+		{"word containing table kept: Stable", []SearchHit{ragHit(1, "Stable training", 0.5)}, []int64{1}},
+		{"word containing table kept: Suitable", []SearchHit{ragHit(1, "Suitable baselines", 0.5)}, []int64{1}},
+		{"word containing table kept: Timetable", []SearchHit{ragHit(1, "Timetable", 0.5)}, []int64{1}},
+		{"tables plural section dropped", []SearchHit{ragHit(1, "Tables", 0.5)}, []int64{}},
+		{"tables as last word dropped", []SearchHit{ragHit(1, "Results tables", 0.5)}, []int64{}},
+		{"table followed by hyphen dropped", []SearchHit{ragHit(1, "table-2", 0.5)}, []int64{}},
+		{"supplementary material dropped", []SearchHit{ragHit(1, "Supplementary Material", 0.5)}, []int64{}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
