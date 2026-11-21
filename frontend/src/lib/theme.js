@@ -4,9 +4,9 @@
 
 export const THEME_STORAGE_KEY = "arxivlens-theme";
 export const THEMES = ["light", "dark", "system"];
-// Interim default until FE-3 moves the ask flow to tokens, then FE-3 flips it to "system".
+// First visit follows the OS (every screen is on the theme tokens since FE-0e and FE-3b).
 // Same value as DEFAULT_THEME in the pre-paint script in index.html.
-export const DEFAULT_THEME = "dark";
+export const DEFAULT_THEME = "system";
 
 const DARK_QUERY = "(prefers-color-scheme: dark)";
 

@@ -10,10 +10,13 @@ evals/refusal_near_miss.jsonl (in-domain but unanswered by the corpus), calls th
   - answer_refusal_rate      : in-corpus questions that were refused (informational)
   - correct_refusal_rate     : out-of-corpus questions refused (see classify())
   - ask_p50_ms / ask_p95_ms  : latency over every answer + refusal call, failed ones included at their elapsed
-                               time (timeouts count as >= the timeout); None only if nothing was called
+                               time (timeouts count as >= the timeout); None only if nothing was called. With a
+                               quick_ask (ADR-0019, what `make eval` passes) these time the quick first stage
+                               ({"quick": true}, the answer a reader sees first) and its failures count as errors;
+                               the full answer is timed in the report-only ask_full_p50_ms / ask_full_p95_ms
   - ask_error_count          : failed calls (HTTP error, timeout, bad JSON) plus ADR-0003 case B
                                (verification_unavailable) and unknown refusal_reason values; the gate requires 0
-  Report-only (EVAL-6, never gated): citation_coverage, refusal_reason_counts,
+  Report-only (EVAL-6, never gated): ask_full_p50_ms / ask_full_p95_ms, citation_coverage, refusal_reason_counts,
   verification_unavailable_count, near_miss_correct_refusal_rate. Definitions: evals/README.md.
   - cases                    : per-case records (IDs and numbers only, never passage or answer text)
 
@@ -189,11 +192,15 @@ def case_record(case_id: str, case_set: str, resp: Optional[Dict[str, Any]], ms:
     return rec
 
 
-def make_http_ask(api_url: str, timeout_s: float, max_citations: int = 5) -> AskFn:
+def make_http_ask(api_url: str, timeout_s: float, max_citations: int = 5, quick: bool = False) -> AskFn:
+    """quick=True asks for the quick first stage (ADR-0019 latency gate); otherwise the full answer."""
     url = api_url.rstrip("/") + "/v1/ask"
+    payload: Dict[str, Any] = {"max_citations": max_citations}
+    if quick:
+        payload["quick"] = True
 
     def ask(question: str) -> Tuple[Optional[Dict[str, Any]], float]:
-        body = json.dumps({"question": question, "max_citations": max_citations}).encode("utf-8")
+        body = json.dumps({"question": question, **payload}).encode("utf-8")
         req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
         t0 = time.perf_counter()
         try:
@@ -211,8 +218,12 @@ def make_http_ask(api_url: str, timeout_s: float, max_citations: int = 5) -> Ask
 
 
 def evaluate(answer_cases: List[Dict[str, Any]], refusal_cases: List[Dict[str, Any]], ask: AskFn,
-             near_miss_cases: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-    latencies: List[float] = []  # every answer + refusal call, failed ones included
+             near_miss_cases: Optional[List[Dict[str, Any]]] = None,
+             quick_ask: Optional[AskFn] = None) -> Dict[str, Any]:
+    """Quality metrics always come from ask (the full answer). With quick_ask, the gated latency is the quick stage's
+    and the full answer's latency is report-only (ADR-0019); without it, the gated latency is ask's, as before."""
+    latencies: List[float] = []  # gated: every answer + refusal call, failed ones included
+    full_latencies: List[float] = []  # report-only when quick_ask is given
     errors: List[str] = []
     ok = verification_unavailable = 0
     total_citations = supported_citations = hits = refused_answers = 0
@@ -235,12 +246,19 @@ def evaluate(answer_cases: List[Dict[str, Any]], refusal_cases: List[Dict[str, A
     def gated_call(case: Dict[str, Any], case_set: str) -> Tuple[Optional[Dict[str, Any]], str]:
         nonlocal ok, verification_unavailable
         resp, outcome, ms = call(case, case_set)
-        latencies.append(ms)
+        failed = outcome == "error"
+        if quick_ask is None:
+            latencies.append(ms)
+        else:
+            full_latencies.append(ms)
+            quick_resp, quick_ms = quick_ask(case["question"])
+            latencies.append(quick_ms)
+            failed = failed or classify(quick_resp) == "error"
         if resp is not None:
             ok += 1
             if resp.get("refusal_reason") == VERIFICATION_UNAVAILABLE:
                 verification_unavailable += 1
-        if outcome == "error":
+        if failed:
             errors.append(case["id"])
         return resp, outcome
 
@@ -296,6 +314,7 @@ def evaluate(answer_cases: List[Dict[str, Any]], refusal_cases: List[Dict[str, A
         "correct_refusal_rate": correct_refusals / n_ref if n_ref else 0.0,
         "ask_p50_ms": percentile(latencies, 50),
         "ask_p95_ms": percentile(latencies, 95),
+        "latency_stage": "quick" if quick_ask is not None else "full",
         "citations_total": total_citations,
         "answer_cases": n_ans,
         "refusal_cases": n_ref,
@@ -307,6 +326,8 @@ def evaluate(answer_cases: List[Dict[str, Any]], refusal_cases: List[Dict[str, A
         "answer_refused_ids": refused_ids,
         "refusal_failure_ids": false_answers,
         # report-only (EVAL-6)
+        "ask_full_p50_ms": percentile(full_latencies, 50),
+        "ask_full_p95_ms": percentile(full_latencies, 95),
         "citation_coverage": cited_units / total_units if total_units else None,
         "refusal_reason_counts": reason_counts,
         "near_miss_cases": n_nm,
@@ -331,11 +352,14 @@ def print_report(m: Dict[str, Any]) -> None:
         print(f"  miss IDs               : {', '.join(m['expected_paper_miss_ids'])}")
     print(f"Correct refusals         : {m['correct_refusal_rate']:.2%} of {m['refusal_cases']}")
     if m["ask_p95_ms"] is not None:
-        print(f"Latency p50 / p95 (ms)   : {m['ask_p50_ms']:.0f} / {m['ask_p95_ms']:.0f}")
+        stage = " (quick stage)" if m.get("latency_stage") == "quick" else ""
+        print(f"Latency p50 / p95 (ms)   : {m['ask_p50_ms']:.0f} / {m['ask_p95_ms']:.0f}{stage}")
     if m["error_case_ids"]:
         print(f"WARNING: errors          : {', '.join(m['error_case_ids'])} "
               f"({m['verification_unavailable_count']} verification_unavailable)")
     print("-- report-only (not gated) --")
+    if m.get("ask_full_p95_ms") is not None:
+        print(f"Full answer p50/p95 (ms) : {m['ask_full_p50_ms']:.0f} / {m['ask_full_p95_ms']:.0f}")
     cov, nm = m["citation_coverage"], m["near_miss_correct_refusal_rate"]
     print(f"Citation coverage        : {'n/a' if cov is None else f'{cov:.2%}'}")
     print(f"Near-miss refusals       : {'n/a' if nm is None else f'{nm:.2%}'} of {m['near_miss_cases']}")
@@ -357,7 +381,8 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     metrics = evaluate(load_cases(args.answers), load_cases(args.refusals), make_http_ask(args.api_url, args.timeout),
-                       load_cases(args.near_miss) if args.near_miss else None)
+                       load_cases(args.near_miss) if args.near_miss else None,
+                       quick_ask=make_http_ask(args.api_url, args.timeout, quick=True))  # ADR-0019, as make eval
     print_report(metrics)
     if args.json_out:
         with open(args.json_out, "w", encoding="utf-8") as f:

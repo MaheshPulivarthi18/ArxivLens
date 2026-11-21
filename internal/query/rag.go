@@ -192,14 +192,21 @@ func (r *RAGService) AskWith(
 	traceID := generateTraceID()
 	ctx = withTraceID(ctx, traceID)
 
-	// 1. Retrieve top-K chunks via Hybrid Search
-	hits, err := r.searchEngine.HybridSearch(ctx, question, categories, maxCitations, true)
+	// 1. Retrieve the whole reranked pool (ADR-0010), not just the top maxCitations.
+	hits, err := r.searchEngine.HybridSearch(ctx, question, categories, max(RerankPool, maxCitations), true)
 	if err != nil {
 		return nil, fmt.Errorf("retrieval failed: %w", err)
 	}
 
-	// 2. Strict Cross-Encoder Relevance & Section Filtering
+	// 2. Relevance decides which hits are candidates, ranking decides their order. The cutoff runs on the whole pool,
+	// then the survivors go back into pool order (fused, ADR-0017), get the top-5 paper cap (ADR-0016) and are cut
+	// to maxCitations. Cutting first let weak passages fill the top 5 and pushed a strongly relevant one out, so the
+	// cutoff left nothing and Ask refused an answerable question (eval a021, "How does Adam compute per-parameter
+	// adaptive learning rates?": the 0.979 passage was 6th).
 	relevantHits := filterRelevantHits(hits)
+	sort.SliceStable(relevantHits, func(i, j int) bool { return relevantHits[i].poolRank < relevantHits[j].poolRank })
+	relevantHits = diversify(relevantHits, DiversityWindow, PaperCap)
+	relevantHits = relevantHits[:min(maxCitations, len(relevantHits))]
 
 	// 3. Refuse Early: If no relevant hits remain, cleanly refuse without hallucination
 	if len(relevantHits) == 0 {
@@ -333,22 +340,40 @@ func (r *RAGService) finalizeClaims(ctx context.Context, traceID string, claims 
 		perClaim[rf.claim] = append(perClaim[rf.claim], cite)
 	}
 
+	// A kept claim shows only its verified citations (ADR-0019, amending ADR-0003 for written answers): a marker the
+	// model attached to a passage that does not support the claim is dropped from the text, the claim's markers and
+	// the citation list, like an unverified LLM sentence. Quoted answers keep ADR-0003's per-citation flags.
 	var b strings.Builder
 	var cites []Citation
 	var out []Claim
+	hidden := 0
 	for i, c := range claims {
 		if !keep[i] {
 			continue
 		}
+		var verified []Citation
+		var markers []int
+		for _, ct := range perClaim[i] {
+			if ct.Supported {
+				verified = append(verified, ct)
+				markers = append(markers, ct.Marker)
+			} else {
+				hidden++
+			}
+		}
 		if b.Len() > 0 {
 			b.WriteString(" ")
 		}
-		b.WriteString(withMarkers(c.Text, c.Citations))
-		cites = append(cites, perClaim[i]...)
-		out = append(out, Claim{Text: c.Text, Status: claimStatus(perClaim[i]), Markers: c.Citations})
+		b.WriteString(withMarkers(c.Text, markers))
+		cites = append(cites, verified...)
+		out = append(out, Claim{Text: c.Text, Status: claimStatus(verified), Markers: markers})
 	}
 	kept := len(out)
 	id, src := traceIDFrom(ctx)
+	if kept > 0 && hidden > 0 {
+		log.Printf("[Query Service] synthesis hid unverified citations trace_id=%s trace_id_source=%s hidden=%d shown=%d",
+			id, src, hidden, len(cites))
+	}
 	if check.unverified > 0 {
 		log.Printf("[Query Service] citation support unverified trace_id=%s trace_id_source=%s unverified=%d citations=%d pairs=%d verify_errors=%d",
 			id, src, check.unverified, len(refs), len(pairs), verifyErrs)

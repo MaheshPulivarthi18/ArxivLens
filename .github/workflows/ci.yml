@@ -51,7 +51,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-light.txt
           echo "ML packages installed (must be none):"
-          if pip list 2>/dev/null | grep -iE 'torch|transformers|sentence|PyMuPDF'; then
+          # Capture first: a failing `pip list` must fail the step, not read as "no ML packages".
+          pkgs="$(pip list)" || { echo "::error::pip list failed; cannot check for the ML stack"; exit 1; }
+          if grep -iE 'torch|transformers|sentence|PyMuPDF' <<<"$pkgs"; then
             echo "::error::ML stack present before the light tests"; exit 1
           fi
           make test-py-light

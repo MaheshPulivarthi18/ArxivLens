@@ -34,7 +34,7 @@ from scripts import evaluate_retrieval as er  # noqa: E402  (stdlib-only at impo
 GATED_MODE = er.RERANK_MODE
 BASELINE_MODES = ("BM25 Keyword", "Dense Vector")
 # Printed by print_table, never read by check_thresholds (EVAL-6). Definitions: evals/README.md.
-REPORT_ONLY_KEYS = ("citation_coverage", "near_miss_correct_refusal_rate", "verification_unavailable_count")
+REPORT_ONLY_KEYS = ("ask_full_p95_ms", "citation_coverage", "near_miss_correct_refusal_rate", "verification_unavailable_count")
 
 
 # Technical PRD §9 "Reference hardware" (Accepted 2026-11-15): latency targets are gated on the reference profile, a
@@ -155,6 +155,22 @@ def print_table(checks: List[Dict[str, Any]], answers: Optional[Dict[str, Any]],
     print("=" * 78)
 
 
+def could_not_run_hint(e: BaseException) -> Optional[str]:
+    """A next step for the two setup mistakes that most often stop `make eval`, or None."""
+    if isinstance(e, ModuleNotFoundError):
+        return (f"missing Python module {e.name!r}: run with the project venv (make uses .venv/bin/python when it "
+                "exists; otherwise activate it or pass PY=...), after `make setup-py`")
+    if type(e).__name__ == "OperationalError":  # psycopg: server down, wrong port, wrong password
+        from services.common.config import config
+        url = config.postgres_url
+        where = url.rsplit("@", 1)[-1]  # host:port/db only, never the password
+        source = "DATABASE_URL" if os.getenv("DATABASE_URL") else "the default (DATABASE_URL unset)"
+        return (f"could not use Postgres at {where} from {source}. Start it with `make infra-up`, or point "
+                "DATABASE_URL at the ArxivLens database, e.g. "
+                "DATABASE_URL=postgresql://postgres:postgres@localhost:5432/arxivlens make eval")
+    return None
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Run retrieval + answer evals and gate on evals/thresholds.json "
                                      "(Product PRD §8). Needs Postgres with evals/corpus.txt indexed and the "
@@ -186,12 +202,17 @@ def main(argv=None) -> int:
             results["answers"] = ea.evaluate(ea.load_cases(os.path.join(EVALS_DIR, "answer.jsonl")),
                                              ea.load_cases(os.path.join(EVALS_DIR, "refusal.jsonl")),
                                              ea.make_http_ask(args.api_url, args.timeout),
-                                             ea.load_cases(os.path.join(EVALS_DIR, "refusal_near_miss.jsonl")))
+                                             ea.load_cases(os.path.join(EVALS_DIR, "refusal_near_miss.jsonl")),
+                                             # ADR-0019: the 3 s latency gate times the quick first stage
+                                             quick_ask=ea.make_http_ask(args.api_url, args.timeout, quick=True))
             ea.print_report(results["answers"])
             if results["answers"]["requests_ok"] == 0:
                 raise ConnectionError(f"every /v1/ask request to {args.api_url} failed")
     except Exception as e:  # infra down, missing deps, etc.
         print(f"eval could not run: {type(e).__name__}: {e}", file=sys.stderr)
+        hint = could_not_run_hint(e)
+        if hint:
+            print(f"hint: {hint}", file=sys.stderr)
         return 2
 
     checks = check_thresholds(results, thresholds)

@@ -604,6 +604,64 @@ def test_failed_requests_count_in_latency_and_not_as_refusals():
     assert not all(c["passed"] for c in eval_gate.check_thresholds(res, eval_gate.load_thresholds()))
 
 
+def test_quick_ask_is_the_gated_latency_and_full_answer_is_report_only():
+    """ADR-0019: with quick_ask, ask_p95_ms times the quick first stage; quality and ask_full_* use the full answer."""
+    answers = [{"id": "a1", "question": "q1", "expected_arxiv_ids": ["1706.03762"]}]
+    refusals = [{"id": "x1", "question": "r1"}]
+    full = {"q1": {"answer": "A [1].", "citations": [{"marker": 1, "arxiv_id": "1706.03762", "supported": True}]},
+            "r1": {"answer": "No indexed papers are relevant to this question.", "citations": []}}
+    quick_calls = []
+
+    def quick(q):
+        quick_calls.append(q)
+        return {"answer": "Quoted [1].", "citations": [{"marker": 1, "arxiv_id": "0000.00000", "supported": False}]}, 900.0
+
+    m = evaluate_answers.evaluate(answers, refusals, lambda q: (full[q], 15000.0), quick_ask=quick)
+    assert quick_calls == ["q1", "r1"]
+    assert m["latency_stage"] == "quick" and m["ask_p95_ms"] == 900.0 and m["ask_p50_ms"] == 900.0
+    assert m["ask_full_p95_ms"] == 15000.0 and m["ask_full_p50_ms"] == 15000.0
+    # quality comes from the full answer only
+    assert m["supported_citation_rate"] == 1.0 and m["expected_paper_hit_rate"] == 1.0 and m["correct_refusal_rate"] == 1.0
+    assert "ask_full_p95_ms" in eval_gate.REPORT_ONLY_KEYS and "ask_full_p95_ms" not in eval_gate.LATENCY_GATES
+
+
+def test_quick_stage_failure_counts_as_an_ask_error():
+    ok = {"answer": "No indexed papers are relevant to this question.", "citations": []}
+    m = evaluate_answers.evaluate([], [{"id": "x1", "question": "r1"}], lambda q: (ok, 100.0),
+                                  quick_ask=lambda q: (None, 30000.0))
+    assert m["error_case_ids"] == ["x1"] and m["ask_error_count"] == 1 and m["ask_p95_ms"] == 30000.0
+    assert m["correct_refusal_rate"] == 1.0  # the full answer still refused correctly
+
+
+def test_without_quick_ask_latency_is_the_full_answer():
+    ok = {"answer": "No indexed papers are relevant to this question.", "citations": []}
+    m = evaluate_answers.evaluate([], [{"id": "x1", "question": "r1"}], lambda q: (ok, 4200.0))
+    assert m["latency_stage"] == "full" and m["ask_p95_ms"] == 4200.0 and m["ask_full_p95_ms"] is None
+
+
+def test_http_ask_quick_sends_quick_true(monkeypatch):
+    bodies = []
+
+    class R:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b'{"answer": "x", "citations": []}'
+
+    def fake_urlopen(req, timeout=None):
+        bodies.append(json.loads(req.data))
+        return R()
+
+    monkeypatch.setattr(evaluate_answers.urllib.request, "urlopen", fake_urlopen)
+    evaluate_answers.make_http_ask("http://h", 1.0, quick=True)("q")
+    evaluate_answers.make_http_ask("http://h", 1.0)("q")
+    assert bodies == [{"question": "q", "max_citations": 5, "quick": True}, {"question": "q", "max_citations": 5}]
+
+
+def test_gate_main_times_the_quick_stage():
+    src = open(eval_gate.__file__, encoding="utf-8").read()
+    assert "quick_ask=ea.make_http_ask(args.api_url, args.timeout, quick=True)" in src
+
+
 def test_gate_fails_when_some_answer_requests_fail_even_if_refusals_perfect():
     answers = [{"id": f"a{i}", "question": f"q{i}", "expected_arxiv_ids": ["1706.03762"]} for i in range(22)]
     refusals = [{"id": f"x{i}", "question": f"r{i}"} for i in range(22)]
@@ -1209,9 +1267,10 @@ def test_evaluate_never_crashes_on_hostile_shapes(pos, value):
 def _main_with_fake_ask(monkeypatch, tmp_path, argv):
     seen = []
 
-    def fake_make_http_ask(api_url, timeout_s, max_citations=5):
+    def fake_make_http_ask(api_url, timeout_s, max_citations=5, quick=False):
         def ask(question):
-            seen.append(question)
+            if not quick:  # seen lists full-answer calls; quick-stage calls are timed only
+                seen.append(question)
             return EARLY, 10.0
         return ask
 
@@ -1497,3 +1556,29 @@ def test_claims_and_citation_fields_leave_eval_results_unchanged():
         assert evaluate_answers.case_record("a1", "answer", cur, 5.0) == evaluate_answers.case_record("a1", "answer", old, 5.0)
     assert evaluate_answers.coverage_units(with_claims) == evaluate_answers.coverage_units(answered) == (2, 3)
     assert evaluate_answers.case_record("a1", "answer", with_claims, 5.0)["total_units"] == 3
+
+
+# --- could-not-run hints (make eval setup mistakes) ---
+
+def test_hint_for_missing_module_points_at_the_venv():
+    hint = eval_gate.could_not_run_hint(ModuleNotFoundError("No module named 'numpy'", name="numpy"))
+    assert "'numpy'" in hint and ".venv/bin/python" in hint and "make setup-py" in hint
+
+
+def test_hint_for_postgres_names_host_port_and_source_never_the_password(monkeypatch):
+    OperationalError = type("OperationalError", (Exception,), {})
+    monkeypatch.setenv("DATABASE_URL", "postgresql://postgres:s3cret@localhost:5433/arxivlens")
+    from services.common import config as cfg
+    monkeypatch.setattr(cfg.config, "postgres_url", "postgresql://postgres:s3cret@localhost:5433/arxivlens")
+    hint = eval_gate.could_not_run_hint(OperationalError("password authentication failed"))
+    assert "localhost:5433/arxivlens" in hint and "from DATABASE_URL" in hint and "make infra-up" in hint
+    assert "s3cret" not in hint
+
+
+def test_no_hint_for_other_errors():
+    assert eval_gate.could_not_run_hint(ValueError("x")) is None
+
+
+def test_make_prefers_project_venv():
+    with open(os.path.join(os.path.dirname(EVALS), "Makefile"), encoding="utf-8") as f:
+        assert "PY      ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)" in f.read()
