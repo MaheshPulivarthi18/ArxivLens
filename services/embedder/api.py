@@ -24,6 +24,7 @@ import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from scripts.m0_skeleton import BGEEmbedder
 from services.embedder import verify as nli
+from services.embedder.precision import rerank_fp16
 from services.common.config import config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -153,10 +154,14 @@ def load_models():
         reranker_tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-reranker-base")
         reranker_model = AutoModelForSequenceClassification.from_pretrained("BAAI/bge-reranker-base")
         # Same device as the embedder (MPS/CUDA/CPU). Left on CPU it scored 20 pairs in ~2.3 s on Apple
-        # silicon, most of the /v1/ask latency budget. fp32 everywhere, so scores do not change.
+        # silicon, most of the /v1/ask latency budget. ADR-0020: fp16 on MPS/CUDA (same eval ranking, about a
+        # quarter faster); fp32 on CPU, where fp16 is slower. score_pairs casts logits to fp32 before the sigmoid.
         reranker_model.to(embedder.device)
+        if rerank_fp16(embedder.device):
+            reranker_model.half()
         reranker_model.eval()
-        logger.info(f"Cross-Encoder Reranker loaded successfully on {embedder.device}!")
+        logger.info(f"Cross-Encoder Reranker loaded successfully on {embedder.device} "
+                    f"({str(next(reranker_model.parameters()).dtype).replace('torch.', '')})!")
     except Exception as e:
         logger.error(f"Warning: Failed to load cross-encoder ({e}), falling back to bi-encoder")
         return
@@ -206,6 +211,8 @@ class VerifyResponse(BaseModel):
 @app.get("/healthz")
 def healthz():
     return {"status": "ok", "device": embedder.device if embedder else "uninitialized", "reranker": reranker_model is not None,
+            "reranker_dtype": (str(next(reranker_model.parameters()).dtype).replace("torch.", "")
+                               if reranker_model is not None else None),
             "verifier": nli_model is not None}
 
 
