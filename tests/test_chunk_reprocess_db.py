@@ -1,11 +1,12 @@
 """OPS-H6d: re-saving a paper's chunks drops stale vectors and stale tail chunks (real Postgres, migrations applied).
+OPS-H6e: the embedder's save writes a vector only while its chunk still exists with the hash it was computed from.
 
 Not in `make test-py` (needs a DB); runs in `make test-full`. Everything happens on one `autocommit=False` connection that
 is always rolled back, so the shared stack DB that the M2/M3 suites count is left exactly as it was.
 """
 import pytest
 
-from services.common.db import get_chunks_for_embedding, get_db_connection, save_sections_and_chunks
+from services.common.db import get_chunks_for_embedding, get_db_connection, save_chunk_embeddings, save_sections_and_chunks
 
 MODEL = "ops-h6d-model"
 OTHER_MODEL = "ops-h6d-other-model"
@@ -132,3 +133,61 @@ def test_reprocess_drops_stale_vectors_and_tail(conn):
         assert _state(cur, b) == before_b
         cur.execute("SELECT status FROM papers WHERE id = %s;", (a,))
         assert cur.fetchone()[0] == "chunked"
+
+
+def _floats(hot: int) -> list:
+    return [1.0 if i == hot else 0.0 for i in range(768)]
+
+
+def test_save_embeddings_only_for_current_chunk_text(conn):
+    with conn.cursor() as cur:
+        a = _new_paper(cur, "ops-h6e-a")
+    save_sections_and_chunks(conn, a, SECTIONS, [_chunk(0, "a0"), _chunk(1, "a1"), _chunk(2, "a2")])
+    with conn.cursor() as cur:
+        ids = {k: v[0] for k, v in _state(cur, a).items()}
+    # The processor re-parses while an embedder run is in flight: chunk 1 gets new text, chunk 2 is dropped.
+    save_sections_and_chunks(conn, a, SECTIONS, [_chunk(0, "a0"), _chunk(1, "a1-new")])
+    with conn.cursor() as cur:
+        # Give chunk 1 a vector (explicit OLD_TS), so AC3 can show the skip leaves an existing row exactly as it was.
+        cur.execute(
+            "INSERT INTO chunk_embeddings (chunk_id, model, embedding, created_at) VALUES (%s, %s, %s::halfvec, %s);",
+            (ids[1], MODEL, _vec(1), OLD_TS),
+        )
+        kept = _state(cur, a)[1][3][MODEL]
+
+    # AC2: matching hash -> inserted, then updated on conflict; both counted.
+    assert save_chunk_embeddings(conn, [(ids[0], MODEL, _floats(5), "hash-a0")]) == 1
+    with conn.cursor() as cur:
+        assert _state(cur, a)[0][3][MODEL][0] == _vec(5)
+    assert save_chunk_embeddings(conn, [(ids[0], MODEL, _floats(6), "hash-a0")]) == 1
+    with conn.cursor() as cur:
+        assert _state(cur, a)[0][3][MODEL][0] == _vec(6)
+
+    # AC3: the old text's hash no longer matches -> not written, not counted, existing vector untouched.
+    assert save_chunk_embeddings(conn, [(ids[1], MODEL, _floats(7), "hash-a1")]) == 0
+    assert save_chunk_embeddings(conn, [(ids[1], OTHER_MODEL, _floats(7), "hash-a1")]) == 0
+    with conn.cursor() as cur:
+        assert _state(cur, a)[1][3] == {MODEL: kept}
+
+    # AC4: chunk 2 was deleted by the tail delete -> skipped without an FK error; the transaction is still usable.
+    assert save_chunk_embeddings(conn, [(ids[2], MODEL, _floats(8), "hash-a2")]) == 0
+    with conn.cursor() as cur:
+        assert _orphans(cur, [ids[2]]) == (0, 0, 0)
+
+    # Mixed batch in one call: only the current chunk and the 3-tuple are written and counted.
+    n = save_chunk_embeddings(
+        conn,
+        [
+            (ids[2], MODEL, _floats(9), "hash-a2"),
+            (ids[1], MODEL, _floats(9), "hash-a1"),
+            (ids[0], OTHER_MODEL, _floats(9), "hash-a0"),
+            (ids[0], "ops-h6e-3tuple", _floats(9)),
+        ],
+    )
+    assert n == 2
+    with conn.cursor() as cur:
+        after = _state(cur, a)
+    assert sorted(after) == [0, 1]
+    assert after[0][3][MODEL][0] == _vec(6) and after[0][3][OTHER_MODEL][0] == _vec(9)
+    assert after[0][3]["ops-h6e-3tuple"][0] == _vec(9)
+    assert after[1][3] == {MODEL: kept}

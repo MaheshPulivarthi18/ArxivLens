@@ -98,6 +98,12 @@ gated. On `cpu`, such as a GitHub runner, the p95 is still measured, saved and p
 `INFO (cpu-only; not gated)`, and it can neither pass nor fail the run. If the device can't be read, the latency gate
 applies. Every quality check is gated on every machine, and so is a missing p95.
 
+**The gated latency is the quick stage** (ADR-0019). For each answer- and refusal-set question the eval also calls
+`/v1/ask` with `"quick": true`, the quoted answer the reader sees first, and `ask_p50_ms` / `ask_p95_ms` time those
+calls (`latency_stage: "quick"`); a failed quick call is an ask error. Every quality metric comes from the full answer,
+whose latency is the report-only `ask_full_p50_ms` / `ask_full_p95_ms`. With an LLM configured that is the written
+answer, which on a laptop model takes seconds and is shown when ready.
+
 ### What the answer eval measures (EVAL-6)
 **ADR-0003 classification** of each `/v1/ask` response (`classify()` in `scripts/evaluate_answers.py`):
 

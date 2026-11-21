@@ -1,5 +1,5 @@
 import json
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union
 import psycopg
 from psycopg.rows import dict_row
 from services.common.config import config
@@ -187,25 +187,52 @@ def get_chunks_for_embedding(
         return cur.fetchall()
 
 
+_UPSERT_EMBEDDING_SQL = """
+    INSERT INTO chunk_embeddings (chunk_id, model, embedding)
+    VALUES (%s, %s, %s::halfvec)
+    ON CONFLICT (chunk_id, model) DO UPDATE
+    SET embedding = EXCLUDED.embedding,
+        created_at = now();
+"""
+
+# OPS-H6e: write the vector only if the chunk still exists with the hash it was computed from. FOR SHARE makes a
+# concurrent processor UPDATE (new hash) or tail DELETE of the row finish first; READ COMMITTED then re-checks the WHERE
+# on the committed row, so a changed hash or a deleted chunk yields no row: nothing is written and no FK error is raised.
+_UPSERT_EMBEDDING_IF_CURRENT_SQL = """
+    INSERT INTO chunk_embeddings (chunk_id, model, embedding)
+    SELECT pc.id, %s::text, %s::halfvec
+    FROM paper_chunks pc
+    WHERE pc.id = %s AND pc.content_hash = %s
+    FOR SHARE OF pc
+    ON CONFLICT (chunk_id, model) DO UPDATE
+    SET embedding = EXCLUDED.embedding,
+        created_at = now();
+"""
+
+
 def save_chunk_embeddings(
     conn: psycopg.Connection,
-    chunk_embeddings: List[Tuple[int, str, List[float]]],
+    chunk_embeddings: List[Union[Tuple[int, str, List[float]], Tuple[int, str, List[float], str]]],
 ) -> int:
     """
-    Inserts or updates halfvec embeddings for a list of (chunk_id, model, vector_float_list).
+    Inserts or updates halfvec embeddings, inside the caller's transaction (no commit).
+
+    Each item is `(chunk_id, model, vector)`, written unconditionally, or `(chunk_id, model, vector, content_hash)`,
+    written only while `paper_chunks` still has that id with that content_hash (OPS-H6e); otherwise it is skipped and
+    any existing vector is left alone. Returns the number of vectors written.
     """
+    written = 0
     with conn.cursor() as cur:
-        for chunk_id, model, vec in chunk_embeddings:
+        for item in chunk_embeddings:
+            if len(item) not in (3, 4):
+                raise ValueError(f"expected (chunk_id, model, vec[, content_hash]), got {len(item)} elements")
+            chunk_id, model, vec = item[0], item[1], item[2]
             # Format vector as string for PostgreSQL halfvec: '[0.123, -0.456, ...]'
             vec_str = "[" + ",".join(f"{x:.6f}" for x in vec) + "]"
-            cur.execute(
-                """
-                INSERT INTO chunk_embeddings (chunk_id, model, embedding)
-                VALUES (%s, %s, %s::halfvec)
-                ON CONFLICT (chunk_id, model) DO UPDATE
-                SET embedding = EXCLUDED.embedding,
-                    created_at = now();
-                """,
-                (chunk_id, model, vec_str),
-            )
-    return len(chunk_embeddings)
+            if len(item) == 3:
+                cur.execute(_UPSERT_EMBEDDING_SQL, (chunk_id, model, vec_str))
+                written += 1
+            else:
+                cur.execute(_UPSERT_EMBEDDING_IF_CURRENT_SQL, (model, vec_str, chunk_id, item[3]))
+                written += cur.rowcount
+    return written

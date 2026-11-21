@@ -197,6 +197,15 @@ func TestHybridSearchRerankFallback(t *testing.T) {
 			return float32(r)
 		})
 	}
+	// at sets the score at RRF rank r from the map, r elsewhere.
+	at := func(m map[int]float64) func([]string) []float32 {
+		return byRank(func(r int) float32 {
+			if v, ok := m[r]; ok {
+				return float32(v)
+			}
+			return float32(r)
+		})
+	}
 	cases := []struct {
 		name       string
 		err        error
@@ -211,6 +220,9 @@ func TestHybridSearchRerankFallback(t *testing.T) {
 		{"canceled", fmt.Errorf("wrapped: %w", context.Canceled), nil, `reason="rerank canceled"`},
 		{"+Inf score", nil, infAt3(+1), `reason="Inf score"`},
 		{"-Inf score", nil, infAt3(-1), `reason="Inf score"`},
+		// The first non-finite score by position names the reason.
+		{"NaN at 2, +Inf at 3", nil, at(map[int]float64{2: math.NaN(), 3: math.Inf(+1)}), `reason="NaN score"`},
+		{"+Inf at 2, NaN at 3", nil, at(map[int]float64{2: math.Inf(+1), 3: math.NaN()}), `reason="Inf score"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -250,6 +262,46 @@ func TestHybridSearchRerankFallback(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// math.MaxFloat32 and -math.MaxFloat32 are finite: no fallback, rerank order applied, RerankScore set, JSON encodes.
+func TestHybridSearchRerankLargeFiniteScores(t *testing.T) {
+	var buf bytes.Buffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+
+	score := func(r int) float32 {
+		switch r {
+		case 1:
+			return -math.MaxFloat32
+		case 3:
+			return math.MaxFloat32
+		}
+		return 0.5 - float32(r)*0.01
+	}
+	var n int
+	hits, err := newEngine(&fakeReranker{scores: byRank(score)}, 100, &n).
+		HybridSearch(context.Background(), "q", nil, 20, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if line := buf.String(); strings.Contains(line, "rerank fallback") {
+		t.Fatalf("unexpected fallback: %q", line)
+	}
+	// Rerank ranks c3, c2, c4, c5, ..., c20, c1. Fused: c3 .168, c2 .167, c4 .148, c5 .138, c6 .129, c1 .124, c7 .121
+	if got := ids(hits); len(got) != 20 || !reflect.DeepEqual(got[:6], []int64{3, 2, 4, 5, 6, 1}) {
+		t.Fatalf("order = %v, want 20 hits starting [3 2 4 5 6 1]", got)
+	}
+	for _, h := range hits {
+		if want := float64(score(int(h.ChunkID))); h.RerankScore != want {
+			t.Errorf("chunk %d RerankScore = %v, want %v", h.ChunkID, h.RerankScore, want)
+		}
+	}
+	if _, err := json.Marshal(hits); err != nil {
+		t.Fatalf("json.Marshal(hits) = %v, want no error", err)
 	}
 }
 

@@ -1,7 +1,9 @@
 # ArxivLens harness. Agents and CI use these targets; keep them deterministic and secret-free.
 # Run `make help` for the list.
 
-PY      ?= python3
+# The project venv when it exists (so `make eval` / `make test-py` find numpy, torch, psycopg without activating
+# it), else python3 (CI installs into the runner's Python). Override with PY=... as before.
+PY      ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 PYTEST  ?= $(PY) -m pytest
 TESTS   ?= tests/
 export PYTHONPATH := $(CURDIR)
@@ -40,12 +42,12 @@ lint-fe: ## oxlint on the frontend
 	cd frontend && npm run lint
 
 # --- tests -------------------------------------------------------------------
-test-unit: test-go test-py ## Fast tests, no infra (Go + M0 + eval data). Frontend tests: make test-fe
+test-unit: test-go test-py ## Fast tests, no infra (Go + test-py). Frontend tests: make test-fe
 
 test-go: ## Go unit tests
 	go test ./...
 
-PY_LIGHT_TESTS := tests/test_evals_data.py tests/test_worker_heartbeat.py tests/test_arxiv_replay.py
+PY_LIGHT_TESTS := tests/test_evals_data.py tests/test_worker_heartbeat.py tests/test_arxiv_replay.py tests/test_rerank_precision.py
 PY_ML_TESTS    := tests/test_m0.py tests/test_verify.py tests/test_processor_pages.py
 
 test-py: test-py-light test-py-ml ## Python unit tests: test-py-light + test-py-ml
