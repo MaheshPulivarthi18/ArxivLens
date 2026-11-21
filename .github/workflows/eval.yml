@@ -22,8 +22,9 @@ concurrency:
 jobs:
   eval:
     runs-on: ubuntu-latest
-    # Setup + stack-up ~10 + self-test 1 + seed 70 + eval 30 + upload/teardown 2 = ~113 -> 120.
-    timeout-minutes: 120
+    # Setup + stack-up ~10 + prefetch 44 (2520 s budget + 120 s TIMEOUT) + self-test 1 + seed 70 + eval 45
+    # + upload/teardown 2 = ~172 -> 180. The prefetch only spends its budget on a cold, rate-limited replay store.
+    timeout-minutes: 180
     env:
       ARXIVLENS_HF_CACHE: /home/runner/.cache/huggingface
       PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
@@ -145,8 +146,10 @@ jobs:
             echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
       # No continue-on-error and no threshold edits: a latency-red gate is a finding (ADR-0010, Technical PRD §9).
       # make exits 2 for any failed recipe, so the gate's own 0/1/2 is read from make's "*** [...eval] Error N" line.
+      # Step took 22m11s on Intel Xeon 8573C (run 44764887789); AMD EPYC 7763 reranked 1.47x slower (job 136830894337,
+      # killed at 30 min before GATE:), so ~32.5 min there; x 1.35 headroom = ~44 -> 45. Slower: speed up the reranker.
       - name: make eval
-        timeout-minutes: 30
+        timeout-minutes: 45
         env:
           PYTHONUNBUFFERED: "1"
         run: |
