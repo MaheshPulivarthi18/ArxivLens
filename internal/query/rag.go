@@ -340,22 +340,40 @@ func (r *RAGService) finalizeClaims(ctx context.Context, traceID string, claims 
 		perClaim[rf.claim] = append(perClaim[rf.claim], cite)
 	}
 
+	// A kept claim shows only its verified citations (ADR-0019, amending ADR-0003 for written answers): a marker the
+	// model attached to a passage that does not support the claim is dropped from the text, the claim's markers and
+	// the citation list, like an unverified LLM sentence. Quoted answers keep ADR-0003's per-citation flags.
 	var b strings.Builder
 	var cites []Citation
 	var out []Claim
+	hidden := 0
 	for i, c := range claims {
 		if !keep[i] {
 			continue
 		}
+		var verified []Citation
+		var markers []int
+		for _, ct := range perClaim[i] {
+			if ct.Supported {
+				verified = append(verified, ct)
+				markers = append(markers, ct.Marker)
+			} else {
+				hidden++
+			}
+		}
 		if b.Len() > 0 {
 			b.WriteString(" ")
 		}
-		b.WriteString(withMarkers(c.Text, c.Citations))
-		cites = append(cites, perClaim[i]...)
-		out = append(out, Claim{Text: c.Text, Status: claimStatus(perClaim[i]), Markers: c.Citations})
+		b.WriteString(withMarkers(c.Text, markers))
+		cites = append(cites, verified...)
+		out = append(out, Claim{Text: c.Text, Status: claimStatus(verified), Markers: markers})
 	}
 	kept := len(out)
 	id, src := traceIDFrom(ctx)
+	if kept > 0 && hidden > 0 {
+		log.Printf("[Query Service] synthesis hid unverified citations trace_id=%s trace_id_source=%s hidden=%d shown=%d",
+			id, src, hidden, len(cites))
+	}
 	if check.unverified > 0 {
 		log.Printf("[Query Service] citation support unverified trace_id=%s trace_id_source=%s unverified=%d citations=%d pairs=%d verify_errors=%d",
 			id, src, check.unverified, len(refs), len(pairs), verifyErrs)

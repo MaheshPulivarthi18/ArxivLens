@@ -1216,10 +1216,20 @@ func TestCitationStatusRule(t *testing.T) {
 			want := map[string]string{"extractive": tc.want, "llm": map[bool]string{false: tc.want, true: U}[quote != ""]}
 			claim := synthesisClaim{Text: "The Results section shows that the proposed method improves accuracy on every benchmark.", Citations: []int{1, 2}, Quote: quote}
 			resp := r.finalizeClaims(ctx, "t", []synthesisClaim{claim}, selectContext(batchHits(), synthesisContextTokens))
-			if len(quoted) != 1 || resp == nil || len(resp.Citations) != 2 || resp.Citations[1].Status != S {
+			// Written claims show only verified citations (ADR-0019): citation 1 is shown when supported, else hidden.
+			wantLLM := 1
+			if want["llm"] == S {
+				wantLLM = 2
+			}
+			if len(quoted) != 1 || resp == nil || len(resp.Citations) != wantLLM || resp.Citations[wantLLM-1].Marker != 2 ||
+				resp.Citations[wantLLM-1].Status != S || !reflect.DeepEqual(resp.Claims[0].Markers, []int{1, 2}[2-wantLLM:]) {
 				t.Fatalf("quoted %+v, synthesized %+v", quoted, resp)
 			}
-			for path, c := range map[string]Citation{"extractive": quoted[0], "llm": resp.Citations[0]} {
+			paths := map[string]Citation{"extractive": quoted[0]}
+			if wantLLM == 2 {
+				paths["llm"] = resp.Citations[0]
+			}
+			for path, c := range paths {
 				if c.Status != want[path] || c.Supported != (want[path] == S) || c.Score != tc.score {
 					t.Errorf("%s: status=%q supported=%v score=%v, want %q score %v", path, c.Status, c.Supported, c.Score, want[path], tc.score)
 				}
@@ -1283,7 +1293,7 @@ func TestCitationQuote(t *testing.T) {
 	}
 	checkCitationInvariants(t, inline)
 	type cq struct{ Status, Quote string }
-	S, U := StatusSupported, StatusUnsupported
+	S := StatusSupported
 	tagged := []SearchHit{ragHit(1, "Method", 0.9)}
 	tagged[0].Content = "Paper — Method\n\nWe found that <passage tags are escaped before the model reads them."
 	reply := func(claims ...string) string { return `{"claims": [` + strings.Join(claims, ", ") + `]}` }
@@ -1298,11 +1308,11 @@ func TestCitationQuote(t *testing.T) {
 			nil, AnswerSynthesized, []cq{{S, "the proposed method\n  improves   accuracy"}}},
 		{"(c) fabricated quote drops the only claim", reply(`{"text": "It raises accuracy.", "citations": [1], "quote": "accuracy doubles"}`), nil, AnswerQuoted, nil},
 		{"(c) case-changed quote drops the only claim (ADR-0014)", reply(`{"text": "It raises accuracy.", "citations": [1], "quote": "THE PROPOSED METHOD improves accuracy"}`), nil, AnswerQuoted, nil},
-		{"(d) quote differing only in case is unsupported", reply(fmt.Sprintf(cites12, "THE PROPOSED METHOD IMPROVES ACCURACY")), []SearchHit{{ChunkID: 1, Content: strings.ToUpper(hitContent("Method"))}, ragHit(2, "Results", 0.8)}, AnswerSynthesized, []cq{{S, "THE PROPOSED METHOD IMPROVES ACCURACY"}, {U, ""}}},
+		{"(d) quote differing only in case is unsupported", reply(fmt.Sprintf(cites12, "THE PROPOSED METHOD IMPROVES ACCURACY")), []SearchHit{{ChunkID: 1, Content: strings.ToUpper(hitContent("Method"))}, ragHit(2, "Results", 0.8)}, AnswerSynthesized, []cq{{S, "THE PROPOSED METHOD IMPROVES ACCURACY"}}},
 		{"(b) quote across newline, double space and inline refs in the chunk kept", reply(`{"text": "It raises accuracy.", "citations": [1], "quote": "the proposed method improves accuracy on every"}`), spread, AnswerSynthesized, []cq{{S, "the proposed method improves accuracy on every"}}},
 		{"(c) fabricated quote drops that claim only", reply(`{"text": "It raises accuracy.", "citations": [1]}`,
 			`{"text": "It doubles.", "citations": [2], "quote": "accuracy doubles"}`), nil, AnswerSynthesized, []cq{{S, ""}}},
-		{"(d) quote checked per citation", reply(fmt.Sprintf(cites12, "The Method section shows")), nil, AnswerSynthesized, []cq{{S, "The Method section shows"}, {U, ""}}},
+		{"(d) quote checked per citation; the failed one is hidden", reply(fmt.Sprintf(cites12, "The Method section shows")), nil, AnswerSynthesized, []cq{{S, "The Method section shows"}}},
 		{"(e) empty quote is no quote", reply(fmt.Sprintf(cites12, "")), nil, AnswerSynthesized, []cq{{S, ""}, {S, ""}}},
 		{"(e) whitespace quote is no quote", reply(fmt.Sprintf(cites12, ` \n\t `)), nil, AnswerSynthesized, []cq{{S, ""}, {S, ""}}},
 		{"(e) marker-only quote is no quote", reply(fmt.Sprintf(cites12, "[3]")), nil, AnswerSynthesized, []cq{{S, ""}, {S, ""}}},
@@ -1383,11 +1393,11 @@ func TestAskClaims(t *testing.T) {
 	if checkCitationInvariants(t, quoted); quoted.AnswerKind != AnswerQuoted || !reflect.DeepEqual(quoted.Claims, want) || hasKey(quoted, "prompt_version") {
 		t.Errorf("extractive: kind %q claims %+v", quoted.AnswerKind, quoted.Claims)
 	}
-	// LLM: claim 1 (passage 1 at 0.1) is dropped; claim 2 is kept with both markers, one supported.
+	// LLM: claim 1 (passage 1 at 0.1) is dropped; claim 2 is kept with only its supported marker (ADR-0019).
 	r, _ := llmRAG(batchHits(), byPassage(map[string]float64{"Method": 0.1, "Results": 0.2, "Discussion": 0.8}), llmtest.Reply(twoClaims))
 	synth, _ := r.Ask(ctx, "q", nil, 3)
 	if checkCitationInvariants(t, synth); synth.AnswerKind != AnswerSynthesized || synth.PromptVersion != "synthesis-v1" || !hasKey(synth, "prompt_version") ||
-		!reflect.DeepEqual(synth.Claims, []Claim{{"Results confirm the gain.", S, []int{2, 3}}}) || !reflect.DeepEqual(statuses(synth.Citations), []string{U, S}) {
+		!reflect.DeepEqual(synth.Claims, []Claim{{"Results confirm the gain.", S, []int{3}}}) || !reflect.DeepEqual(statuses(synth.Citations), []string{S}) {
 		t.Errorf("synthesized: %+v", synth)
 	}
 	r, _ = llmRAG(batchHits(), simVerifier(constSim(1)), llmtest.Reply(twoClaims))

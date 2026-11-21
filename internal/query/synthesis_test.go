@@ -41,14 +41,15 @@ func TestSynthesisAnswersWithVerifiedClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkCitationInvariants(t, resp)
-	if want := "The method improves benchmark accuracy [1]. Results confirm the gain [2][3]."; resp.Answer != want || resp.RefusalReason != "" {
+	// Claim 2 keeps marker 3 (0.8) and hides marker 2 (0.2): written claims show verified citations only (ADR-0019).
+	if want := "The method improves benchmark accuracy [1]. Results confirm the gain [3]."; resp.Answer != want || resp.RefusalReason != "" {
 		t.Fatalf("answer = %q (reason %q), want %q", resp.Answer, resp.RefusalReason, want)
 	}
 	got := []citeLabel{}
 	for _, c := range resp.Citations {
 		got = append(got, citeLabel{c.Marker, c.ChunkID, c.Score, c.Supported})
 	}
-	want := []citeLabel{{1, 1, 0.9, true}, {2, 2, 0.2, false}, {3, 3, 0.8, true}}
+	want := []citeLabel{{1, 1, 0.9, true}, {3, 3, 0.8, true}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("citations = %+v, want %+v", got, want)
 	}
@@ -64,6 +65,7 @@ func TestSynthesisAnswersWithVerifiedClaims(t *testing.T) {
 	}
 	// Logs carry counts and kinds only.
 	if !strings.Contains(buf.String(), "synthesis trace_id=") || !strings.Contains(buf.String(), "claims=2") ||
+		!strings.Contains(buf.String(), "hid unverified citations") || !strings.Contains(buf.String(), "hidden=1 shown=2") ||
 		strings.Contains(buf.String(), "secret question") || strings.Contains(buf.String(), "benchmark accuracy") {
 		t.Errorf("log = %q", buf.String())
 	}
