@@ -269,3 +269,116 @@ def test_prefetch_loop_fetches_only_through_recorder():
     import inspect
     for fn in (rp.main, rp.prefetch_query, rp.get_or_fetch):
         assert "urllib.request" not in inspect.getsource(fn) and "urlopen" not in inspect.getsource(fn)
+
+
+@pytest.mark.parametrize("pdf, attempts", [((404, b"", {}), 1), ((200, b"<html>not a pdf</html>", {}), 4)])
+def test_prefetch_permanent_failures_get_no_second_pass(env, tmp_path, monkeypatch, capsys, pdf, attempts):
+    up, _ = env
+    up.script = {"api": [(200, FEED, {})], "pdf": [pdf]}
+    clock = Clock(monkeypatch, up)
+    assert rp.main(["prefetch", "--dir", str(tmp_path / "s"), "--id", "2401.00001", "--budget-seconds", "1000"]) == 1
+    assert [p for p, _ in up.requests] == ["/api/query?id_list=2401.00001"] + ["/pdf/x.pdf"] * attempts
+    assert not [s for _, s in clock.sleeps if s >= rp.PASS_WAIT], clock.sleeps  # no cool-down
+    err = capsys.readouterr().err
+    assert "retrying" not in err and "prefetch FAILED for 1: x.pdf (arXiv" in err
+
+
+def test_prefetch_mixed_failures_retry_only_the_transient_query(env, tmp_path, monkeypatch, capsys):
+    up, _ = env
+    a, b = "/api/query?id_list=2401.00001", "/api/query?id_list=2401.00002"
+    up.script = {a: [(200, FEED, {})], b: [(429, b"", {})] * 4 + [(200, EMPTY_FEED, {})], "pdf": [(404, b"", {})]}
+    clock = Clock(monkeypatch, up)
+    assert rp.main(["prefetch", "--dir", str(tmp_path / "s"), "--id", "2401.00001", "--id", "2401.00002",
+                    "--budget-seconds", "1000"]) == 1
+    paths = [p for p, _ in up.requests]
+    assert paths[:6] == [a, "/pdf/x.pdf"] + [b] * 4  # pass 1
+    assert paths[6:] == [b]  # pass 2: only the query with a 429; the 404 PDF is not asked again
+    assert [s for _, s in clock.sleeps if s >= rp.PASS_WAIT] == [rp.PASS_WAIT]  # one cool-down
+    err = capsys.readouterr().err
+    assert "retrying 1 queries" in err and "prefetch FAILED for 1: x.pdf (arXiv" in err
+
+
+FEED3 = (b'<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">'
+         b'<entry><id>p1</id></entry><entry><id>p2</id></entry></feed>')
+
+
+def test_prefetch_no_request_after_a_request_that_overruns_the_deadline(env, tmp_path, monkeypatch, capsys):
+    # QA OPS-H19 scenario: p1.pdf is in flight past the deadline; INTERVAL has elapsed by then, so no politeness
+    # gap precedes p2.pdf and only the deadline check before a request stops it.
+    up, _ = env
+    up.script = {"api": [(200, FEED3, {})], "pdf": [(200, PDF, {})]}
+    monkeypatch.setattr(rp, "INTERVAL", 3.0)
+    clock = Clock(monkeypatch, up)
+
+    def request(path):  # every request takes 2 s; p1.pdf takes 150 s, crossing the 100 s deadline
+        clock.request_times.append((clock.t, path))
+        clock.t += 150.0 if path.endswith("p1.pdf") else 2.0
+    up.on_request = request
+    assert rp.main(["prefetch", "--dir", str(tmp_path / "s"), "--id", "2401.00001", "--budget-seconds", "100"]) == 1
+    assert [p for p, _ in up.requests] == ["/api/query?id_list=2401.00001", "/pdf/p1.pdf"]  # p2.pdf never requested
+    assert all(t < 100 for t, _ in clock.request_times), clock.request_times
+    assert all(t + s <= 100 for t, s in clock.sleeps), clock.sleeps
+    assert "prefetch FAILED for 1: p2.pdf (time budget)" in capsys.readouterr().err
+
+
+def saved_lines(out):
+    return [ln for ln in out.read_text().splitlines() if ln.startswith("saved=")] if out.exists() else []
+
+
+def test_prefetch_reports_saved_as_soon_as_the_first_entry_is_on_disk(env, tmp_path, monkeypatch):
+    up, _ = env
+    up.script = {"api": [(200, EMPTY_FEED, {})], "pdf": [(200, PDF, {})]}
+    out = tmp_path / "gh_output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    real_fetch = rp.Recorder.fetch
+
+    def fetch(self, url, valid):  # the step is killed while the second query is in flight
+        if "2401.00002" in url:
+            assert out.read_text() == "saved=1\n"
+            raise KeyboardInterrupt
+        return real_fetch(self, url, valid)
+    monkeypatch.setattr(rp.Recorder, "fetch", fetch)
+    with pytest.raises(KeyboardInterrupt):
+        rp.main(["prefetch", "--dir", str(tmp_path / "s"), "--id", "2401.00001", "--id", "2401.00002"])
+    assert out.read_text() == "saved=1\n"
+
+
+def test_prefetch_writes_one_saved_line_and_none_when_nothing_is_added(env, tmp_path, monkeypatch, capsys):
+    up, _ = env
+    up.script = {"api": [(200, FEED2, {})], "pdf": [(200, PDF, {})]}
+    out = tmp_path / "gh_output"
+    out.write_text("earlier=1\n")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    store = str(tmp_path / "s")
+    assert rp.main(["prefetch", "--dir", store, "--id", "2401.00001"]) == 0  # a feed and 2 PDFs
+    assert out.read_text() == "earlier=1\nsaved=3\n"  # one saved= line, other outputs kept
+    assert '"saved": 3' in capsys.readouterr().out  # the stats line has the full count
+    hit_out = tmp_path / "gh_output_hits"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(hit_out))
+    assert rp.main(["prefetch", "--dir", store, "--id", "2401.00001", "--budget-seconds", "100"]) == 0  # all hits
+    assert saved_lines(hit_out) == []
+
+
+def test_serve_record_never_writes_github_output(env, tmp_path, monkeypatch):
+    up, _ = env
+    up.script = {"api": [(200, FEED, {})], "pdf": [(200, PDF, {})]}
+    out = tmp_path / "gh_output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    servers, ready = [], threading.Event()
+
+    class Server(rp.ThreadingHTTPServer):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            servers.append(self)
+            ready.set()
+    monkeypatch.setattr(rp, "ThreadingHTTPServer", Server)
+    t = threading.Thread(target=rp.main, args=(["serve", "--dir", str(tmp_path / "s"), "--port", "0", "--record"],),
+                         daemon=True)
+    t.start()
+    assert ready.wait(10)
+    try:
+        assert get(f"http://127.0.0.1:{servers[0].server_address[1]}/pdf/x.pdf") == (200, PDF)
+        assert rp.Handler.rec.stats["saved"] == 1
+    finally:
+        servers[0].shutdown()
+    assert saved_lines(out) == []

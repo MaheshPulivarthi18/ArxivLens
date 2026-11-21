@@ -22,13 +22,22 @@ id_list), and the services then only see hits.
 
 Prefetch time budget (--budget-seconds N > 0; the clock starts at the first upstream request): when a pass over the
 queries ends with failures, prefetch waits a cool-down (PASS_WAIT, or longer if arXiv sent a longer Retry-After) and
-runs another pass over only the queries that had a failure (what they already saved is a hit), until nothing fails
-(exit 0) or the budget is spent (exit 1, naming what is still missing). No upstream request starts after the
+runs another pass over only the queries that had a transient failure (what they already saved is a hit), until
+nothing transient is left or the budget is spent; it exits 0 only if nothing failed, else 1, naming what is missing.
+Transient: HTTP 429, 5xx, a network error/timeout, or a fetch skipped for the "(time budget)". Permanent: any other
+4xx (a 404 PDF), or a 200 whose body is not a feed/PDF after its retries; a query whose failures are all permanent
+is not retried, so a run where every failure is permanent exits 1 after one pass, without a cool-down. No upstream request starts after the
 deadline and no retry, politeness or cool-down sleep runs past it: a wait that would reach it is not taken, and the
 fetch it was for is reported as "(time budget)". So the worst case is the budget plus one in-flight request
 (TIMEOUT), plus the seconds spent reading cached hits before the first request: 1020 + 120 = 1140 s < 1200 s (the
 20-min step timeout in stack.yml) and 2520 + 120 = 2640 s < 2700 s (45 min, eval.yml). With no budget (0), prefetch
 makes exactly one pass.
+
+$GITHUB_OUTPUT (prefetch only; `serve` never writes it): CI saves the store when the step output `saved` is set and not
+0, even if the run fails, so recording converges across runs. Prefetch appends one `saved=<n>` line as soon as the
+first entry it adds is on disk, and rewrites that same line in place after each later save (n only grows, so the
+line is never shortened; no repeated key). A run killed mid-way (step timeout, cancellation) has already reported
+what it saved; a run that adds nothing writes no line.
 
 Usage:
   python3 scripts/arxiv_replay.py serve    --dir .arxiv-replay [--port 8099] [--record]
@@ -60,6 +69,12 @@ MAX_WAIT = 60
 TIMEOUT = 120
 PASS_WAIT = 60             # prefetch with a budget: cool-down before re-running the queries that failed
 BUDGET = 0                 # fetch status: not attempted, the prefetch time budget is spent
+BAD_BODY = -1              # fetch status: arXiv answered 200, but not with a feed/PDF (sent to clients as 502)
+
+
+def transient(status: int) -> bool:
+    """A failure worth another prefetch pass: 429, 5xx (incl. 504 for network errors) or the time budget."""
+    return status in (BUDGET, 429) or status >= 500
 
 
 def api_key(query: str) -> str:
@@ -88,6 +103,7 @@ class Recorder:
         self.budget = budget   # seconds (0: no limit); the deadline is set at the first upstream fetch
         self.deadline = None
         self.retry_after = 0   # largest Retry-After seen since the caller last reset it
+        self.output, self.output_at = None, None  # prefetch: $GITHUB_OUTPUT path; offset of our saved= line
         os.makedirs(os.path.join(root, "api"), exist_ok=True)
         os.makedirs(os.path.join(root, "pdf"), exist_ok=True)
         self.lock = threading.Lock()  # one upstream request at a time
@@ -113,14 +129,30 @@ class Recorder:
         with open(p + ".json", "w") as f:
             json.dump(meta, f)
         self.stats["saved"] += 1
+        self.report_saved()
+
+    def report_saved(self) -> None:
+        """Keep one saved=<n> line in self.output (if set): appended at the first save, then rewritten in place."""
+        if not self.output:
+            return
+        line = f"saved={self.stats['saved']}\n".encode()
+        if self.output_at is None:
+            with open(self.output, "ab") as f:
+                self.output_at = f.tell()
+                f.write(line)
+        else:
+            with open(self.output, "r+b") as f:
+                f.seek(self.output_at)
+                f.write(line)
 
     def budget_allows(self, wait: float) -> bool:
         """False if waiting `wait` seconds from now would reach the deadline (never, without a budget)."""
         return self.deadline is None or time.monotonic() + wait < self.deadline
 
     def fetch(self, url: str, valid) -> tuple:
-        """(status, body). Retries 429/5xx/network errors; returns the last failure status (or 502), or BUDGET
-        if the time budget ran out before the next attempt could start."""
+        """(status, body). Retries 429/5xx/network errors (and 200s that are not `valid`); returns the last failure
+        status (504 for network errors, BAD_BODY for an invalid 200), or BUDGET if the time budget ran out before
+        the next attempt could start."""
         status, body = 502, b""
         for attempt in range(len(RETRY_WAITS) + 1):
             with self.lock:
@@ -154,7 +186,8 @@ class Recorder:
                     print(f"[replay] upstream error {type(e).__name__} for {url}", file=sys.stderr, flush=True)
             if status == 200 and valid(body):
                 return status, body
-            if status == 200:
+            bad_body = status == 200
+            if bad_body:
                 status = 502  # a 200 that is not a feed/PDF (rate-limit page, empty body) is not recorded
             self.stats["upstream_failures"] += 1
             print(f"[replay] upstream {status} for {url} (attempt {attempt + 1})", file=sys.stderr, flush=True)
@@ -164,7 +197,7 @@ class Recorder:
             if not self.budget_allows(wait):
                 return BUDGET, b""
             time.sleep(wait)
-        return status, b""
+        return (BAD_BODY if bad_body else status), b""
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -190,7 +223,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(404, b"not recorded (start the proxy with --record)\n", "text/plain")
         status, body = self.rec.fetch(upstream_url, valid)
         if status != 200:
-            return self.send(status, b"", "text/plain")
+            return self.send(502 if status == BAD_BODY else status, b"", "text/plain")
         self.rec.save(kind, key, body, meta)
         self.send(200, body, ctype)
 
@@ -244,15 +277,15 @@ def missing(name: str, status: int) -> str:
 
 
 def prefetch_query(rec: Recorder, query: str) -> list:
-    """Fetch an API query and every PDF its entries reference. Returns the names that could not be fetched."""
+    """Fetch an API query and every PDF its entries reference. Returns (name, status) for each that failed."""
     feed, status = get_or_fetch(rec, "api", api_key(query), f"{API_UPSTREAM}?{query}", is_feed, {"query": query})
     if feed is None:
-        return [missing(f"api?{query}", status)]
+        return [(f"api?{query}", status)]
     failed = []
     for name in entry_pdf_names(feed):
         body, status = get_or_fetch(rec, "pdf", name, PDF_UPSTREAM + name, is_pdf, {"name": name})
         if body is None:
-            failed.append(missing(name, status))
+            failed.append((name, status))
     return failed
 
 
@@ -297,37 +330,38 @@ def main(argv=None) -> int:
         return 0
 
     rec = Recorder(args.dir, True, max(args.budget_seconds, 0))
+    rec.output = os.environ.get("GITHUB_OUTPUT")  # saved= is reported as soon as the store grows
     ids = (corpus_ids(args.ids) if args.ids else []) + args.id
     queries = [f"id_list={i}" for i in dict.fromkeys(ids)]
     if args.search:
         queries.append(search_query_string(args.search, args.limit))
-    pending, passes = queries, 0
-    while True:  # one pass without a budget; with one, re-run the failed queries until none fail or time is up
+    pending, passes, given_up = queries, 0, []
+    while True:  # one pass without a budget; with one, re-run queries with a transient failure until none or time is up
         passes += 1
-        failed, retry = [], []
+        again, retry = [], []  # failures of the queries to re-run, and those queries
         rec.retry_after = 0
         for i, q in enumerate(pending):
             if not rec.budget_allows(0):
-                failed += [f"api?{x} (time budget)" for x in pending[i:]]
+                again += [(f"api?{x}", BUDGET) for x in pending[i:]]
+                retry += pending[i:]
                 break
             f = prefetch_query(rec, q)
-            if f:
-                failed += f
+            if any(transient(s) for _, s in f):
+                again += f
                 retry.append(q)
-        if not failed or rec.deadline is None:
+            else:
+                given_up += f  # only permanent failures (or none): another pass would not change them
+        if not retry or rec.deadline is None:
             break
         wait = max(PASS_WAIT, rec.retry_after)
         if not rec.budget_allows(wait):  # the next pass could not start before the deadline
             break
-        print(f"[replay] prefetch pass {passes}: {len(failed)} failed; retrying {len(retry)} queries in {wait:.0f}s",
-              file=sys.stderr, flush=True)
+        print(f"[replay] prefetch pass {passes}: {len(again)} failed transiently, {len(given_up)} permanently; "
+              f"retrying {len(retry)} queries in {wait:.0f}s", file=sys.stderr, flush=True)
         time.sleep(wait)
         pending = retry
     print(f"[replay] prefetch: {len(queries)} queries, stats={json.dumps(rec.stats)}", flush=True)
-    # CI saves the store whenever this run added to it, even if incomplete, so recording converges across runs.
-    if os.environ.get("GITHUB_OUTPUT"):
-        with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-            f.write(f"saved={rec.stats['saved']}\n")
+    failed = [missing(n, s) for n, s in given_up + again]
     if failed:
         print(f"[replay] prefetch FAILED for {len(failed)}: {' '.join(failed)} "
               "(arXiv unreachable or rate-limiting, and not in the cache)", file=sys.stderr, flush=True)
