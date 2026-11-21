@@ -77,9 +77,17 @@ def classify(resp: Optional[Dict[str, Any]]) -> str:
     if resp is None:
         return "error"
     reason = resp.get("refusal_reason")
+    if reason is not None and not isinstance(reason, str):
+        return "error"  # a non-string reason (even a falsy [] or 0) fails closed, never "no reason"
     if reason:
         return REFUSAL_REASONS.get(reason, "error")
     return "answered" if resp.get("citations") else "refusal"  # no citations = early refusal (QA-5)
+
+
+def _reason_str(resp: Dict[str, Any]) -> str:
+    """The response's refusal_reason if it is a string, else '' (absent, null or a malformed non-string)."""
+    reason = resp.get("refusal_reason")
+    return reason if isinstance(reason, str) else ""
 
 
 def is_refusal(resp: Optional[Dict[str, Any]]) -> bool:
@@ -139,7 +147,7 @@ def case_record(case_id: str, case_set: str, resp: Optional[Dict[str, Any]], ms:
     r = resp or {}
     rec: Dict[str, Any] = {
         "id": case_id, "set": case_set, "outcome": outcome, "refused": outcome == "refusal",
-        "refusal_reason": r.get("refusal_reason") or None, "latency_ms": round(ms, 1),
+        "refusal_reason": _reason_str(r) or None, "latency_ms": round(ms, 1),
         "citations": [{k: c.get(k) for k in ("arxiv_id", "chunk_id", "marker", "supported", "score")}
                       for c in r.get("citations") or []],
     }
@@ -183,8 +191,8 @@ def evaluate(answer_cases: List[Dict[str, Any]], refusal_cases: List[Dict[str, A
 
     def call(case: Dict[str, Any], case_set: str) -> Tuple[Optional[Dict[str, Any]], str, float]:
         resp, ms = ask(case["question"])
-        reason = (resp or {}).get("refusal_reason")
-        if reason:
+        reason = _reason_str(resp or {})
+        if reason:  # string values only; a non-string reason shows up as an error instead
             reason_counts[reason] = reason_counts.get(reason, 0) + 1
         records.append(case_record(case["id"], case_set, resp, ms))
         return resp, classify(resp), ms
