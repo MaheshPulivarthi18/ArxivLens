@@ -3,6 +3,7 @@ import { ExternalLink, FileCode, ShieldCheck, ShieldAlert, Info, BookOpen } from
 import { Card, CardHeader, CardTitle, CardContent, CardFooter } from './ui/card';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
+import { Tooltip, TooltipTrigger, TooltipContent } from './ui/tooltip';
 import { citationState } from '../lib/citations';
 
 const CHIP_ICONS = { supported: ShieldCheck, unsupported: ShieldAlert, unchecked: Info };
@@ -60,14 +61,14 @@ export default function ReferencesStack({ citations, activeMarker, onCopy, refus
             aria-label={`Citation [${cit.marker}]: ${cit.title}`}
             className={`transition-all duration-300 ${
               isHighlighted
-                ? 'border-emerald-500 ring-2 ring-emerald-500/20 bg-card shadow-lg shadow-emerald-950/20'
+                ? 'border-primary ring-2 ring-ring/30 bg-card shadow-lg'
                 : 'border-border/70 hover:border-border bg-card/90'
             }`}
           >
             <CardHeader className="p-4 pb-2">
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-center gap-2">
-                  <span className="flex items-center justify-center w-6 h-6 rounded-md bg-emerald-600 text-slate-950 font-mono font-bold text-xs">
+                  <span className="flex items-center justify-center w-6 h-6 rounded-md bg-accent text-accent-foreground font-mono font-bold text-xs">
                     [{cit.marker}]
                   </span>
                   <Badge variant="arxiv">
@@ -75,23 +76,34 @@ export default function ReferencesStack({ citations, activeMarker, onCopy, refus
                   </Badge>
                 </div>
 
-                <Badge variant={check.kind} className="gap-1 text-[11px]" title={check.tooltip}>
-                  <ChipIcon className="w-3 h-3" aria-hidden="true" />
-                  <span>{check.text}</span>
-                </Badge>
+                {/* The chip text carries the meaning; the tooltip only explains it (opens on hover and keyboard focus). */}
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      className="shrink-0 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card"
+                    >
+                      <Badge variant={check.kind} className="gap-1 text-[11px]">
+                        <ChipIcon className="w-3 h-3" aria-hidden="true" />
+                        <span>{check.text}</span>
+                      </Badge>
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>{check.tooltip}</TooltipContent>
+                </Tooltip>
               </div>
 
               <CardTitle className="text-sm font-semibold text-foreground mt-2 leading-snug">
                 {cit.title}
               </CardTitle>
-              <div className="text-xs text-emerald-400 font-mono mt-0.5">
+              <div className="text-xs text-muted-foreground mt-0.5">
                 § Section: {cit.section || 'General'} • Chunk #{cit.chunk_id}
               </div>
             </CardHeader>
 
             <CardContent className="p-4 pt-1">
               {/* Exact Raw Text Quote */}
-              <div className="text-xs font-mono text-slate-300 bg-background/80 border-l-2 border-emerald-500 rounded-r-md p-3 max-h-36 overflow-y-auto leading-relaxed whitespace-pre-wrap">
+              <div className="text-sm font-serif text-foreground bg-muted/50 border-l-2 border-border rounded-r-md p-3 max-h-36 overflow-y-auto leading-relaxed whitespace-pre-wrap">
                 {cit.content || `"${cit.title} — [Section: ${cit.section}]"`}
               </div>
             </CardContent>
@@ -101,7 +113,7 @@ export default function ReferencesStack({ citations, activeMarker, onCopy, refus
                 asChild
                 variant="outline"
                 size="sm"
-                className="text-xs text-emerald-400 hover:text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/10 gap-1.5 h-7"
+                className="text-xs text-primary border-input hover:bg-accent hover:text-accent-foreground gap-1.5 h-7"
               >
                 <a href={pdfURL} target="_blank" rel="noreferrer" aria-label={`Open PDF for [${cit.marker}] (opens in a new tab)`}>
                   <ExternalLink className="w-3 h-3" />
