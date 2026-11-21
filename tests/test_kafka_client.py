@@ -2,6 +2,8 @@
 (retried in place), with interruptible waits, graceful stop and poison records. Fakes only: no broker, no network."""
 import json
 import logging
+import pathlib
+import re
 import signal
 import threading
 import time
@@ -336,3 +338,53 @@ def test_dlq_failure_log_has_coordinates_not_value(caplog, poison):
     for part in ["topic=papers.downloaded", "partition=0", "offset=5", f"dlq_topic={DLQ}", "round=1", "Message timed out"]:
         assert part in crit[0]
     assert not [r for r in caplog.records if SENTINEL in r.getMessage()]
+
+
+# OPS-H8d: every Kafka worker's compose stop_grace_period outlasts one confirmed flush, so `docker stop` never SIGKILLs it mid-flush.
+# Stdlib-only line parsing (no PyYAML in requirements-light.txt): top-level `services:` entries are 2-space keys, their own keys 4-space.
+COMPOSE = pathlib.Path(__file__).resolve().parents[1] / "docker-compose.yml"
+POLL_S = 1.0  # the consumer loop's consumer.poll(timeout=1.0) in ServiceKafkaConsumer.start (services/common/kafka_client.py)
+_DURATION_UNITS = {"h": 3600.0, "m": 60.0, "s": 1.0, "ms": 1e-3, "us": 1e-6, "ns": 1e-9}
+
+
+def compose_services(text):
+    """{service name: its block's lines (comments stripped)} for the top-level `services:` mapping."""
+    services, current, inside = {}, None, False
+    for raw in text.splitlines():
+        line = re.sub(r"(^|\s)#.*$", "", raw).rstrip()
+        if not line:
+            continue
+        if not line.startswith(" "):
+            inside, current = line == "services:", None
+        elif inside and (m := re.fullmatch(r"  ([A-Za-z0-9_.-]+):", line)):
+            current = services.setdefault(m.group(1), [])
+        elif inside and current is not None:
+            current.append(line)
+    return services
+
+
+def compose_duration_s(value):
+    """A compose duration (Go syntax: `20s`, `1500ms`, `1m30s`, ...) in seconds; None if it doesn't parse."""
+    value = (value or "").strip().strip("'\"")
+    parts = re.findall(r"(\d+(?:\.\d+)?)(ms|us|ns|h|m|s)", value)
+    if not value or "".join(n + u for n, u in parts) != value:
+        return None
+    return sum(float(n) * _DURATION_UNITS[u] for n, u in parts)
+
+
+def test_worker_stop_grace_period_outlasts_confirmed_flush():
+    services = compose_services(COMPOSE.read_text())
+    workers = {name for name, block in services.items() if any("*heartbeat_check" in line for line in block)}
+    assert workers == {"processor", "embedder-worker"}, f"Kafka workers (healthcheck uses *heartbeat_check): {sorted(workers)}"
+    bound = kc.DELIVERY_TIMEOUT_S + POLL_S
+    for name in sorted(workers):
+        values = [m.group(1) for line in services[name] if (m := re.fullmatch(r"    stop_grace_period:\s*(\S+)", line))]
+        grace = compose_duration_s(values[0]) if len(values) == 1 else None
+        assert grace is not None, f"{name}: stop_grace_period missing or unparseable: {values}"
+        assert grace > bound, (f"{name}: stop_grace_period {grace}s <= DELIVERY_TIMEOUT_S {kc.DELIVERY_TIMEOUT_S}s + {POLL_S}s poll")
+
+
+@pytest.mark.parametrize("value, want", [("20s", 20.0), ("1500ms", 1.5), ("1m30s", 90.0), ("'2.5s'", 2.5),
+                                         ("20", None), ("", None), (None, None), ("s", None), ("20 s", None), ("10x", None)])
+def test_compose_duration_parsing(value, want):
+    assert compose_duration_s(value) == want
