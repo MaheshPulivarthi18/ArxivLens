@@ -96,6 +96,19 @@ def save_sections_and_chunks(
             sec_title = chunk.get("section_title", "")
             sec_id = section_id_map.get(sec_title)
 
+            # OPS-H6d: a re-parse changed this chunk's text, so its vectors (every model) describe the old text. Drop
+            # them so the embedder's L3 check re-embeds the chunk. Must run before the upsert overwrites content_hash.
+            cur.execute(
+                """
+                DELETE FROM chunk_embeddings ce
+                USING paper_chunks pc
+                WHERE ce.chunk_id = pc.id
+                  AND pc.paper_id = %s
+                  AND pc.chunk_index = %s
+                  AND pc.content_hash <> %s;
+                """,
+                (paper_id, chunk["chunk_index"], chunk["content_hash"]),
+            )
             cur.execute(
                 """
                 INSERT INTO paper_chunks (
@@ -134,7 +147,14 @@ def save_sections_and_chunks(
             else:  # a reprocess without a recorded page must not keep a stale one
                 cur.execute("DELETE FROM paper_chunk_pages WHERE chunk_id = %s;", (chunk_id,))
 
-        # 3. Update status to 'chunked'
+        # 3. OPS-H6d: drop this paper's chunks that the new parse no longer has (a shorter re-parse). The FK cascades
+        # remove their vectors and page rows. An empty list matches nothing, so the paper is left with no chunks.
+        cur.execute(
+            "DELETE FROM paper_chunks WHERE paper_id = %s AND NOT (chunk_index = ANY(%s::int[]));",
+            (paper_id, [c["chunk_index"] for c in chunks]),
+        )
+
+        # 4. Update status to 'chunked'
         cur.execute(
             "UPDATE papers SET status = 'chunked', updated_at = now() WHERE id = %s;",
             (paper_id,),
