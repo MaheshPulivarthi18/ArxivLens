@@ -310,13 +310,60 @@ def test_ingest_failed_worker_construction_is_not_cached(ingest):
     assert ingest.proc_inits == 2 and ingest.proc_calls == 1
 
 
+def _call_during_ingest(ingest, call):
+    """Start an ingest, wait until its first process_message has entered (lock held), then run call() in its own thread
+    with a bounded join, so an endpoint that takes _ingest_lock fails the test instead of hanging it. The ingest thread
+    is joined in a finally, so it never outlives the test. Returns (ingest result, call result); the call result holds
+    the endpoint response and the lock state and exit count at the moment it returned."""
+    import threading
+    import time
+
+    api = ingest.api
+    ingest.call_sleep = 0.5  # the ingest holds the lock for >= 1 s (two process_message calls)
+    out, res = {}, {}
+
+    def run_ingest():
+        try:
+            out["resp"] = api.ingest_paper_endpoint(ingest.req)
+        except Exception as e:  # pragma: no cover - surfaced by the asserts below
+            out["err"] = e
+
+    def run_call():
+        try:
+            res["resp"] = call()
+        except Exception as e:  # surfaced by the callers' asserts
+            res["err"] = e
+        res["locked"] = api._ingest_lock.locked()
+        res["exits"] = sum(kind == "exit" for kind, _ in ingest.log)
+
+    t = threading.Thread(target=run_ingest, daemon=True)
+    t.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not any(kind == "enter" for kind, _ in ingest.log) and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert ingest.log and ingest.log[0][0] == "enter", "ingest never entered process_message"
+        c = threading.Thread(target=run_call, daemon=True)
+        c.start()
+        c.join(timeout=5)
+    finally:
+        t.join(timeout=10)  # longer than the ingest's total sleep (2 x 0.5 s)
+        out["alive"] = t.is_alive()
+    return out, res
+
+
+def _assert_served_during_ingest(out, res):
+    """The ingest succeeded, and the endpoint returned while the ingest still held the lock, before any exit."""
+    assert not out["alive"] and "resp" in out and "err" not in out and out["resp"].status == "success", out
+    assert "resp" in res, f"endpoint call did not return: {res!r}"
+    assert {"locked_at_return": res["locked"], "exits_at_return": res["exits"]} == \
+        {"locked_at_return": True, "exits_at_return": 0}
+
+
 def test_embed_is_not_serialized_behind_an_in_flight_ingest(ingest, monkeypatch):
     """Pins that /internal/embed does not take _ingest_lock. /v1/search and /v1/ask call it for every query, and an ingest
     holds the lock for 30-80 s, so a query must be served from the shared startup model while an ingest is in progress.
     Also pins that the ingest's EmbedderWorker got that same model object (AI-12)."""
-    import threading
-    import time
-
     import numpy as np
 
     api = ingest.api
@@ -329,34 +376,8 @@ def test_embed_is_not_serialized_behind_an_in_flight_ingest(ingest, monkeypatch)
 
     model = FakeModel()
     monkeypatch.setattr(api, "embedder", model)
-    ingest.call_sleep = 0.5  # the ingest holds the lock for >= 1 s (two process_message calls)
-    out = {}
-
-    def run_ingest():
-        try:
-            out["resp"] = api.ingest_paper_endpoint(ingest.req)
-        except Exception as e:  # pragma: no cover - surfaced by the asserts below
-            out["err"] = e
-
-    t = threading.Thread(target=run_ingest, daemon=True)
-    t.start()
-    deadline = time.monotonic() + 5
-    while not any(kind == "enter" for kind, _ in ingest.log) and time.monotonic() < deadline:
-        time.sleep(0.005)
-    assert ingest.log and ingest.log[0][0] == "enter", "ingest never entered process_message"
-
-    # Run the embed call in its own thread with a bounded wait, so a mutant that locks embed fails instead of hanging.
-    emb = {}
-    def run_embed():
-        emb["resp"] = api.embed_texts_endpoint(api.EmbedRequest(texts=["q"], is_query=True))
-        emb["locked"] = api._ingest_lock.locked()
-        emb["exits"] = sum(kind == "exit" for kind, _ in ingest.log)
-
-    e = threading.Thread(target=run_embed, daemon=True)
-    e.start()
-    e.join(timeout=5)
-    t.join(timeout=5)
-    assert not t.is_alive() and "err" not in out and out["resp"].status == "success"
+    out, emb = _call_during_ingest(ingest, lambda: api.embed_texts_endpoint(api.EmbedRequest(texts=["q"], is_query=True)))
+    assert not out["alive"] and "err" not in out and out["resp"].status == "success"
     assert "resp" in emb, "embed call did not return"
     assert emb["resp"].dim == 768 and len(emb["resp"].vectors) == 1 and len(emb["resp"].vectors[0]) == 768
     # Returned while the ingest still held the lock and before its first process_message exited.
@@ -365,6 +386,81 @@ def test_embed_is_not_serialized_behind_an_in_flight_ingest(ingest, monkeypatch)
     # Same model object: the ingest's EmbedderWorker was built with it, and the embed endpoint called it.
     assert len(ingest.emb_inits) == 1 and ingest.emb_inits[0].get("embedder") is model
     assert calls == [(["q"], True, True)]
+
+
+class _NoEmbedder:
+    def embed_texts(self, texts, is_query):
+        raise AssertionError("bi-encoder fallback must not run when the cross-encoder is loaded")
+
+
+def test_rerank_cross_encoder_is_not_serialized_behind_an_in_flight_ingest(ingest, monkeypatch):
+    """Pins that /internal/rerank's cross-encoder path does not take _ingest_lock (every /v1/ask calls it), and that it is
+    the path taken when the cross-encoder is loaded, even with an embedder present."""
+    api = ingest.api
+    tok, model, calls = object(), object(), []
+
+    def fake_score_pairs(tokenizer, reranker, query, passages):
+        calls.append((tokenizer, reranker, query, list(passages), api._ingest_lock.locked()))
+        return [0.5] * len(passages), {}
+
+    monkeypatch.setattr(api, "reranker_tokenizer", tok)
+    monkeypatch.setattr(api, "reranker_model", model)
+    monkeypatch.setattr(api, "embedder", _NoEmbedder())
+    monkeypatch.setattr(api, "score_pairs", fake_score_pairs)
+    out, res = _call_during_ingest(ingest, lambda: api.rerank_endpoint(api.RerankRequest(query="q", passages=["a", "b"])))
+    _assert_served_during_ingest(out, res)
+    assert res["resp"].scores == [0.5, 0.5]
+    assert len(calls) == 1 and calls[0][0] is tok and calls[0][1] is model
+    assert calls[0][2:] == ("q", ["a", "b"], True)
+
+
+def test_rerank_bi_encoder_fallback_is_not_serialized_behind_an_in_flight_ingest(ingest, monkeypatch):
+    """Pins that /internal/rerank's bi-encoder fallback (no cross-encoder loaded) does not take _ingest_lock."""
+    import math
+
+    import numpy as np
+
+    api = ingest.api
+    calls = []
+
+    class FakeModel:
+        def embed_texts(self, texts, is_query):
+            calls.append((list(texts), is_query, api._ingest_lock.locked()))
+            return np.full((len(texts), 768), 0.1, dtype=np.float32)
+
+    def no_score_pairs(*a, **k):
+        raise AssertionError("cross-encoder must not run when reranker_model is None")
+
+    monkeypatch.setattr(api, "reranker_model", None)
+    monkeypatch.setattr(api, "reranker_tokenizer", object())
+    monkeypatch.setattr(api, "embedder", FakeModel())
+    monkeypatch.setattr(api, "score_pairs", no_score_pairs)
+    out, res = _call_during_ingest(ingest, lambda: api.rerank_endpoint(api.RerankRequest(query="q", passages=["a", "b"])))
+    _assert_served_during_ingest(out, res)
+    scores = res["resp"].scores
+    assert len(scores) == 2 and all(isinstance(s, float) and math.isfinite(s) for s in scores), scores
+    assert calls == [(["q"], True, True), (["a", "b"], False, True)]
+
+
+def test_verify_is_not_serialized_behind_an_in_flight_ingest(ingest, monkeypatch):
+    """Pins that /internal/verify does not take _ingest_lock (every /v1/ask calls it since NLI verification)."""
+    api = ingest.api
+    tok, model, idx, calls = object(), object(), object(), []
+
+    def fake_verify_pairs(tokenizer, nli_model, pairs, entail_idx):
+        calls.append((tokenizer, nli_model, list(pairs), entail_idx, api._ingest_lock.locked()))
+        return [0.9], {}
+
+    monkeypatch.setattr(api, "nli_tokenizer", tok)
+    monkeypatch.setattr(api, "nli_model", model)
+    monkeypatch.setattr(api, "nli_entail_idx", idx)
+    monkeypatch.setattr(api.nli, "verify_pairs", fake_verify_pairs)
+    req = api.VerifyRequest(pairs=[api.VerifyPair(claim="c", passage="p")])
+    out, res = _call_during_ingest(ingest, lambda: api.verify_endpoint(req))
+    _assert_served_during_ingest(out, res)
+    assert res["resp"].scores == [0.9] and res["resp"].model == api.NLI_MODEL
+    assert len(calls) == 1 and calls[0][0] is tok and calls[0][1] is model and calls[0][3] is idx
+    assert calls[0][2] == [("c", "p")] and calls[0][4] is True
 
 
 def test_ingest_failed_embedder_build_keeps_cached_processor(ingest):
