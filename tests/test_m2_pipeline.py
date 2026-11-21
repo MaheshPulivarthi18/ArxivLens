@@ -1,5 +1,4 @@
 import psycopg
-import pytest
 from services.common.config import config
 
 
@@ -54,7 +53,7 @@ def test_chunk_embeddings_and_pgvector_cosine_ops():
             ORDER BY ce.embedding <=> %s::halfvec
             LIMIT 3;
         """, (sample_vec_str, config.embedding_model, sample_vec_str))
-        
+
         results = cur.fetchall()
         assert len(results) == 3
         # The top result must be the exact same chunk with distance ~0.0
