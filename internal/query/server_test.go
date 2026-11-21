@@ -350,6 +350,104 @@ func TestHandlersEncodeContract(t *testing.T) {
 	}
 }
 
+// TestHandlersErrorContract pins RET-1e: every http.Error path in server.go answers
+// its own status as text/plain with a known body prefix, never a JSON success. It
+// also pins that SetIngester keeps a non-nil ingester (mutant q2).
+func TestHandlersErrorContract(t *testing.T) {
+	type handler func(*Server) http.HandlerFunc
+	search := func(s *Server) http.HandlerFunc { return s.handleSearch }
+	ask := func(s *Server) http.HandlerFunc { return s.handleAsk }
+	status := func(s *Server) http.HandlerFunc { return s.handlePaperStatus }
+	stats := func(s *Server) http.HandlerFunc { return s.handleStats }
+	ingest := func(s *Server) http.HandlerFunc { return s.handleIngestPaper }
+	discover := func(s *Server) http.HandlerFunc { return s.handleDiscoverPaper }
+
+	withFake := func(f *fakeDeps) func() *Server {
+		return func() *Server { return &Server{searchEngine: f, ragService: f, database: f, ingester: f, port: 8080} }
+	}
+	ok := withFake(&fakeDeps{})
+	failing := withFake(&fakeDeps{err: errors.New("boom")})
+	noIngester := func() *Server { return NewServer(nil, nil, nil, 0) }
+	const post, get = http.MethodPost, http.MethodGet
+	const notConfigured = "paper ingester not configured on server\n"
+
+	tests := []struct {
+		name     string
+		server   func() *Server
+		handler  handler
+		method   string
+		path     string
+		body     string
+		wantCode int
+		wantBody string // body prefix
+	}{
+		{"search bad JSON", ok, search, post, "/v1/search", `{`, 400, "invalid request payload: "},
+		{"search empty query", ok, search, post, "/v1/search", `{"query":""}`, 400, "query is required\n"},
+		{"search error", failing, search, post, "/v1/search", `{"query":"q"}`, 500, "search failed: boom\n"},
+		{"ask bad JSON", ok, ask, post, "/v1/ask", `{`, 400, "invalid request payload: "},
+		{"ask empty question", ok, ask, post, "/v1/ask", `{"question":""}`, 400, "question is required\n"},
+		{"ask error", failing, ask, post, "/v1/ask", `{"question":"q"}`, 500, "rag ask failed: boom\n"},
+		{"status empty arxiv_id", ok, status, get, "/v1/papers/", "", 400, "arxiv_id is required\n"},
+		{"status error", failing, status, get, "/v1/papers/2401.00001/status", "", 404, "paper not found: boom\n"},
+		{"stats error", failing, stats, get, "/v1/stats", "", 500, "failed to get stats: boom\n"},
+		{"ingest bad JSON", ok, ingest, post, "/v1/papers/ingest", `{`, 400, "invalid JSON body\n"},
+		{"ingest no input", ok, ingest, post, "/v1/papers/ingest", `{"arxiv_id":" ","url":""}`, 400, "arxiv_id or url is required\n"},
+		{"ingest not configured", noIngester, ingest, post, "/v1/papers/ingest", `{"arxiv_id":"2401.00001"}`, 503, notConfigured},
+		{"discover bad JSON", ok, discover, post, "/v1/papers/discover", `{`, 400, "invalid JSON body\n"},
+		{"discover empty query", ok, discover, post, "/v1/papers/discover", `{"query":"  "}`, 400, "query is required\n"},
+		{"discover not configured", noIngester, discover, post, "/v1/papers/discover", `{"query":"q"}`, 503, notConfigured},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			logBuf := redirectServerLog(t)
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+			if err := func() (err error) {
+				defer func() {
+					if r := recover(); r != nil {
+						err = fmt.Errorf("handler panicked: %v", r)
+					}
+				}()
+				tc.handler(tc.server())(rec, req)
+				return nil
+			}(); err != nil {
+				t.Fatal(err)
+			}
+
+			if rec.Code != tc.wantCode {
+				t.Errorf("code = %d, want %d", rec.Code, tc.wantCode)
+			}
+			if ct := rec.Header().Get("Content-Type"); ct != "text/plain; charset=utf-8" {
+				t.Errorf("Content-Type = %q, want text/plain; charset=utf-8", ct)
+			}
+			body := rec.Body.String()
+			if !strings.HasPrefix(body, tc.wantBody) {
+				t.Errorf("body = %q, want prefix %q", body, tc.wantBody)
+			}
+			if json.Valid([]byte(body)) {
+				t.Errorf("body is JSON on an error path: %q", body)
+			}
+			if lines := nonEmptyLines(logBuf.String()); len(lines) != 0 {
+				t.Errorf("unexpected log lines: %q", lines)
+			}
+		})
+	}
+
+	// q2: a real *PaperIngester must be stored as-is. Nothing is called on it.
+	t.Run("SetIngester non-nil", func(t *testing.T) {
+		ing := NewPaperIngester(nil, nil, "bucket", "", 0)
+		s := NewServer(nil, nil, nil, 0)
+		s.SetIngester(ing)
+		if s.ingester == nil {
+			t.Fatal("SetIngester(non-nil) left s.ingester nil")
+		}
+		if got, isPI := s.ingester.(*PaperIngester); !isPI || got != ing {
+			t.Fatalf("s.ingester = %T %p, want the *PaperIngester passed in (%p)", s.ingester, s.ingester, ing)
+		}
+	})
+}
+
 func nonEmptyLines(s string) []string {
 	var out []string
 	for _, l := range strings.Split(s, "\n") {
