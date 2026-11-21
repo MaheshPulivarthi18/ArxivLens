@@ -251,6 +251,85 @@ def test_save_chunks_reprocess_deletes(indexes):
     assert len(calls) >= 2 and calls[-2] == tail[0] and calls[-1][0].startswith("UPDATE papers SET status = 'chunked'")
 
 
+# --- OPS-H6e: a vector is only saved while its chunk still exists with the hash it was computed from --------------
+
+# The 3-tuple statement exactly as on main (11c4696), so AC1 pins "same SQL" rather than re-reading the implementation.
+UPSERT_VECTOR_SQL = (
+    "INSERT INTO chunk_embeddings (chunk_id, model, embedding) VALUES (%s, %s, %s::halfvec) "
+    "ON CONFLICT (chunk_id, model) DO UPDATE SET embedding = EXCLUDED.embedding, created_at = now();"
+)
+UPSERT_VECTOR_IF_CURRENT_SQL = (
+    "INSERT INTO chunk_embeddings (chunk_id, model, embedding) SELECT pc.id, %s::text, %s::halfvec FROM paper_chunks pc "
+    "WHERE pc.id = %s AND pc.content_hash = %s FOR SHARE OF pc "
+    "ON CONFLICT (chunk_id, model) DO UPDATE SET embedding = EXCLUDED.embedding, created_at = now();"
+)
+VEC, VEC_STR = [0.5, -0.25, 1.0], "[0.500000,-0.250000,1.000000]"
+
+
+class RowcountCursor(FakeCursor):
+    """FakeCursor whose `rowcount` after each statement comes from `rowcounts` (what Postgres reports for INSERT ... SELECT)."""
+
+    def __init__(self, rowcounts):
+        super().__init__()
+        self._rowcounts, self.rowcount = list(rowcounts), -1
+
+    def execute(self, sql, params=()):
+        super().execute(sql, params)
+        self.rowcount = self._rowcounts.pop(0) if self._rowcounts else -1  # -1: a 3-tuple must not read rowcount
+
+
+def _embed_conn(rowcounts=()):
+    conn = FakeConn()
+    conn.cur = RowcountCursor(rowcounts)
+    return conn
+
+
+def test_save_embeddings_3tuple_unchanged():
+    from services.common.db import save_chunk_embeddings
+
+    conn = _embed_conn()
+    n = save_chunk_embeddings(conn, [(11, "m", VEC), (12, "m2", [0.0])])
+    # AC1: same statement and parameters as main, one per item, counted as len(list), no commit.
+    assert conn.cur.calls == [(UPSERT_VECTOR_SQL, (11, "m", VEC_STR)), (UPSERT_VECTOR_SQL, (12, "m2", "[0.000000]"))]
+    assert n == 2 and conn.commits == 0
+    assert save_chunk_embeddings(_embed_conn(), []) == 0
+
+
+@pytest.mark.parametrize(
+    "rowcount, want",
+    [(1, 1), (0, 0)],
+    ids=["hash-matches-written", "stale-or-deleted-skipped"],
+)
+def test_save_embeddings_4tuple_guarded(rowcount, want):
+    from services.common.db import save_chunk_embeddings
+
+    conn = _embed_conn([rowcount])
+    n = save_chunk_embeddings(conn, [(11, "m", VEC, "h11")])
+    # AC2-AC4: one guarded statement keyed on (chunk id, content_hash); the count is what Postgres actually wrote.
+    assert conn.cur.calls == [(UPSERT_VECTOR_IF_CURRENT_SQL, ("m", VEC_STR, 11, "h11"))]
+    assert n == want and conn.commits == 0
+
+
+def test_save_embeddings_mixed_batch_counts_only_written():
+    from services.common.db import save_chunk_embeddings
+
+    conn = _embed_conn([-1, 0, 1, 0])
+    n = save_chunk_embeddings(conn, [(1, "m", VEC), (2, "m", VEC, "h2"), (3, "m", VEC, "h3"), (4, "m", VEC, "h4")])
+    assert [c[0] for c in conn.cur.calls] == [UPSERT_VECTOR_SQL] + [UPSERT_VECTOR_IF_CURRENT_SQL] * 3
+    assert [c[1][2] if len(c[1]) == 4 else c[1][0] for c in conn.cur.calls] == [1, 2, 3, 4]
+    assert n == 2 and conn.commits == 0
+
+
+@pytest.mark.parametrize("item", [(1, "m"), (1, "m", VEC, "h", "extra")], ids=["2-tuple", "5-tuple"])
+def test_save_embeddings_rejects_other_shapes(item):
+    from services.common.db import save_chunk_embeddings
+
+    conn = _embed_conn()
+    with pytest.raises(ValueError):
+        save_chunk_embeddings(conn, [item])
+    assert conn.cur.calls == []
+
+
 # --- AI-11: TokenChunker records each chunk's start page (`page_start`) -------------------------------------------
 
 
