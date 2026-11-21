@@ -48,6 +48,11 @@ type SearchHit struct {
 	// paper_chunks.page_number is the start page of the chunk's *section*, wrong for later chunks of a
 	// multi-page section; do not "fix" a missing Page by selecting it.
 	Page *int `json:"page,omitempty"`
+
+	// poolRank is the hit's 1-based position in the ranked pool before the ADR-0016 top-5 cap: the ADR-0017 fused
+	// order, or RRF order when rerank fell back. Ask uses it to re-rank the hits that pass its relevance cutoff.
+	// Unexported, so never serialized.
+	poolRank int
 }
 
 // reranker is the one method HybridSearch needs from *EmbedClient.
@@ -253,6 +258,7 @@ func rerankAndSort(ctx context.Context, rr reranker, query string, hits []Search
 		id, src := traceIDFrom(ctx)
 		log.Printf("[Query Service] rerank fallback trace_id=%s trace_id_source=%s reason=%q pool=%d scores=%d",
 			id, src, reason, len(hits), len(scores))
+		setPoolRanks(hits)
 		return hits[:min(limit, len(hits))]
 	}
 
@@ -260,8 +266,15 @@ func rerankAndSort(ctx context.Context, rr reranker, query string, hits []Search
 		hits[i].RerankScore = float64(scores[i])
 	}
 	hits = fuseRanks(hits)
+	setPoolRanks(hits)
 	hits = diversify(hits, DiversityWindow, PaperCap)
 	return hits[:min(limit, len(hits))]
+}
+
+func setPoolRanks(hits []SearchHit) {
+	for i := range hits {
+		hits[i].poolRank = i + 1
+	}
 }
 
 // fuseRanks orders hits (given in first-stage RRF order, RerankScore set) by
