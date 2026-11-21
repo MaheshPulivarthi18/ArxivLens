@@ -47,7 +47,7 @@ test-unit: test-go test-py ## Fast tests, no infra (Go + M0 + eval data). Fronte
 test-go: ## Go unit tests
 	go test ./...
 
-PY_LIGHT_TESTS := tests/test_evals_data.py tests/test_worker_heartbeat.py tests/test_arxiv_replay.py
+PY_LIGHT_TESTS := tests/test_evals_data.py tests/test_worker_heartbeat.py tests/test_arxiv_replay.py tests/test_rerank_precision.py
 PY_ML_TESTS    := tests/test_m0.py tests/test_verify.py tests/test_processor_pages.py
 
 test-py: test-py-light test-py-ml ## Python unit tests: test-py-light + test-py-ml

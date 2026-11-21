@@ -1,4 +1,5 @@
 import pytest
+import pytest
 import numpy as np
 import torch
 
@@ -245,6 +246,29 @@ def _patch_load_models(monkeypatch, api, reranker_load_error=None):
     monkeypatch.setattr(api.AutoTokenizer, "from_pretrained", load_tokenizer)
     monkeypatch.setattr(api.AutoModelForSequenceClassification, "from_pretrained", lambda *a, **k: model)
     return model
+
+
+@pytest.mark.parametrize("device,env,halved", [("mps", {}, True), ("cuda", {}, True), ("cpu", {}, False),
+                                               ("mps", {"EMBEDDER_RERANK_FP16": "0"}, False)])
+def test_rerank_load_models_uses_fp16_on_gpu_only(monkeypatch, device, env, halved):
+    """ADR-0020: load_models halves the reranker on MPS/CUDA only, unless EMBEDDER_RERANK_FP16=0."""
+    from services.embedder import api
+
+    model = _patch_load_models(monkeypatch, api)
+    monkeypatch.setattr(api, "BGEEmbedder", lambda model_name: SimpleNamespace(device=device))
+    monkeypatch.delenv("EMBEDDER_RERANK_FP16", raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    model.halved = False
+
+    def half():
+        model.halved = True
+        return model
+
+    model.half = half
+    monkeypatch.setattr(api, "score_pairs", lambda *a, **k: ([], {}))  # skip the warm-up forward pass
+    api.load_models()
+    assert api.reranker_model is model and model.moved_to == device and model.halved is halved
 
 
 def test_rerank_load_models_runs_warm_up(monkeypatch, caplog):

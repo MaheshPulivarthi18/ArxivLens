@@ -215,6 +215,7 @@ All services read the same environment variables (defaults target the local Dock
 | `ARXIVLENS_NLI_MODEL` (embedder API) | NLI model for citation verification (default `cross-encoder/nli-deberta-v3-small`) |
 | `ARXIV_API_URL`, `ARXIV_PDF_BASE` | Redirect arXiv fetches (CI points them at `scripts/arxiv_replay.py`); stored and displayed URLs stay canonical |
 | `EMBEDDER_TORCH_THREADS` (embedder API) | Cores available to the process: CPU threads for torch (`torch.set_num_threads`). Invalid or non-positive values fall back to the default. Logged at startup as `torch threads: A -> B` |
+| `EMBEDDER_RERANK_FP16` (embedder API) | On: the reranker runs in fp16 on MPS/CUDA (same eval ranking, about 3x faster on an M-series Mac; ADR-0020) and fp32 on CPU. `0`/`false`/`no`/`off` forces fp32. `GET /healthz` reports `reranker_dtype` |
 
 > ⚠️ The default credentials are for local development only. Override them with your own values (e.g. a git-ignored `.env`) before deploying anywhere.
 
