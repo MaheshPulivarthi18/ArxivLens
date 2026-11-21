@@ -44,6 +44,25 @@ func TestFirstWaitIsImmediate(t *testing.T) {
 	waitImmediate(t, l)
 }
 
+// Without the up-front ctx.Err() check in Wait, a cancelled ctx and a free turn are both ready in
+// its select and Go picks one at random, so a single try catches that regression only about half the
+// time. 50 tries on fresh limiters make a miss about 2^-50 likely. The l.last check fails fast
+// instead of letting waitImmediate block for the hour-long interval.
+func TestCancelledCtxNeverTakesPermit(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := 0; i < 50; i++ {
+		l := NewLimiter(time.Hour)
+		if err := l.Wait(ctx); !errors.Is(err, context.Canceled) {
+			t.Fatalf("try %d: Wait(cancelled) = %v, want context.Canceled", i, err)
+		}
+		if !l.last.IsZero() {
+			t.Fatalf("try %d: Wait(cancelled) took a permit (last = %s)", i, l.last)
+		}
+		waitImmediate(t, l)
+	}
+}
+
 func TestSequentialWaits(t *testing.T) {
 	const n, d = 5, 40 * time.Millisecond
 	l := NewLimiter(d)
