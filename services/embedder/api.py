@@ -117,6 +117,12 @@ def score_pairs(tokenizer, model, query: str, passages: Sequence[str],
     return scores, stats
 
 
+def _dtype_name(model) -> Optional[str]:
+    """'float16' / 'float32' for a HF model (its .dtype); None when the object has none. Never raises."""
+    dtype = getattr(model, "dtype", None)
+    return None if dtype is None else str(dtype).replace("torch.", "")
+
+
 def _format_stats(stats: dict) -> str:
     return " ".join(f"{k}={v}" for k, v in stats.items())
 
@@ -160,8 +166,7 @@ def load_models():
         if rerank_fp16(embedder.device):
             reranker_model.half()
         reranker_model.eval()
-        logger.info(f"Cross-Encoder Reranker loaded successfully on {embedder.device} "
-                    f"({str(next(reranker_model.parameters()).dtype).replace('torch.', '')})!")
+        logger.info(f"Cross-Encoder Reranker loaded successfully on {embedder.device} ({_dtype_name(reranker_model)})!")
     except Exception as e:
         logger.error(f"Warning: Failed to load cross-encoder ({e}), falling back to bi-encoder")
         return
@@ -211,8 +216,7 @@ class VerifyResponse(BaseModel):
 @app.get("/healthz")
 def healthz():
     return {"status": "ok", "device": embedder.device if embedder else "uninitialized", "reranker": reranker_model is not None,
-            "reranker_dtype": (str(next(reranker_model.parameters()).dtype).replace("torch.", "")
-                               if reranker_model is not None else None),
+            "reranker_dtype": _dtype_name(reranker_model) if reranker_model is not None else None,
             "verifier": nli_model is not None}
 
 
