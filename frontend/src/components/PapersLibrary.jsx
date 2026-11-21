@@ -50,7 +50,7 @@ export default function PapersLibrary({ onBackToSearch }) {
             <Search className="w-4 h-4 text-muted-foreground absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
-              className="bg-card border border-border rounded-lg pl-9 pr-3 py-1.5 text-xs sm:text-sm text-foreground placeholder:text-muted-foreground outline-none focus:border-primary w-48 sm:w-64"
+              className="bg-card border border-input rounded-lg pl-9 pr-3 py-1.5 text-xs sm:text-sm text-foreground placeholder:text-muted-foreground outline-none focus:border-primary w-48 sm:w-64"
               placeholder="Filter by title or ID..."
               value={filterText}
               onChange={(e) => setFilterText(e.target.value)}

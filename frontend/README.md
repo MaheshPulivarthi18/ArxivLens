@@ -11,7 +11,7 @@ Run from `frontend/`:
 | `npm ci` | Install the exact dependencies from `package-lock.json` |
 | `npm run dev` | Dev server on :5173; proxies `/v1` to the query API on :8080 |
 | `npm run lint` | oxlint |
-| `npm test` | Vitest component tests (jsdom, no network); test files are `src/**/*.test.jsx` |
+| `npm test` | Vitest component tests (jsdom, no network); test files are `src/**/*.test.{js,jsx}` |
 | `npm run build` | Production build |
 
 CI runs `npm ci`, `npm run lint`, `npm test` and `npm run build` on every PR.

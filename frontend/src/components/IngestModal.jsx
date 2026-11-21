@@ -79,7 +79,7 @@ export default function IngestModal({ isOpen, onClose, onIngestSuccess, onAskAbo
             <div className="flex gap-2">
               <input
                 type="text"
-                className="flex-1 bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground outline-none focus:border-primary font-mono"
+                className="flex-1 bg-background border border-input rounded-lg px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground outline-none focus:border-primary font-mono"
                 placeholder="e.g. 2608.20154 or https://arxiv.org/abs/2608.20154"
                 value={inputVal}
                 onChange={(e) => setInputVal(e.target.value)}
