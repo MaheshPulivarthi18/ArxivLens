@@ -74,13 +74,7 @@ func TestHNSWVectorHits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
-	if skip, fatal := hnswGuard(others, os.Getenv("CI") != ""); fatal || skip {
-		const why = "DB holds %d non-synth papers; the seed adds synthetic chunks to every paper, so use an empty, migrated DB"
-		if fatal { // never let a skip pass as green in db.yml
-			t.Fatalf(why, others)
-		}
-		t.Skipf(why, others)
-	}
+	applyHNSWGuard(t, others, os.Getenv("CI"))
 	t.Cleanup(func() { // runs even when the test fails; FK cascades remove chunks, embeddings and pages
 		if _, err := d.Pool.Exec(ctx, itDeleteSynthSQL); err != nil {
 			t.Errorf("cleanup: %v", err)
@@ -264,32 +258,60 @@ func itPrepare(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 	return others, err
 }
 
-// hnswGuard decides whether TestHNSWVectorHits refuses a DB that holds others non-synth papers:
-// fatal under CI (a skip must never pass as green in db.yml), skip otherwise.
-func hnswGuard(others int, ci bool) (skip, fatal bool) {
-	if others > 0 {
-		return !ci, ci
+// applyHNSWGuard refuses a DB that holds others non-synth papers: Fatalf when ciEnv (the raw CI env value) is
+// non-empty, so a skip never passes as green in db.yml, Skipf otherwise. TestHNSWVectorHits calls it as one
+// statement, so the whole skip/fatal decision is pinned by TestHNSWGuard.
+func applyHNSWGuard(tb testing.TB, others int, ciEnv string) {
+	tb.Helper()
+	if others == 0 {
+		return
 	}
-	return false, false
+	const why = "DB holds %d non-synth papers; the seed adds synthetic chunks to every paper, so use an empty, migrated DB"
+	if ciEnv != "" {
+		tb.Fatalf(why, others)
+	} else {
+		tb.Skipf(why, others)
+	}
 }
 
-// TestHNSWGuard pins hnswGuard; it needs no DATABASE_URL.
+// guardRecorder records the calls applyHNSWGuard makes instead of stopping the test. Every other way to fail or
+// skip is recorded too, so a mutant that switches to Fatal, Skip, FailNow or SkipNow is counted, not obeyed.
+type guardRecorder struct {
+	testing.TB
+	fatals, skips, others []string
+}
+
+func (r *guardRecorder) Helper()                   {}
+func (r *guardRecorder) Fatalf(f string, a ...any) { r.fatals = append(r.fatals, fmt.Sprintf(f, a...)) }
+func (r *guardRecorder) Skipf(f string, a ...any)  { r.skips = append(r.skips, fmt.Sprintf(f, a...)) }
+func (r *guardRecorder) Fatal(a ...any)            { r.others = append(r.others, "Fatal "+fmt.Sprint(a...)) }
+func (r *guardRecorder) Skip(a ...any)             { r.others = append(r.others, "Skip "+fmt.Sprint(a...)) }
+func (r *guardRecorder) FailNow()                  { r.others = append(r.others, "FailNow") }
+func (r *guardRecorder) SkipNow()                  { r.others = append(r.others, "SkipNow") }
+
+// TestHNSWGuard pins applyHNSWGuard for others x raw CI values; it needs no DATABASE_URL.
 func TestHNSWGuard(t *testing.T) {
 	for _, tc := range []struct {
-		others          int
-		ci, skip, fatal bool
+		others        int
+		ci            string
+		fatals, skips int
 	}{
-		{others: 0, ci: false},
-		{others: 0, ci: true},
-		{others: 1, ci: false, skip: true},
-		{others: 1, ci: true, fatal: true},
-		{others: 5, ci: false, skip: true},
-		{others: 5, ci: true, fatal: true},
+		{0, "", 0, 0}, {0, "true", 0, 0}, {0, "1", 0, 0},
+		{1, "", 0, 1}, {1, "true", 1, 0}, {1, "1", 1, 0},
+		{5, "", 0, 1}, {5, "true", 1, 0}, {5, "1", 1, 0},
 	} {
-		t.Run(fmt.Sprintf("others=%d/ci=%t", tc.others, tc.ci), func(t *testing.T) {
-			if skip, fatal := hnswGuard(tc.others, tc.ci); skip != tc.skip || fatal != tc.fatal {
-				t.Errorf("hnswGuard(%d, %t) = skip %t, fatal %t; want skip %t, fatal %t",
-					tc.others, tc.ci, skip, fatal, tc.skip, tc.fatal)
+		t.Run(fmt.Sprintf("others=%d/CI=%q", tc.others, tc.ci), func(t *testing.T) {
+			r := &guardRecorder{TB: t}
+			applyHNSWGuard(r, tc.others, tc.ci)
+			if len(r.fatals) != tc.fatals || len(r.skips) != tc.skips || len(r.others) != 0 {
+				t.Fatalf("Fatalf %q, Skipf %q, other %q; want %d Fatalf, %d Skipf, no other call",
+					r.fatals, r.skips, r.others, tc.fatals, tc.skips)
+			}
+			for _, msg := range append(r.fatals, r.skips...) {
+				if !strings.Contains(msg, fmt.Sprintf("DB holds %d non-synth papers", tc.others)) ||
+					!strings.Contains(msg, "use an empty, migrated DB") {
+					t.Errorf("message %q lacks the count %d or %q", msg, tc.others, "use an empty, migrated DB")
+				}
 			}
 		})
 	}
