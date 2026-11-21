@@ -27,7 +27,8 @@ type fakeSearcher struct {
 
 func (f *fakeSearcher) HybridSearch(_ context.Context, _ string, _ []string, limit int, rerank bool) ([]SearchHit, error) {
 	f.gotLimit, f.gotRerank = limit, rerank
-	return f.hits, f.err
+	// Like the real HybridSearch, return at most limit hits.
+	return f.hits[:min(limit, len(f.hits))], f.err
 }
 
 // fakeVerifier scores each (claim, passage) pair with score and records every call. err fails every call;
@@ -211,8 +212,8 @@ func TestAskAnswersWithExtractedCitations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if s.gotLimit != 5 || !s.gotRerank {
-		t.Errorf("HybridSearch(limit=%d, rerank=%v), want default limit 5 and rerank", s.gotLimit, s.gotRerank)
+	if s.gotLimit != RerankPool || !s.gotRerank {
+		t.Errorf("HybridSearch(limit=%d, rerank=%v), want the whole pool (%d) reranked", s.gotLimit, s.gotRerank, RerankPool)
 	}
 	want := "The Method section shows that the proposed method improves accuracy on every benchmark [1]. " +
 		"The Results section shows that the proposed method improves accuracy on every benchmark [2]."
@@ -577,6 +578,61 @@ func TestAskResponseShapeAndConstructor(t *testing.T) {
 }
 
 // batchHits are three relevant hits with distinct content.
+// Eval a021: the relevance cutoff runs on the whole ranked pool before the cut to maxCitations. Here the pool's top 5
+// (Kaplan, Adam, Adam, Kaplan, LoRA) all score below 0.45 and the strongly relevant Adam passage is 6th, behind
+// the two weaker Adam passages that took Adam's ADR-0016 slots. Cutting to 5 first left nothing and Ask refused.
+func TestAskCutoffRunsOnWholePoolBeforeTop5(t *testing.T) {
+	hit := func(id int64, paper, section string, rerank float64, rank int) SearchHit {
+		return SearchHit{ChunkID: id, ArxivID: paper, Title: "Paper", SectionTitle: section, Content: hitContent(section),
+			RerankScore: rerank, poolRank: rank}
+	}
+	pool := []SearchHit{
+		hit(1, "2001.08361", "Background", 0.405, 1), hit(2, "1412.6980", "Front matter", 0.412, 2),
+		hit(3, "1412.6980", "Extensions", 0.395, 3), hit(4, "2001.08361", "Figures", 0.005, 4),
+		hit(5, "2106.09685", "Hyperparameters", 0.015, 5), hit(6, "1412.6980", "Introduction", 0.979, 6),
+		hit(7, "1412.6980", "Experiments", 0.322, 7),
+	}
+	s := &fakeSearcher{hits: pool}
+	r := &RAGService{searchEngine: s, verifier: simVerifier(constSim(0.9)), extractor: prefersImproves()}
+	resp, err := r.Ask(context.Background(), "How does Adam compute per-parameter adaptive learning rates?", nil, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.RefusalReason != "" || len(resp.Citations) == 0 || resp.Citations[0].ChunkID != 6 {
+		t.Fatalf("resp = %+v, want an answer citing chunk 6 (Introduction, 0.979)", resp)
+	}
+}
+
+// Survivors of the cutoff go back into pool order and get the per-paper cap before the cut to maxCitations.
+func TestAskRelevantHitsKeepPoolOrderAndPaperCap(t *testing.T) {
+	hit := func(id int64, paper string, rank int) SearchHit {
+		return SearchHit{ChunkID: id, ArxivID: paper, Title: "Paper", SectionTitle: "S", Content: hitContent("S"),
+			RerankScore: 0.9, poolRank: rank}
+	}
+	// Returned out of pool order (as HybridSearch's own top-5 cap leaves it); three passages of paper A first.
+	s := &fakeSearcher{hits: []SearchHit{hit(1, "A", 1), hit(2, "A", 2), hit(4, "B", 4), hit(3, "A", 3), hit(5, "C", 5)}}
+	r := &RAGService{searchEngine: s, verifier: simVerifier(constSim(0.9)), extractor: prefersImproves()}
+	resp, _ := r.Ask(context.Background(), "q", nil, 3)
+	got := []int64{}
+	for _, c := range resp.Citations {
+		got = append(got, c.ChunkID)
+	}
+	if want := []int64{1, 2, 4}; !reflect.DeepEqual(dedupe(got), want) {
+		t.Fatalf("cited chunks = %v, want %v (A capped at 2, then B)", got, want)
+	}
+}
+
+func dedupe(ids []int64) []int64 {
+	seen, out := map[int64]bool{}, []int64{}
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 func batchHits() []SearchHit {
 	return []SearchHit{ragHit(1, "Method", 0.9), ragHit(2, "Results", 0.8), ragHit(3, "Discussion", 0.7)}
 }
