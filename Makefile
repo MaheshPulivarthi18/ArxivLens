@@ -8,10 +8,10 @@ export PYTHONPATH := $(CURDIR)
 
 .DEFAULT_GOAL := help
 .PHONY: help setup-py setup-fe build build-go build-fe lint lint-go lint-fe \
-        test-unit test-go test-py test-fe test-full infra-up infra-down stack-up stack-down migrate eval eval-seed
+        test-unit test-go test-py test-py-light test-py-ml test-fe test-full infra-up infra-down stack-up stack-down migrate eval eval-seed
 
 help: ## List targets
-	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
 
 # --- setup -------------------------------------------------------------------
 setup-py: ## Install Python deps into the active environment
@@ -45,8 +45,16 @@ test-unit: test-go test-py ## Fast tests, no infra (Go + M0 + eval data). Fronte
 test-go: ## Go unit tests
 	go test ./...
 
-test-py: ## Python unit tests: M0 + eval data + worker heartbeat + processor pages (M0 downloads BGE model on first run)
-	$(PYTEST) -q tests/test_m0.py tests/test_evals_data.py tests/test_worker_heartbeat.py tests/test_processor_pages.py tests/test_verify.py tests/test_arxiv_replay.py
+PY_LIGHT_TESTS := tests/test_evals_data.py tests/test_worker_heartbeat.py tests/test_arxiv_replay.py
+PY_ML_TESTS    := tests/test_m0.py tests/test_verify.py tests/test_processor_pages.py
+
+test-py: test-py-light test-py-ml ## Python unit tests: test-py-light + test-py-ml
+
+test-py-light: ## Python tests without torch: eval data, worker heartbeat, arXiv replay (pip install -r requirements-light.txt)
+	$(PYTEST) -q $(PY_LIGHT_TESTS)
+
+test-py-ml: ## Python tests needing torch/PyMuPDF: M0, verifier, processor pages (downloads BGE model on first run)
+	$(PYTEST) -q $(PY_ML_TESTS)
 
 test-fe: ## Frontend tests (Vitest; run npm ci in frontend/ first)
 	cd frontend && npm test

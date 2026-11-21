@@ -46,11 +46,18 @@ jobs:
         with:
           path: ~/.cache/huggingface
           key: hf-${{ runner.os }}-bge-base-en-v1.5
-      - name: Install deps (CPU-only torch)
+      - name: Light tests without the ML stack (make test-py-light)
         run: |
           python -m pip install --upgrade pip
-          pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements-dev.txt
-      - run: make test-py
+          pip install -r requirements-light.txt
+          echo "ML packages installed (must be none):"
+          if pip list 2>/dev/null | grep -iE 'torch|transformers|sentence|PyMuPDF'; then
+            echo "::error::ML stack present before the light tests"; exit 1
+          fi
+          make test-py-light
+      - name: Install deps (CPU-only torch)
+        run: pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements-dev.txt
+      - run: make test-py-ml
       - name: Kafka client tests (commit-after-process, DLQ, shutdown; fakes only)
         run: python -m pytest -v tests/test_kafka_client.py
 
