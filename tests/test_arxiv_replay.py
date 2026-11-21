@@ -17,8 +17,9 @@ class Upstream:
     """Fake arXiv: scripted (status, body) per path prefix; records requests."""
 
     def __init__(self):
-        self.script = {}  # "api" | "pdf" -> list of (status, body, headers); last one repeats
+        self.script = {}  # exact path, else "api" | "pdf" -> list of (status, body, headers); last one repeats
         self.requests = []
+        self.on_request = None  # optional hook, called with the path before answering
         up = self
 
         class H(BaseHTTPRequestHandler):
@@ -28,7 +29,9 @@ class Upstream:
             def do_GET(self):
                 kind = "api" if self.path.startswith("/api") else "pdf"
                 up.requests.append((self.path, self.headers.get("User-Agent")))
-                seq = up.script[kind]
+                if up.on_request:
+                    up.on_request(self.path)
+                seq = up.script.get(self.path) or up.script[kind]
                 status, body, headers = seq.pop(0) if len(seq) > 1 else seq[0]
                 self.send_response(status)
                 for k, v in headers.items():
@@ -49,6 +52,16 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(rp, "PDF_UPSTREAM", up.base + "/pdf/")
     monkeypatch.setattr(rp, "INTERVAL", 0.0)
     monkeypatch.setattr(rp, "RETRY_WAITS", (0.01, 0.01, 0.01))
+    # Guard: a prefetch that loops (e.g. extra passes without a budget) fails the test instead of hanging it.
+    real_sleep, sleeps = rp.time.sleep, []
+
+    def bounded_sleep(s):
+        sleeps.append(s)
+        if len(sleeps) > 100:
+            raise RuntimeError("runaway prefetch loop (test guard)")
+        real_sleep(min(s, 0.05))
+
+    monkeypatch.setattr(rp.time, "sleep", bounded_sleep)
 
     def start(record):
         rp.Handler.rec = rp.Recorder(str(tmp_path), record)
@@ -175,3 +188,84 @@ def test_prefetch_budget_stops_early_and_reports_saved(env, tmp_path, monkeypatc
     monkeypatch.setattr(rp.time, "monotonic", lambda: next(clock, 100.0))
     assert rp.main(["prefetch", "--dir", str(tmp_path / "s"), "--ids", str(ids), "--budget-seconds", "10"]) == 1
     assert out.read_text() == "saved=2\n"  # the first query only: its feed and its one PDF (entry "x" -> x.pdf)
+
+
+EMPTY_FEED = b'<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"></feed>'
+
+
+class Clock:
+    """Fake monotonic clock: sleeps advance it instantly and are recorded; each upstream request takes 2 s."""
+
+    def __init__(self, monkeypatch, up):
+        self.t, self.sleeps, self.request_times = 0.0, [], []
+        monkeypatch.setattr(rp.time, "monotonic", lambda: self.t)
+        monkeypatch.setattr(rp.time, "sleep", self.sleep)
+        up.on_request = self.request
+
+    def sleep(self, s):
+        self.sleeps.append((self.t, s))
+        self.t += s
+
+    def request(self, path):
+        self.request_times.append((self.t, path))
+        self.t += 2.0
+
+
+def api_paths(up):
+    return [p for p, _ in up.requests if p.startswith("/api")]
+
+
+def test_prefetch_retries_only_failed_queries_until_they_succeed(env, tmp_path, monkeypatch, capsys):
+    up, _ = env
+    a, b = "/api/query?id_list=2401.00001", "/api/query?id_list=2401.00002"
+    # One pass makes 4 attempts per item; the fifth request for A succeeds. B succeeds (no entries) at once.
+    up.script = {a: [(429, b"", {"Retry-After": "90"})] * 5 + [(200, FEED, {})],
+                 b: [(200, EMPTY_FEED, {})], "pdf": [(200, PDF, {})]}
+    monkeypatch.setattr(rp, "PASS_WAIT", 60)
+    clock = Clock(monkeypatch, up)
+    out = tmp_path / "gh_output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    store = tmp_path / "s"
+    assert rp.main(["prefetch", "--dir", str(store), "--id", "2401.00001", "--id", "2401.00002",
+                    "--budget-seconds", "1000"]) == 0
+    assert rp.Recorder(str(store), False).load("api", rp.api_key("id_list=2401.00001")) == FEED
+    paths = [p for p, _ in up.requests]
+    assert paths == [a] * 4 + [b] + [a] * 2 + ["/pdf/x.pdf"]  # pass 2: only A, then A's PDF
+    assert all(ua == rp.USER_AGENT for _, ua in up.requests)
+    assert [s for _, s in clock.sleeps if s > rp.MAX_WAIT] == [90]  # one cool-down, >= Retry-After > PASS_WAIT
+    err = capsys.readouterr()
+    assert "retrying 1 queries in 90s" in err.err
+    assert '"hits": 0' in err.out  # B's stored feed was not even re-read in pass 2
+    assert out.read_text() == "saved=3\n"  # pass 1: B's feed; pass 2: A's feed + x.pdf
+
+
+def test_prefetch_without_budget_makes_one_pass(env, tmp_path, monkeypatch):
+    up, _ = env
+    up.script = {"api": [(429, b"", {})] * 4 + [(200, FEED, {})], "pdf": [(200, PDF, {})]}
+    monkeypatch.setattr(rp, "PASS_WAIT", 0)  # a second pass (wrong here) would not sleep, and would succeed
+    assert rp.main(["prefetch", "--dir", str(tmp_path / "s"), "--id", "2401.00001"]) == 1
+    assert len(up.requests) == 4  # one pass: 4 attempts, no second pass
+
+
+def test_prefetch_never_requests_or_sleeps_past_the_deadline(env, tmp_path, monkeypatch, capsys):
+    up, _ = env
+    up.script = {"/api/query?id_list=2401.00001": [(429, b"", {})], "api": [(200, FEED, {})],
+                 "pdf": [(200, PDF, {})]}
+    monkeypatch.setattr(rp, "INTERVAL", 3.0)
+    monkeypatch.setattr(rp, "RETRY_WAITS", (5, 15, 45))
+    monkeypatch.setattr(rp, "PASS_WAIT", 60)
+    clock = Clock(monkeypatch, up)
+    budget = 200.0  # the clock starts at 0 at the first request: deadline 200
+    assert rp.main(["prefetch", "--dir", str(tmp_path / "s"), "--id", "2401.00001", "--id", "2401.00002",
+                    "--budget-seconds", str(budget)]) == 1
+    assert clock.sleeps and all(t + s <= budget for t, s in clock.sleeps), clock.sleeps
+    assert clock.request_times and all(t < budget for t, _ in clock.request_times), clock.request_times
+    assert len(api_paths(up)) > 4  # a second pass ran within the budget
+    assert "prefetch FAILED for 1: api?id_list=2401.00001 (time budget)" in capsys.readouterr().err
+
+
+def test_prefetch_loop_fetches_only_through_recorder():
+    # Politeness (INTERVAL, User-Agent) lives in Recorder.fetch: the prefetch path must not call urllib itself.
+    import inspect
+    for fn in (rp.main, rp.prefetch_query, rp.get_or_fetch):
+        assert "urllib.request" not in inspect.getsource(fn) and "urlopen" not in inspect.getsource(fn)

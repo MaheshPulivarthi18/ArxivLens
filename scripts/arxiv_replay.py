@@ -20,10 +20,21 @@ throttling, longer than a client's 60 s stall timeout. So CI warms the store fir
 the same query strings as the Go code (crawler: search_query/start/max_results/sortBy/sortOrder; ingester:
 id_list), and the services then only see hits.
 
+Prefetch time budget (--budget-seconds N > 0; the clock starts at the first upstream request): when a pass over the
+queries ends with failures, prefetch waits a cool-down (PASS_WAIT, or longer if arXiv sent a longer Retry-After) and
+runs another pass over only the queries that had a failure (what they already saved is a hit), until nothing fails
+(exit 0) or the budget is spent (exit 1, naming what is still missing). No upstream request starts after the
+deadline and no retry, politeness or cool-down sleep runs past it: a wait that would reach it is not taken, and the
+fetch it was for is reported as "(time budget)". So the worst case is the budget plus one in-flight request
+(TIMEOUT), plus the seconds spent reading cached hits before the first request: 1020 + 120 = 1140 s < 1200 s (the
+20-min step timeout in stack.yml) and 2520 + 120 = 2640 s < 2700 s (45 min, eval.yml). With no budget (0), prefetch
+makes exactly one pass.
+
 Usage:
   python3 scripts/arxiv_replay.py serve    --dir .arxiv-replay [--port 8099] [--record]
   python3 scripts/arxiv_replay.py prefetch --dir .arxiv-replay --ids evals/corpus.txt
-  python3 scripts/arxiv_replay.py prefetch --dir .arxiv-replay --search "cat:cs.LG" --limit 2 --id 2608.20331
+  python3 scripts/arxiv_replay.py prefetch --dir .arxiv-replay --search "cat:cs.LG" --limit 2 --id 2608.20331 \
+      --budget-seconds 1020
 GET /stats returns {"hits", "misses", "upstream_fetches", "upstream_failures", "saved"}.
 """
 
@@ -47,6 +58,8 @@ INTERVAL = 3.0             # arXiv politeness: one request per 3 s
 RETRY_WAITS = (5, 15, 45)  # seconds before retries 1..3; at least Retry-After, at most MAX_WAIT
 MAX_WAIT = 60
 TIMEOUT = 120
+PASS_WAIT = 60             # prefetch with a budget: cool-down before re-running the queries that failed
+BUDGET = 0                 # fetch status: not attempted, the prefetch time budget is spent
 
 
 def api_key(query: str) -> str:
@@ -70,8 +83,11 @@ def is_pdf(body: bytes) -> bool:
 class Recorder:
     """Serialized, rate-limited upstream fetches with retry, plus the on-disk store."""
 
-    def __init__(self, root: str, record: bool):
+    def __init__(self, root: str, record: bool, budget: float = 0):
         self.root, self.record = root, record
+        self.budget = budget   # seconds (0: no limit); the deadline is set at the first upstream fetch
+        self.deadline = None
+        self.retry_after = 0   # largest Retry-After seen since the caller last reset it
         os.makedirs(os.path.join(root, "api"), exist_ok=True)
         os.makedirs(os.path.join(root, "pdf"), exist_ok=True)
         self.lock = threading.Lock()  # one upstream request at a time
@@ -98,15 +114,28 @@ class Recorder:
             json.dump(meta, f)
         self.stats["saved"] += 1
 
+    def budget_allows(self, wait: float) -> bool:
+        """False if waiting `wait` seconds from now would reach the deadline (never, without a budget)."""
+        return self.deadline is None or time.monotonic() + wait < self.deadline
+
     def fetch(self, url: str, valid) -> tuple:
-        """(status, body). Retries 429/5xx/network errors; returns the last failure status (or 502)."""
+        """(status, body). Retries 429/5xx/network errors; returns the last failure status (or 502), or BUDGET
+        if the time budget ran out before the next attempt could start."""
         status, body = 502, b""
         for attempt in range(len(RETRY_WAITS) + 1):
             with self.lock:
-                gap = INTERVAL - (time.monotonic() - self.last)
+                now = time.monotonic()
+                if self.budget > 0 and self.deadline is None:
+                    self.deadline = now + self.budget
+                gap = INTERVAL - (now - self.last)
                 if gap > 0:
+                    if not self.budget_allows(gap):
+                        return BUDGET, b""
                     time.sleep(gap)
-                self.last = time.monotonic()
+                    now = time.monotonic()
+                if self.deadline is not None and now >= self.deadline:
+                    return BUDGET, b""
+                self.last = now
                 self.stats["upstream_fetches"] += 1
                 retry_after = 0
                 try:
@@ -119,6 +148,7 @@ class Recorder:
                         retry_after = int(e.headers.get("Retry-After", "0"))
                     except ValueError:
                         retry_after = 0
+                    self.retry_after = max(self.retry_after, retry_after)
                 except Exception as e:  # timeouts, resets, DNS
                     status, body = 504, b""
                     print(f"[replay] upstream error {type(e).__name__} for {url}", file=sys.stderr, flush=True)
@@ -130,7 +160,10 @@ class Recorder:
             print(f"[replay] upstream {status} for {url} (attempt {attempt + 1})", file=sys.stderr, flush=True)
             if (status != 429 and status < 500) or attempt == len(RETRY_WAITS):
                 break
-            time.sleep(min(max(RETRY_WAITS[attempt], retry_after), MAX_WAIT))
+            wait = min(max(RETRY_WAITS[attempt], retry_after), MAX_WAIT)
+            if not self.budget_allows(wait):
+                return BUDGET, b""
+            time.sleep(wait)
         return status, b""
 
 
@@ -192,28 +225,34 @@ def entry_pdf_names(feed: bytes) -> list:
     return names
 
 
-def get_or_fetch(rec: Recorder, kind: str, key: str, url: str, valid, meta: dict):
+def get_or_fetch(rec: Recorder, kind: str, key: str, url: str, valid, meta: dict) -> tuple:
+    """(body, 200) from the store or upstream (saved), or (None, failure status)."""
     body = rec.load(kind, key)
     if body is not None:
         rec.stats["hits"] += 1
-        return body
+        return body, 200
     rec.stats["misses"] += 1
     status, body = rec.fetch(url, valid)
     if status != 200:
-        return None
+        return None, status
     rec.save(kind, key, body, meta)
-    return body
+    return body, 200
+
+
+def missing(name: str, status: int) -> str:
+    return name + (" (time budget)" if status == BUDGET else "")
 
 
 def prefetch_query(rec: Recorder, query: str) -> list:
     """Fetch an API query and every PDF its entries reference. Returns the names that could not be fetched."""
-    feed = get_or_fetch(rec, "api", api_key(query), f"{API_UPSTREAM}?{query}", is_feed, {"query": query})
+    feed, status = get_or_fetch(rec, "api", api_key(query), f"{API_UPSTREAM}?{query}", is_feed, {"query": query})
     if feed is None:
-        return [f"api?{query}"]
+        return [missing(f"api?{query}", status)]
     failed = []
     for name in entry_pdf_names(feed):
-        if get_or_fetch(rec, "pdf", name, PDF_UPSTREAM + name, is_pdf, {"name": name}) is None:
-            failed.append(name)
+        body, status = get_or_fetch(rec, "pdf", name, PDF_UPSTREAM + name, is_pdf, {"name": name})
+        if body is None:
+            failed.append(missing(name, status))
     return failed
 
 
@@ -246,7 +285,8 @@ def main(argv=None) -> int:
     pf.add_argument("--search", help="crawler search query; fetched as the crawler's first page")
     pf.add_argument("--limit", type=int, default=2)
     pf.add_argument("--budget-seconds", type=float, default=0,
-                    help="stop starting new queries after this long (0: no limit); progress so far is kept")
+                    help="time budget from the first upstream request: failed queries are retried in further "
+                         "passes until it is spent (0: no limit, one pass); progress so far is kept")
     args = ap.parse_args(argv)
 
     if args.cmd == "serve":
@@ -256,17 +296,33 @@ def main(argv=None) -> int:
         srv.serve_forever()
         return 0
 
-    rec = Recorder(args.dir, True)
+    rec = Recorder(args.dir, True, max(args.budget_seconds, 0))
     ids = (corpus_ids(args.ids) if args.ids else []) + args.id
     queries = [f"id_list={i}" for i in dict.fromkeys(ids)]
     if args.search:
         queries.append(search_query_string(args.search, args.limit))
-    failed, deadline = [], time.monotonic() + args.budget_seconds if args.budget_seconds > 0 else None
-    for i, q in enumerate(queries):
-        if deadline is not None and time.monotonic() > deadline:
-            failed += [f"api?{x} (time budget)" for x in queries[i:]]
+    pending, passes = queries, 0
+    while True:  # one pass without a budget; with one, re-run the failed queries until none fail or time is up
+        passes += 1
+        failed, retry = [], []
+        rec.retry_after = 0
+        for i, q in enumerate(pending):
+            if not rec.budget_allows(0):
+                failed += [f"api?{x} (time budget)" for x in pending[i:]]
+                break
+            f = prefetch_query(rec, q)
+            if f:
+                failed += f
+                retry.append(q)
+        if not failed or rec.deadline is None:
             break
-        failed += prefetch_query(rec, q)
+        wait = max(PASS_WAIT, rec.retry_after)
+        if not rec.budget_allows(wait):  # the next pass could not start before the deadline
+            break
+        print(f"[replay] prefetch pass {passes}: {len(failed)} failed; retrying {len(retry)} queries in {wait:.0f}s",
+              file=sys.stderr, flush=True)
+        time.sleep(wait)
+        pending = retry
     print(f"[replay] prefetch: {len(queries)} queries, stats={json.dumps(rec.stats)}", flush=True)
     # CI saves the store whenever this run added to it, even if incomplete, so recording converges across runs.
     if os.environ.get("GITHUB_OUTPUT"):
