@@ -6,7 +6,8 @@ import { toast } from 'sonner';
 import { Tooltip, TooltipContent, TooltipTrigger } from './tooltip';
 import { Popover, PopoverContent, PopoverTrigger } from './popover';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from './collapsible';
-import { ScrollArea } from './scroll-area';
+import * as ScrollAreaPrimitive from '@radix-ui/react-scroll-area';
+import { ScrollArea, ScrollBar } from './scroll-area';
 import { Separator } from './separator';
 import { Toaster } from './sonner';
 
@@ -195,5 +196,89 @@ describe('Toaster (AC5)', () => {
     const { desc, item } = await showToast('t-merge', 'd-merge');
     expect(item.querySelector('[data-title]')).toHaveClass('x-title');
     expect(desc).toHaveClass('!text-muted-foreground', 'x-desc');
+  });
+});
+
+// FE-0g: pins the behaviours FE-0d's tests left open (QA FE-0d "Missing tests" M35–M39).
+describe('ScrollBar orientation and className (FE-0g AC1)', () => {
+  // type="always" mounts the scrollbar without overflow (the default "hover" type hides it in jsdom).
+  function renderBar(barProps) {
+    render(
+      <ScrollAreaPrimitive.Root type="always">
+        <ScrollAreaPrimitive.Viewport>
+          <p>Bar content</p>
+        </ScrollAreaPrimitive.Viewport>
+        <ScrollBar data-testid="bar" {...barProps} />
+      </ScrollAreaPrimitive.Root>,
+    );
+    return screen.getByTestId('bar');
+  }
+
+  it('horizontal gets the horizontal size/border classes plus the caller className', () => {
+    const bar = renderBar({ orientation: 'horizontal', className: 'x-bar' });
+    expect(bar).toHaveAttribute('data-orientation', 'horizontal');
+    expect(bar).toHaveClass('h-2.5', 'flex-col', 'border-t', 'x-bar');
+    expect(bar).not.toHaveClass('w-2.5');
+    expect(bar).not.toHaveClass('border-l');
+  });
+
+  it('defaults to vertical with the vertical size/border classes', () => {
+    const bar = renderBar({});
+    expect(bar).toHaveAttribute('data-orientation', 'vertical');
+    expect(bar).toHaveClass('h-full', 'w-2.5', 'border-l');
+    expect(bar).not.toHaveClass('flex-col');
+  });
+});
+
+describe('Toaster position (FE-0g AC2)', () => {
+  it('places the toast list bottom-right', async () => {
+    render(<Toaster />);
+    act(() => {
+      toast('t-position', { description: 'd-position' });
+    });
+    const desc = await screen.findByText('d-position');
+    const list = desc.closest('[data-sonner-toaster]');
+    expect(list).not.toBeNull();
+    expect(list.tagName).toBe('OL');
+    expect(list).toHaveAttribute('data-y-position', 'bottom');
+    expect(list).toHaveAttribute('data-x-position', 'right');
+  });
+});
+
+describe('Separator className (FE-0g AC3)', () => {
+  it('merges the caller className with the base and size classes', () => {
+    const { container } = render(<Separator className="x-sep" />);
+    expect(container.firstChild).toHaveClass('x-sep', 'shrink-0', 'bg-border', 'h-px', 'w-full');
+  });
+});
+
+describe('Tooltip default delay (FE-0g AC4)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('opens on hover after the 300 ms default delay, not before', async () => {
+    vi.useFakeTimers();
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const ref = createRef();
+    render(
+      <Tooltip>
+        <TooltipTrigger>Hover me</TooltipTrigger>
+        <TooltipContent ref={ref}>Delayed tip</TooltipContent>
+      </Tooltip>,
+    );
+    await user.hover(screen.getByRole('button', { name: 'Hover me' }));
+    act(() => {
+      vi.advanceTimersByTime(250);
+    });
+    expect(ref.current).toBeNull();
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(100);
+    });
+    expect(ref.current).toBeInstanceOf(HTMLElement);
+    expect(ref.current).toHaveTextContent('Delayed tip');
+    expect(screen.getByRole('tooltip')).toHaveTextContent('Delayed tip');
   });
 });
