@@ -71,6 +71,31 @@ refusal (no `refusal_reason`, `citations: []`, see `evals/README.md`). "1 of 22"
 GPU-profile latency on Mahesh's reference Mac is in the PR descriptions of #46–#50 (reported, not re-measured; no
 run artifact), so it is not a baseline value here.
 
+## Real LLM (reported, local)
+Mahesh's own `make eval` with the LLM on, 2026-11-21 21:27Z: results `20261121T212749Z.json`, committed with its
+[evidence README](https://github.com/MaheshPulivarthi18/arxivlens-agents/blob/main/agents/reviews/EVAL-8/README.md)
+as `baseline-local-20261121T212749Z.json`. Reported, not re-measured, and not a CI baseline. Profile GPU (`mps`, Apple M4);
+Ollama `0.40.16`, `qwen2.5:3b-instruct` @ `357c53fb659c` (reported by Mahesh; that JSON predates the `llm` block).
+`GATE: PASS`. Extractive values are the CPU run above.
+
+| Metric | Real LLM (local, `mps`) | Extractive (CI, cpu-only) |
+|---|---|---|
+| Recall@5, Hybrid RRF + Rerank | 0.9850 | 0.9850 |
+| supported_citation_rate | 1.0000 (44 citations) | 1.0000 (60 citations) |
+| correct_refusal_rate | 1.0000 (22) | 1.0000 (22) |
+| ask_p95_ms (quick stage, gated on GPU) | 2423.4579 (PASS) | 13330.2916 (INFO) |
+| ask_errors | 0 | 0 |
+| (info) expected_paper_hit_rate | 1.0000 | 0.9545 |
+| (info) ask_p50_ms | 1674.0 | 10932.2 |
+| (report-only) ask_full_p50_ms / ask_full_p95_ms | 2083.1 / 16786.0 | — |
+| (report-only) citation_coverage | 1.0000 | 1.0000 |
+| (report-only) near_miss_correct_refusal_rate | 0.9333 of 15 (`n003` answered) | 0.8000 of 15 |
+| (report-only) refusal_reason_counts | `{"insufficient_evidence": 2}` | `{}` |
+
+Open observations (not yet triaged): `n003` was answered with one unsupported citation (chunk 239, score 0.0551),
+which `answer_kind` will classify on the next run; duplicate citations (`a001` cites chunk 98 / marker 2 three times,
+`a020` chunk 1680 / marker 1 twice); and the full-answer p95 of 16.8 s is well over the 3 s budget (report-only).
+
 ## Commands for the human (repo root)
 ```bash
 make setup-py                                         # host Python deps (CPU torch is fine)

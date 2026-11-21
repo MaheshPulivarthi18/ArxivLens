@@ -12,6 +12,8 @@ case to make a run pass**; a wrong threshold needs an Accepted ADR.
 | `refusal_near_miss.jsonl` | `{"id","question","answered_by","why_near","reviewed_by"}` (in-domain, answering paper not in corpus; report-only) | 10 |
 | `thresholds.json` | PRD §8 targets used by `scripts/eval_gate.py` | — |
 | `results/` | one JSON per gate run (git-ignored) | — |
+| `results/` → `llm` | which LLM answered (EVAL-8c, report-only, never gated): `model` (`LLM_MODEL` or `null`), `source: "env"`, `host` (host[:port] of `LLM_BASE_URL`, default `localhost:11434` only with a model; never the scheme, path, query, userinfo or key), `ollama_version`, `digest`, `digest_short` (first 12 hex, = `ollama list` ID) from `GET /api/version` and `/api/tags` (bearer `LLM_API_KEY`, 5 s, not called without `LLM_MODEL`; on failure `null` plus `probe_error`), `synthesized_answer_rate` (answered full responses with `answer_kind: synthesized` / all answered, every set; `null` if none answered) | — |
+| `results/` → `answers.cases[]` | adds `answer_kind` (`quoted`, `synthesized` or `null`) and each citation's ADR-0014 `status` (or `null`) | — |
 | `answer_judgments/` | `<run-id>.jsonl` human review labels, IDs only (EVAL-7, see Human review) | — |
 
 ## Running
@@ -97,6 +99,11 @@ embedder's device from `GET /healthz`. On `mps` or `cuda` (the GPU profile self-
 gated. On `cpu`, such as a GitHub runner, the p95 is still measured, saved and printed, labelled
 `INFO (cpu-only; not gated)`, and it can neither pass nor fail the run. If the device can't be read, the latency gate
 applies. Every quality check is gated on every machine, and so is a missing p95.
+
+**The results say which LLM answered** (EVAL-8c). The gate prints an `llm:` line next to `hardware:` and stores the
+`llm` block above. It only reports: no check reads it and the exit code never depends on it. It warns on stderr when
+answers were synthesized but `LLM_MODEL` is unset in the eval's env (export it for `make eval` too), or when `LLM_MODEL`
+is set but no answer was synthesized (every answer fell back to quoting).
 
 **The gated latency is the quick stage** (ADR-0019). For each answer- and refusal-set question the eval also calls
 `/v1/ask` with `"quick": true`, the quoted answer the reader sees first, and `ask_p50_ms` / `ask_p95_ms` time those
