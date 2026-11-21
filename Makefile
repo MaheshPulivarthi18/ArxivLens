@@ -1,7 +1,9 @@
 # ArxivLens harness. Agents and CI use these targets; keep them deterministic and secret-free.
 # Run `make help` for the list.
 
-PY      ?= python3
+# The project venv when it exists (so `make eval` / `make test-py` find numpy, torch, psycopg without activating
+# it), else python3 (CI installs into the runner's Python). Override with PY=... as before.
+PY      ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 PYTEST  ?= $(PY) -m pytest
 TESTS   ?= tests/
 export PYTHONPATH := $(CURDIR)

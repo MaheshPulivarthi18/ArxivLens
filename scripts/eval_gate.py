@@ -155,6 +155,22 @@ def print_table(checks: List[Dict[str, Any]], answers: Optional[Dict[str, Any]],
     print("=" * 78)
 
 
+def could_not_run_hint(e: BaseException) -> Optional[str]:
+    """A next step for the two setup mistakes that most often stop `make eval`, or None."""
+    if isinstance(e, ModuleNotFoundError):
+        return (f"missing Python module {e.name!r}: run with the project venv (make uses .venv/bin/python when it "
+                "exists; otherwise activate it or pass PY=...), after `make setup-py`")
+    if type(e).__name__ == "OperationalError":  # psycopg: server down, wrong port, wrong password
+        from services.common.config import config
+        url = config.postgres_url
+        where = url.rsplit("@", 1)[-1]  # host:port/db only, never the password
+        source = "DATABASE_URL" if os.getenv("DATABASE_URL") else "the default (DATABASE_URL unset)"
+        return (f"could not use Postgres at {where} from {source}. Start it with `make infra-up`, or point "
+                "DATABASE_URL at the ArxivLens database, e.g. "
+                "DATABASE_URL=postgresql://postgres:postgres@localhost:5432/arxivlens make eval")
+    return None
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Run retrieval + answer evals and gate on evals/thresholds.json "
                                      "(Product PRD §8). Needs Postgres with evals/corpus.txt indexed and the "
@@ -192,6 +208,9 @@ def main(argv=None) -> int:
                 raise ConnectionError(f"every /v1/ask request to {args.api_url} failed")
     except Exception as e:  # infra down, missing deps, etc.
         print(f"eval could not run: {type(e).__name__}: {e}", file=sys.stderr)
+        hint = could_not_run_hint(e)
+        if hint:
+            print(f"hint: {hint}", file=sys.stderr)
         return 2
 
     checks = check_thresholds(results, thresholds)

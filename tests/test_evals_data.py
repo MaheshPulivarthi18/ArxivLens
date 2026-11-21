@@ -1374,3 +1374,29 @@ def test_claims_and_citation_fields_leave_eval_results_unchanged():
         assert evaluate_answers.case_record("a1", "answer", cur, 5.0) == evaluate_answers.case_record("a1", "answer", old, 5.0)
     assert evaluate_answers.coverage_units(with_claims) == evaluate_answers.coverage_units(answered) == (2, 3)
     assert evaluate_answers.case_record("a1", "answer", with_claims, 5.0)["total_units"] == 3
+
+
+# --- could-not-run hints (make eval setup mistakes) ---
+
+def test_hint_for_missing_module_points_at_the_venv():
+    hint = eval_gate.could_not_run_hint(ModuleNotFoundError("No module named 'numpy'", name="numpy"))
+    assert "'numpy'" in hint and ".venv/bin/python" in hint and "make setup-py" in hint
+
+
+def test_hint_for_postgres_names_host_port_and_source_never_the_password(monkeypatch):
+    OperationalError = type("OperationalError", (Exception,), {})
+    monkeypatch.setenv("DATABASE_URL", "postgresql://postgres:s3cret@localhost:5433/arxivlens")
+    from services.common import config as cfg
+    monkeypatch.setattr(cfg.config, "postgres_url", "postgresql://postgres:s3cret@localhost:5433/arxivlens")
+    hint = eval_gate.could_not_run_hint(OperationalError("password authentication failed"))
+    assert "localhost:5433/arxivlens" in hint and "from DATABASE_URL" in hint and "make infra-up" in hint
+    assert "s3cret" not in hint
+
+
+def test_no_hint_for_other_errors():
+    assert eval_gate.could_not_run_hint(ValueError("x")) is None
+
+
+def test_make_prefers_project_venv():
+    with open(os.path.join(os.path.dirname(EVALS), "Makefile"), encoding="utf-8") as f:
+        assert "PY      ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)" in f.read()
