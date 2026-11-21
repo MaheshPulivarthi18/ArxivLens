@@ -15,11 +15,32 @@ import (
 //go:embed web/index.html
 var indexHTML []byte
 
+// The Server's dependencies are typed as the methods its handlers call, so the
+// handlers can be tested with fakes (RET-1d). The concrete types are *SearchEngine,
+// *RAGService, *db.DB and *PaperIngester.
+type hybridSearcher interface {
+	HybridSearch(ctx context.Context, queryString string, categories []string, limit int, rerank bool) ([]SearchHit, error)
+}
+
+type asker interface {
+	AskWith(ctx context.Context, question string, categories []string, maxCitations int, opts AskOptions) (*AskResponse, error)
+}
+
+type statusStore interface {
+	GetPaperStatus(ctx context.Context, arxivID string) (*db.PaperRecord, error)
+	GetSystemStats(ctx context.Context) (*db.SystemStats, error)
+}
+
+type paperIngester interface {
+	IngestPaper(ctx context.Context, input string) (*IngestResult, error)
+	DiscoverAndIngest(ctx context.Context, query string) (*IngestResult, error)
+}
+
 type Server struct {
-	searchEngine *SearchEngine
-	ragService   *RAGService
-	database     *db.DB
-	ingester     *PaperIngester
+	searchEngine hybridSearcher
+	ragService   asker
+	database     statusStore
+	ingester     paperIngester // nil interface when not configured (503 on ingest/discover)
 	port         int
 }
 
@@ -36,6 +57,12 @@ func NewServer(database *db.DB, searchEngine *SearchEngine, ragService *RAGServi
 }
 
 func (s *Server) SetIngester(ingester *PaperIngester) {
+	// A nil *PaperIngester stored in the interface would not be == nil, and the
+	// handlers' 503 "not configured" check would be skipped.
+	if ingester == nil {
+		s.ingester = nil
+		return
+	}
 	s.ingester = ingester
 }
 
