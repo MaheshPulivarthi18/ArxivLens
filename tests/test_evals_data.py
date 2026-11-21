@@ -4,6 +4,7 @@ Metric definitions: ADR-0006 (paper-level Recall@5) and ADR-0010 (rerank orderin
 https://github.com/MaheshPulivarthi18/arxivlens-agents/tree/main/docs/adr
 """
 
+import copy
 import json
 import math
 import os
@@ -1112,7 +1113,6 @@ def test_print_table_shows_report_only_block(capsys):
     assert "Citation coverage" in capsys.readouterr().out
 
 
-
 # EVAL-6b: a non-string refusal_reason (malformed response) is one error case, never a crash or "no reason".
 NON_STRING_REASONS = [["x"], {"k": 1}, 7, True, [], 0]
 
@@ -1139,6 +1139,128 @@ def test_evaluate_completes_on_non_string_refusal_reason():
     assert all(isinstance(k, str) for k in m["refusal_reason_counts"])
     assert [(r["id"], r["outcome"], r["refusal_reason"]) for r in m["cases"]] == \
         [("a1", "error", None), ("x1", "error", None), ("n1", "refusal", "all_citations_unsupported")]
+    json.dumps(m)
+
+
+# EVAL-6c: every malformed /v1/ask shape is one error case (or, for claims, an uncited unit), never a crash.
+NON_OBJECT_BODIES = [["x"], [], "s", 5, 0, True]
+
+
+def _run3(ask):
+    return evaluate_answers.evaluate(ANS, REF, ask, [{"id": "n1", "question": "qn"}])
+
+
+@pytest.mark.parametrize("body", NON_OBJECT_BODIES, ids=repr)
+def test_non_object_body_is_a_failed_request(body):
+    m = _run3(lambda q: (copy.deepcopy(body), 99999.0 if q == "qn" else 1234.0))
+    assert m["error_case_ids"] == ["a1", "x1"] and m["near_miss_error_ids"] == ["n1"] and m["ask_error_count"] == 2
+    assert m["requests_ok"] == 0 and m["correct_refusal_rate"] == 0.0 and m["expected_paper_hit_rate"] == 0.0
+    assert m["ask_p95_ms"] == 1234.0  # answer + refusal calls stay in the gated latency; near-miss stays out
+    assert [(r["outcome"], r["refusal_reason"], r["citations"]) for r in m["cases"]] == [("error", None, [])] * 3
+    assert evaluate_answers.classify(None) == "error"
+
+
+def test_all_non_object_bodies_trip_could_not_run(monkeypatch, tmp_path):
+    monkeypatch.setattr(eval_gate, "embedder_device", lambda url: None)
+    monkeypatch.setattr(evaluate_answers, "make_http_ask", lambda url, t, max_citations=5: lambda q: ([], 5.0))
+    assert eval_gate.main(["--skip-retrieval", "--results-dir", str(tmp_path)]) == 2
+
+
+@pytest.mark.parametrize("citations,kept", [
+    (5, []), ("s", []), ({"k": 1}, []), ({}, []), (True, []),
+    (["str", CITE], [CITE]), ([CITE, None], [CITE]), ([[CITE]], []),
+    ([{**CITE, "arxiv_id": 7}], None), ([CITE, {**CITE, "arxiv_id": ["1706.03762"]}], None),
+], ids=repr)
+def test_malformed_citations_are_one_error_case(citations, kept):
+    bad = {"answer": "X holds [1].", "citations": copy.deepcopy(citations)}
+    assert evaluate_answers.classify(bad) == "error"
+    assert evaluate_answers.classify({**bad, "refusal_reason": "all_citations_unsupported"}) == "error"
+    m = _run(bad, bad, near_miss=True, nm_resp=bad)
+    assert m["requests_ok"] == 2 and m["error_case_ids"] == ["a1", "x1"] and m["ask_error_count"] == 2
+    assert m["near_miss_error_ids"] == ["n1"] and m["correct_refusal_rate"] == 0.0
+    assert m["expected_paper_hit_rate"] == 0.0 and m["answer_refused_ids"] == []
+    assert m["citations_total"] == 0 and m["supported_citation_rate"] == 0.0
+    if kept is not None:
+        want = [{k: c.get(k) for k in ("arxiv_id", "chunk_id", "marker", "supported", "score")} for c in kept]
+        assert all(r["citations"] == want for r in m["cases"])
+    json.dumps(m)
+
+
+@pytest.mark.parametrize("arxiv_id", [None, "1706.03762v2"], ids=repr)
+def test_null_or_string_arxiv_id_is_well_formed(arxiv_id):
+    assert evaluate_answers.classify({"answer": "A [1].", "citations": [{**_cite(1), "arxiv_id": arxiv_id}]}) == "answered"
+
+
+@pytest.mark.parametrize("claims,cited", [
+    ([{"markers": "12"}], 0),          # a string is not a list of markers (not split into characters)
+    ([{"markers": 5}], 0),             # an int raised TypeError before EVAL-6c
+    ([{"markers": ["1"]}], 0), ([{"markers": [[1]]}], 0), ([{"markers": [True]}], 0), ([{"markers": [1, "x"]}], 0),
+    ([{"markers": None}], 0), (["claim"], 0), ([7], 0),
+    ([{"markers": [1]}], 1),           # control: a well-formed in-range marker is cited
+])
+def test_malformed_claims_count_as_uncited_units(claims, cited):
+    resp = {"answer": "X holds [1].", "citations": [_cite(1), _cite(2)], "claims": claims}
+    assert evaluate_answers.coverage_units(resp) == (cited, 1)
+    m = _run(resp, EARLY)
+    assert m["cases"][0]["outcome"] == "answered" and m["expected_paper_hit_rate"] == 1.0
+    assert m["citation_coverage"] == cited
+
+
+@pytest.mark.parametrize("marker", ["1", [1], {"k": 1}, None, True, 1.0], ids=repr)
+def test_non_int_citation_marker_is_ignored(marker):
+    resp = {"answer": "X holds [1].", "citations": [{**_cite(1), "marker": marker}], "claims": [{"markers": [1]}]}
+    assert evaluate_answers.coverage_units(resp) == (0, 1)
+    assert evaluate_answers.coverage_units({**resp, "claims": None}) == (0, 1)
+    assert evaluate_answers.classify(resp) == "answered"
+
+
+@pytest.mark.parametrize("answer", [5, ["X holds [1]."], {"k": 1}], ids=repr)
+def test_non_string_answer_has_no_sentence_units(answer):
+    m = _run({"answer": answer, "citations": [_cite(1)]}, EARLY)
+    assert m["cases"][0]["outcome"] == "answered" and m["cases"][0]["total_units"] == 0 and m["citation_coverage"] is None
+
+
+HOSTILE = [None, 0, 5, True, "s", [], ["x"], {}, {"k": 1}]
+POSITIONS = ["body", "citations", "citations[0]", "citations[0].arxiv_id", "citations[0].marker",
+             "claims", "claims[0]", "claims[0].markers", "claims[0].markers[0]"]
+
+
+def _hostile_response(pos, value):
+    resp = {"answer": "X holds [1].", "citations": [_cite(1)], "claims": [{"text": "X", "status": "supported", "markers": [1]}]}
+    value = copy.deepcopy(value)
+    if pos == "body":
+        return value
+    *path, last = pos.replace("[0]", ".0").split(".")
+    target = resp
+    for key in path:
+        target = target[int(key)] if key.isdigit() else target[key]
+    target[int(last) if last.isdigit() else last] = value
+    return resp
+
+
+def _expected_outcome(pos, value):
+    if pos == "body":
+        return "refusal" if isinstance(value, dict) else "error"  # {} / {"k": 1}: no citations, no reason
+    if pos == "citations":
+        return "refusal" if value is None or value == [] else "error"  # [] / null: today's early-refusal rule
+    if pos == "citations[0]":
+        return "answered" if isinstance(value, dict) else "error"
+    if pos == "citations[0].arxiv_id":
+        return "answered" if value is None or isinstance(value, str) else "error"
+    return "answered"  # citations[0].marker and every claims shape are report-only
+
+
+@pytest.mark.parametrize("value", HOSTILE, ids=repr)
+@pytest.mark.parametrize("pos", POSITIONS)
+def test_evaluate_never_crashes_on_hostile_shapes(pos, value):
+    m = _run3(lambda q: (_hostile_response(pos, value), 50.0))
+    want = _expected_outcome(pos, value)
+    assert [r["outcome"] for r in m["cases"]] == [want] * 3
+    assert m["error_case_ids"] == (["a1", "x1"] if want == "error" else [])
+    assert m["near_miss_error_ids"] == (["n1"] if want == "error" else [])
+    assert m["requests_ok"] == (0 if pos == "body" and not isinstance(value, dict) else 2)
+    assert m["correct_refusal_rate"] == (1.0 if want == "refusal" else 0.0)
+    assert m["citations_total"] == (1 if want == "answered" else 0)
     json.dumps(m)
 
 
@@ -1183,6 +1305,7 @@ def test_main_near_miss_empty_skips_the_set(monkeypatch, tmp_path, capsys):
     assert seen == _real_questions("answer.jsonl") + _real_questions("refusal.jsonl")
     for q in seen:
         assert q not in raw, q
+
 
 # --- EVAL-10: refused, missed and near-miss-failed case IDs in the summary (IDs only, no text) ---
 
@@ -1257,7 +1380,6 @@ def test_report_prints_no_id_lines_without_failures(capsys):
     assert _id_lines(out) == {} and "IDs" not in out, out
 
 
-
 def test_failed_refusal_set_call_is_error_and_refusal_failure():
     # EVAL-10a: a refusal-set call that fails (ask returns None) is never a correct refusal and never an answer-set ID.
     m = _run(ANSWERED, None)
@@ -1265,6 +1387,7 @@ def test_failed_refusal_set_call_is_error_and_refusal_failure():
     assert m["correct_refusal_rate"] == 0.0 and m["ask_error_count"] == 1
     for key in ("expected_paper_miss_ids", "answer_refused_ids"):
         assert "x1" not in m[key], key
+
 
 # --- EVAL-7: blind human review (synthetic fixtures only; agents never write real judgments) ---
 
