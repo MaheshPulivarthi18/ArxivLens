@@ -72,10 +72,36 @@ REFUSAL_REASONS = {"all_citations_unsupported": "refusal", "verification_unavail
 VERIFICATION_UNAVAILABLE = "verification_unavailable"
 
 
+def _is_int(x: Any) -> bool:
+    return isinstance(x, int) and not isinstance(x, bool)
+
+
+def _citations_ok(resp: Dict[str, Any]) -> bool:
+    """False for a malformed citations value (EVAL-6c): not a list, a non-object item, or a non-string arxiv_id."""
+    cits = resp.get("citations")
+    if cits is None:
+        return True
+    if not isinstance(cits, list):
+        return False
+    if not all(isinstance(c, dict) for c in cits):
+        return False
+    return all(c.get("arxiv_id") is None or isinstance(c.get("arxiv_id"), str) for c in cits)
+
+
+def _citation_items(resp: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The dict items of a list citations value; [] for anything else."""
+    cits = resp.get("citations")
+    if not isinstance(cits, list):
+        return []
+    return [c for c in cits if isinstance(c, dict)]
+
+
 def classify(resp: Optional[Dict[str, Any]]) -> str:
-    """'error' | 'refusal' | 'answered' for one /v1/ask response (None = failed request)."""
+    """'error' | 'refusal' | 'answered' for one /v1/ask response (None = failed request or a non-object body)."""
     if resp is None:
         return "error"
+    if not _citations_ok(resp):
+        return "error"  # a malformed citations value fails closed (ADR-0003), never a refusal or an answer
     reason = resp.get("refusal_reason")
     if reason is not None and not isinstance(reason, str):
         return "error"  # a non-string reason (even a falsy [] or 0) fails closed, never "no reason"
@@ -128,16 +154,23 @@ def split_sentences(text: str) -> List[str]:
     return sentences
 
 
+def _markers_ok(markers: Any) -> bool:
+    """A claims[].markers value counts only if it is a list of ints (EVAL-6c); anything else is an uncited unit."""
+    return isinstance(markers, list) and all(_is_int(m) for m in markers)
+
+
 def coverage_units(resp: Dict[str, Any]) -> Tuple[int, int]:
     """(cited, total) units of an answered response: claims[] items when present, else answer sentences.
     A unit is cited if it has >= 1 in-range marker, i.e. a marker that matches a returned citation (the
-    server drops markers outside 1..K, so only in-range markers get a citation)."""
-    in_range = {c.get("marker") for c in resp.get("citations") or []}
+    server drops markers outside 1..K, so only in-range markers get a citation). Malformed claims, markers or
+    marker entries (EVAL-6c) make that unit uncited; a non-int citation marker is ignored."""
+    in_range = {c.get("marker") for c in _citation_items(resp) if _is_int(c.get("marker"))}
     claims = resp.get("claims")
     if isinstance(claims, list) and claims:
-        marks = [set(c.get("markers") or []) if isinstance(c, dict) else set() for c in claims]
+        marks = [set(c["markers"]) if isinstance(c, dict) and _markers_ok(c.get("markers")) else set() for c in claims]
     else:
-        marks = [{int(m) for m in MARKER.findall(s)} for s in split_sentences(resp.get("answer") or "")]
+        answer = resp.get("answer")
+        marks = [{int(m) for m in MARKER.findall(s)} for s in split_sentences(answer if isinstance(answer, str) else "")]
     return sum(1 for m in marks if m & in_range), len(marks)
 
 
@@ -149,7 +182,7 @@ def case_record(case_id: str, case_set: str, resp: Optional[Dict[str, Any]], ms:
         "id": case_id, "set": case_set, "outcome": outcome, "refused": outcome == "refusal",
         "refusal_reason": _reason_str(r) or None, "latency_ms": round(ms, 1),
         "citations": [{k: c.get(k) for k in ("arxiv_id", "chunk_id", "marker", "supported", "score")}
-                      for c in r.get("citations") or []],
+                      for c in _citation_items(r)],
     }
     if outcome == "answered":
         rec["cited_units"], rec["total_units"] = coverage_units(r)
@@ -191,6 +224,8 @@ def evaluate(answer_cases: List[Dict[str, Any]], refusal_cases: List[Dict[str, A
 
     def call(case: Dict[str, Any], case_set: str) -> Tuple[Optional[Dict[str, Any]], str, float]:
         resp, ms = ask(case["question"])
+        if not isinstance(resp, dict):
+            resp = None  # EVAL-6c: valid JSON that isn't an object is a failed request (not in requests_ok)
         reason = _reason_str(resp or {})
         if reason:  # string values only; a non-string reason shows up as an error instead
             reason_counts[reason] = reason_counts.get(reason, 0) + 1
