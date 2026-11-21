@@ -1,6 +1,6 @@
 import { createRef } from 'react';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { toast } from 'sonner';
 import { Tooltip, TooltipContent, TooltipTrigger } from './tooltip';
@@ -257,9 +257,10 @@ describe('Tooltip default delay (FE-0g AC4)', () => {
     vi.useRealTimers();
   });
 
-  it('opens on hover after the 300 ms default delay, not before', async () => {
+  // Synchronous on purpose: userEvent's internal awaits hang under fake timers (CI r1 timed out at 5000 ms).
+  // fireEvent is act()-wrapped and awaits nothing; Radix's trigger opens on pointermove (not pointerenter).
+  it('opens on hover after the 300 ms default delay, not before', () => {
     vi.useFakeTimers();
-    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     const ref = createRef();
     render(
       <Tooltip>
@@ -267,7 +268,7 @@ describe('Tooltip default delay (FE-0g AC4)', () => {
         <TooltipContent ref={ref}>Delayed tip</TooltipContent>
       </Tooltip>,
     );
-    await user.hover(screen.getByRole('button', { name: 'Hover me' }));
+    fireEvent.pointerMove(screen.getByRole('button', { name: 'Hover me' }), { pointerType: 'mouse' });
     act(() => {
       vi.advanceTimersByTime(250);
     });
