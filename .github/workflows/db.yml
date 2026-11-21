@@ -3,6 +3,7 @@ name: DB
 # Real PostgreSQL + pgvector checks (OPS-H5): migrations on a fresh DB are idempotent and create the
 # HNSW index; the vector arm of the hybrid query is planned and measured against an exact scan.
 # OPS-H9: pgvector >= 0.8.0 check (hnsw.iterative_scan) and the EVAL-5 real_postgres eval-data test.
+# ING-6c: crawl watermark SQL and the crawl-loop advisory lock (internal/db, -tags integration).
 on:
   pull_request:
   push:
@@ -119,6 +120,17 @@ jobs:
         run: |
           go vet -tags integration ./internal/query/
           go test -tags integration -count=1 -v -timeout 20m -run 'TestHNSW|TestSearchProvenance' ./internal/query/
+      - name: Crawl watermark SQL + crawl-loop lock (ING-6a1, ING-6c)
+        run: |
+          set -o pipefail
+          go vet -tags integration ./internal/db/
+          go test -tags integration -count=1 -v -run '^(TestAdvanceWatermarkMonotonic|TestCrawlLoopLock)$' ./internal/db/ | tee /tmp/db-it.txt
+          # -v prints a SKIP line when DATABASE_URL is missing: that must not pass as green.
+          if grep -q -- '--- SKIP' /tmp/db-it.txt; then echo "::error::watermark/lock integration tests skipped"; exit 1; fi
+          for t in TestAdvanceWatermarkMonotonic TestCrawlLoopLock; do grep -q -- "--- PASS: $t " /tmp/db-it.txt || { echo "::error::$t did not pass"; exit 1; }; done
+          left="$($PSQL -At -c "SELECT count(*) FROM crawl_watermarks WHERE category LIKE 'it-test.%'")"
+          echo "crawl_watermarks rows left by the tests (category LIKE 'it-test.%'): $left"
+          [ "$left" = 0 ] || { echo "::error::test rows not cleaned up"; exit 1; }
       - name: DLQ reader on real Kafka (3 partitions, 1,500 records, paged fetches)
         run: |
           go vet -tags integration ./internal/dlq/

@@ -467,17 +467,58 @@ func TestRunStopsOnCancel(t *testing.T) {
 	t.Run("Once returns the pass error", func(t *testing.T) {
 		l, _, _ := fixture(feeds{"cs.LG": {entries: feed(15), err: errors.New("arxiv 503")}}, 10, map[string]int{"cs.LG": 10})
 		l.cfg.Once = true
-		if err := l.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "arxiv 503") {
-			t.Errorf("Run with Once = %v, want the pass error", err)
+		// One "cat:" prefix (RunOnce's), not "cat:cs.LG: cat:cs.LG page ..." (ING-6c AC11c).
+		if err := l.Run(context.Background()); err == nil || err.Error() != "cat:cs.LG: page start=0: arxiv 503" {
+			t.Errorf("Run with Once = %v, want the pass error \"cat:cs.LG: page start=0: arxiv 503\"", err)
 		}
 	})
 }
 
 func TestRunOnceCrossListed(t *testing.T) {
-	l, st, sink := fixture(feeds{"cs.AI": {entries: feed(14, 12, 9)}, "cs.LG": {entries: feed(14, 13, 8)}}, 10, map[string]int{"cs.AI": 10, "cs.LG": 10})
-	err := l.RunOnce(context.Background())
-	if got := strings.Join(sink.acked, " "); err != nil || got != "p12 p14 p13" || sink.upserts != 3 || minute(st.w["cs.AI"]) != 14 || minute(st.w["cs.LG"]) != 14 {
-		t.Errorf("err %v, acked %q, %d upserts, W cs.AI=%d cs.LG=%d; want \"p12 p14 p13\", 3, both 14", err, got, sink.upserts, minute(st.w["cs.AI"]), minute(st.w["cs.LG"]))
+	// p14 is in both categories; cs.AI runs first and publishes it as its 2nd publish.
+	for _, c := range []struct {
+		name              string
+		failPublish       int
+		acked, err        string
+		upserts, wAI, wLG int
+	}{
+		{"published once per pass", 0, "p12 p14 p13", "", 3, 14, 14},
+		// M9 (acked set before the ack): cs.LG would skip p14 and still advance W to 14 over an unpublished paper.
+		{"cs.AI's publish of p14 fails: cs.LG publishes it", 2, "p12 p13 p14", "cat:cs.AI: publish p14@1: broker down", 4, 12, 14},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			l, st, sink := fixture(feeds{"cs.AI": {entries: feed(14, 12, 9)}, "cs.LG": {entries: feed(14, 13, 8)}}, 10, map[string]int{"cs.AI": 10, "cs.LG": 10})
+			sink.failPublish = c.failPublish
+			err := l.RunOnce(context.Background())
+			if (c.err == "") != (err == nil) || (err != nil && err.Error() != c.err) {
+				t.Errorf("RunOnce = %v, want %q", err, c.err)
+			}
+			got := strings.Join(sink.acked, " ")
+			if !slices.Contains(sink.acked, "p14") && !st.w["cs.LG"].Before(t0.Add(14*time.Minute)) {
+				t.Errorf("p14 never acked but W cs.LG=%d covers it", minute(st.w["cs.LG"]))
+			}
+			if got != c.acked || sink.upserts != c.upserts || minute(st.w["cs.AI"]) != c.wAI || minute(st.w["cs.LG"]) != c.wLG {
+				t.Errorf("acked %q, %d upserts, W cs.AI=%d cs.LG=%d; want %q, %d, %d, %d",
+					got, sink.upserts, minute(st.w["cs.AI"]), minute(st.w["cs.LG"]), c.acked, c.upserts, c.wAI, c.wLG)
+			}
+		})
+	}
+}
+
+func TestRunOnceCancelledAfterFirstCategory(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ai, lg := &fakeFeed{entries: feed(14, 12, 9)}, &fakeFeed{entries: feed(15, 13, 8)}
+	l, st, sink := fixture(feeds{"cs.AI": ai, "cs.LG": lg}, 10, map[string]int{"cs.AI": 10, "cs.LG": 10})
+	sink.afterAck = func(n int) {
+		if n == 2 { // cs.AI's whole batch (p12 p14) acked
+			cancel()
+		}
+	}
+	err := l.RunOnce(ctx)
+	if !errors.Is(err, context.Canceled) || len(lg.calls) != 0 || minute(st.w["cs.AI"]) != 14 || minute(st.w["cs.LG"]) != 10 {
+		t.Errorf("RunOnce = %v, cs.LG %d feed requests, W cs.AI=%d cs.LG=%d; want context.Canceled, 0 requests, 14, 10",
+			err, len(lg.calls), minute(st.w["cs.AI"]), minute(st.w["cs.LG"]))
 	}
 }
 

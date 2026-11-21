@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"sort"
@@ -12,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"arxivlens/internal/arxiv"
 	"arxivlens/internal/config"
 	"arxivlens/internal/crawler"
 	"arxivlens/internal/db"
@@ -40,6 +43,7 @@ func main() {
 
 	rootCmd.AddCommand(newMigrateCmd())
 	rootCmd.AddCommand(newCrawlCmd())
+	rootCmd.AddCommand(newCrawlLoopCmd())
 	rootCmd.AddCommand(newDownloadCmd())
 	rootCmd.AddCommand(newStatusCmd())
 	rootCmd.AddCommand(newQueryCmd())
@@ -136,6 +140,76 @@ func newCrawlCmd() *cobra.Command {
 	cmd.Flags().IntVar(&limit, "limit", 5, "Maximum number of papers to crawl")
 	cmd.Flags().DurationVar(&rateLimit, "rate-limit", 3*time.Second, "Delay between arXiv requests")
 	return cmd
+}
+
+func newCrawlLoopCmd() *cobra.Command { return newCrawlLoopCmdWith(runCrawlLoop) }
+
+// newCrawlLoopCmdWith validates the flags and only then calls run, so a bad flag never opens a connection.
+func newCrawlLoopCmdWith(run func(context.Context, crawler.LoopConfig) error) *cobra.Command {
+	var (
+		categories string
+		lc         crawler.LoopConfig
+	)
+	cmd := &cobra.Command{
+		Use:   "crawl-loop",
+		Short: "Every --interval, publish papers.discovered for each category's papers newer than its watermark",
+		Long: "Scheduled crawler (ING-6). Per category and pass: walk arXiv newest-first down to the category's watermark in\n" +
+			"crawl_watermarks, emit at most --limit-per-run papers oldest-first, then advance the watermark past what Kafka acked.\n" +
+			"A first run takes only the newest --limit-per-run papers. One instance per database (advisory lock).",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var err error
+			if lc.Categories, err = crawler.ParseCategories(categories); err != nil {
+				return fmt.Errorf("--categories: %w", err)
+			}
+			switch {
+			case lc.Interval < time.Minute:
+				return fmt.Errorf("--interval %v: must be at least 1m", lc.Interval)
+			case lc.LimitPerRun <= 0:
+				return fmt.Errorf("--limit-per-run %d: must be > 0", lc.LimitPerRun)
+			case lc.MaxScan < lc.LimitPerRun:
+				return fmt.Errorf("--max-scan %d: must be >= --limit-per-run %d", lc.MaxScan, lc.LimitPerRun)
+			}
+			cmd.SilenceUsage = true // flags are fine: a runtime error needs no usage text
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer cancel()
+			return run(ctx, lc)
+		},
+	}
+	cmd.Flags().StringVar(&categories, "categories", "cs.AI,cs.LG", "Comma-separated arXiv categories, one watermark each")
+	cmd.Flags().DurationVar(&lc.Interval, "interval", 6*time.Hour, "Time from the end of one pass to the start of the next (>= 1m)")
+	cmd.Flags().IntVar(&lc.LimitPerRun, "limit-per-run", 100, "Max papers emitted per category per pass (the rest wait for the next pass)")
+	cmd.Flags().IntVar(&lc.MaxScan, "max-scan", 2000, "Max feed entries scanned per category looking for the watermark (>= --limit-per-run)")
+	cmd.Flags().BoolVar(&lc.Once, "once", false, "Run one pass and exit; non-zero exit if any category failed")
+	return cmd
+}
+
+// runCrawlLoop takes the single-instance lock before anything talks to arXiv, then runs the loop until a signal.
+func runCrawlLoop(ctx context.Context, lc crawler.LoopConfig) error {
+	database, err := db.Connect(ctx, cfg.PostgresURL)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	release, ok, err := database.TryCrawlLoopLock(ctx)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("another crawl-loop is running (PostgreSQL advisory lock held); run one instance per database")
+	}
+	defer release() // before database.Close (defers run LIFO)
+
+	producer, err := kafka.NewProducer(cfg.KafkaBrokers)
+	if err != nil {
+		return err
+	}
+	defer producer.Close()
+
+	// One limiter for every category and retry of this process (Technical PRD §9).
+	feed := crawler.NewArxivFeed(&http.Client{Timeout: 30 * time.Second}, arxiv.NewLimiter(arxiv.DefaultInterval))
+	log.Printf("[CrawlLoop] started categories=%s interval=%v limit_per_run=%d max_scan=%d once=%v",
+		strings.Join(lc.Categories, ","), lc.Interval, lc.LimitPerRun, lc.MaxScan, lc.Once)
+	return crawler.NewLoop(lc, feed, database, producer, database).Run(ctx)
 }
 
 func newDownloadCmd() *cobra.Command {

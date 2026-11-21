@@ -39,3 +39,32 @@ func (d *DB) AdvanceWatermark(ctx context.Context, category string, t time.Time)
 	}
 	return nil
 }
+
+// crawlLoopLockKeySQL is the one global crawl-loop lock (ING-6 design, PM answer 3). It is not per category: the
+// arXiv limiter is per process, so any second process would double the request rate to arXiv.
+const crawlLoopLockKeySQL = `hashtext('arxivlens:crawl-loop')`
+
+// TryCrawlLoopLock takes the session-level advisory lock of crawl-loop on a connection taken out of the pool
+// and held until release, so the lock lives as long as the process (and dies with its session on a crash).
+// ok is false, with nothing held, when another session has it.
+func (d *DB) TryCrawlLoopLock(ctx context.Context) (release func(), ok bool, err error) {
+	conn, err := d.Pool.Acquire(ctx)
+	if err != nil {
+		return nil, false, fmt.Errorf("crawl-loop lock: acquire connection: %w", err)
+	}
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock(`+crawlLoopLockKeySQL+`)`).Scan(&ok); err != nil || !ok {
+		conn.Release()
+		if err != nil {
+			return nil, false, fmt.Errorf("crawl-loop lock: %w", err)
+		}
+		return nil, false, nil
+	}
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := conn.Exec(ctx, `SELECT pg_advisory_unlock(`+crawlLoopLockKeySQL+`)`); err != nil {
+			_ = conn.Conn().Close(ctx) // closing the session releases the lock; the pool drops the closed connection
+		}
+		conn.Release()
+	}, true, nil
+}
