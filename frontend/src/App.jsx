@@ -8,6 +8,7 @@ import PapersLibrary from './components/PapersLibrary';
 import InfrastructureModal from './components/InfrastructureModal';
 import IngestModal from './components/IngestModal';
 import Toast from './components/Toast';
+import { Button } from './components/ui/button';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('search');
@@ -152,7 +153,7 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-background text-foreground flex flex-col font-sans selection:bg-emerald-500/20 selection:text-emerald-300">
+    <div className="min-h-screen bg-background text-foreground flex flex-col font-sans selection:bg-accent selection:text-accent-foreground">
       <Navbar
         activeTab={activeTab}
         setActiveTab={setActiveTab}
@@ -166,27 +167,28 @@ export default function App() {
             <HeroSearch onSearch={handleSearch} loading={loading} />
 
             {earlyRefusal && (
-              <div className="max-w-2xl mx-auto p-5 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-sm space-y-3 animate-in fade-in duration-200">
+              <div role="status" className="max-w-2xl mx-auto p-5 rounded-2xl bg-muted border border-border text-foreground text-sm space-y-3 animate-in fade-in duration-200">
                 <div className="flex items-start gap-3">
-                  <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                  <AlertCircle aria-hidden="true" className="w-5 h-5 text-muted-foreground shrink-0 mt-0.5" />
                   <div>
-                    <strong className="font-semibold text-amber-300">Relevance Protection Activated:</strong>
-                    <p className="text-xs text-amber-200/90 mt-0.5">
-                      No locally indexed papers meet the strict semantic relevance threshold for <code className="bg-amber-950/60 px-1.5 py-0.5 rounded text-amber-300">"{lastQuestion}"</code>. Incidental appendix mentions have been cleanly filtered out.
+                    <strong className="font-semibold text-foreground">Relevance Protection Activated:</strong>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      No locally indexed papers meet the strict semantic relevance threshold for <code className="bg-secondary text-secondary-foreground font-mono px-1.5 py-0.5 rounded">"{lastQuestion}"</code>. Incidental appendix mentions have been cleanly filtered out.
                     </p>
                   </div>
                 </div>
 
-                <div className="pt-2 border-t border-amber-500/20 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="pt-2 border-t border-border flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <span className="text-xs text-muted-foreground">Would you like to fetch authoritative papers from arXiv?</span>
-                  <button
+                  <Button
                     type="button"
+                    size="sm"
                     disabled={discovering}
                     onClick={handleDiscoverAndSearch}
-                    className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white shadow-md shadow-emerald-950/50 transition-all disabled:opacity-50 cursor-pointer shrink-0"
+                    className="shrink-0 h-auto min-h-8 py-1.5 whitespace-normal text-xs font-semibold"
                   >
                     <span>⚡ Search arXiv for "{lastQuestion}" & Index</span>
-                  </button>
+                  </Button>
                 </div>
               </div>
             )}

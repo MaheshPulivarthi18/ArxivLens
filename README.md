@@ -136,7 +136,7 @@ cd frontend && npm install && npm run dev     # UI on http://localhost:5173 (pro
 ```
 
 The theme button in the navbar switches between Light, Dark and System (follows your OS); the choice is stored in your
-browser (`localStorage`), and the first visit starts in Dark.
+browser (`localStorage`), and the first visit follows your OS setting (System).
 
 ### Option: Python workers on the host (Apple-silicon MPS acceleration)
 
