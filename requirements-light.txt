@@ -1,0 +1,8 @@
+# Minimal deps for `make test-py-light` (no torch, transformers, sentence-transformers or PyMuPDF).
+# A subset of requirements.txt + requirements-dev.txt: keep the lower bounds in sync with those files.
+# Install: `pip install -r requirements-light.txt`
+pytest>=8.0.0
+numpy>=1.24.0  # scripts/evaluate_retrieval.py run() imports it (test_evals_data.py)
+pydantic>=2.5.0
+confluent-kafka>=2.3.0
+ulid-py

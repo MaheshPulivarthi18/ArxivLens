@@ -20,7 +20,9 @@ make setup-fe                              # frontend deps (npm ci)
 | Command | What | Needs infra? |
 |---|---|---|
 | `make help` | List targets | — |
-| `make test-unit` | Go tests + `pytest tests/test_m0.py tests/test_evals_data.py tests/test_worker_heartbeat.py tests/test_processor_pages.py tests/test_verify.py tests/test_arxiv_replay.py` | No |
+| `make test-unit` | Go tests + `make test-py` (= `make test-py-light` + `make test-py-ml`) | No |
+| `make test-py-light` | `pytest tests/test_evals_data.py tests/test_worker_heartbeat.py tests/test_arxiv_replay.py`; no torch, needs only `pip install -r requirements-light.txt` | No |
+| `make test-py-ml` | `pytest tests/test_m0.py tests/test_verify.py tests/test_processor_pages.py`; needs `make setup-py` (torch, PyMuPDF) and downloads the BGE model on first run | No |
 | `make lint` | `go vet`, `gofmt` check, frontend `oxlint` | No |
 | `make build` | Go binary + frontend build | No |
 | `make infra-up` / `make infra-down` | Postgres+pgvector, Kafka, MinIO | Docker |
