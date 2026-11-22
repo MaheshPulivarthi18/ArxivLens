@@ -26,6 +26,16 @@ describe('Badge', () => {
     expect(badge).not.toHaveClass('bg-primary');
   });
 
+  // FE-0j: caller classes must win over conflicting defaults (ReferencesStack relies on
+  // className="text-xs px-2 py-0" replacing the default px-2.5 py-0.5).
+  it('lets a caller className override conflicting default padding', () => {
+    render(<Badge className="px-2 py-0">x</Badge>);
+    const badge = screen.getByText('x');
+    expect(badge).toHaveClass('px-2', 'py-0');
+    expect(badge).not.toHaveClass('px-2.5');
+    expect(badge).not.toHaveClass('py-0.5');
+  });
+
   it('is valid phrasing content inside a button (no div descendant)', () => {
     render(
       <button type="button">
