@@ -15,7 +15,7 @@ is used and the summary value is given next to it.
 ## Profile: CPU-only
 This is the **CPU-only** profile, so `/v1/ask` p95 is informational here: the gate prints it as
 `INFO (cpu-only; not gated)` and it can neither pass nor fail the run (Technical PRD §9, Accepted 2026-11-15). The
-`< 3000 ms` latency gate applies only on the GPU reference profile (`mps`/`cuda`), and this file has no GPU baseline.
+`< 3000 ms` latency gate applies only on the GPU reference profile (`mps`/`cuda`), and this file has no GPU CI baseline.
 
 - Runner: GitHub `ubuntu-latest` (image `ubuntu-26.04` 20261111.196.1), 4 CPUs (AMD EPYC 9V45), 15 GB RAM.
 - PyTorch `2.15.0+cpu`. Embedder `/healthz`: `{"status":"ok","device":"cpu","reranker":true,"verifier":true}`; the gate logged
@@ -69,7 +69,7 @@ refusal (no `refusal_reason`, `citations: []`, see `evals/README.md`). "1 of 22"
 | multi | 6 | 0.5000 | 1.0000 | 1.0000 | 1.0000 |
 
 GPU-profile latency on Mahesh's reference Mac is in the PR descriptions of #46–#50 (reported, not re-measured; no
-run artifact), so it is not a baseline value here.
+run artifact), so it is not a CI baseline value here.
 
 ## Real LLM (reported, local)
 Mahesh's own `make eval` with the LLM on, 2026-11-21 21:27Z: results `20261121T212749Z.json`, committed with its
@@ -83,7 +83,7 @@ Ollama `0.40.16`, `qwen2.5:3b-instruct` @ `357c53fb659c` (reported by Mahesh; th
 | Recall@5, Hybrid RRF + Rerank | 0.9850 | 0.9850 |
 | supported_citation_rate | 1.0000 (44 citations) | 1.0000 (60 citations) |
 | correct_refusal_rate | 1.0000 (22) | 1.0000 (22) |
-| ask_p95_ms (quick stage, gated on GPU) | 2423.4579 (PASS) | 13330.2916 (INFO) |
+| ask_p95_ms (quick stage, gated on GPU) | 2423.4579 (PASS) | 13330.2916 (INFO; full answer, pre-ADR-0019) |
 | ask_errors | 0 | 0 |
 | (info) expected_paper_hit_rate | 1.0000 | 0.9545 |
 | (info) ask_p50_ms | 1674.0 | 10932.2 |

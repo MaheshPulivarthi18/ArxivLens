@@ -149,11 +149,11 @@ def synthesized_answer_rate(answers: Optional[Dict[str, Any]]) -> Tuple[Optional
     return (synth / len(answered) if answered else None), synth
 
 
-def llm_warnings(model: Optional[str], synthesized: int) -> List[str]:
+def llm_warnings(model: Optional[str], synthesized: int, rate: Optional[float] = 0.0) -> List[str]:
     if not model and synthesized:
         return [f"warning: {synthesized} written answers came from an LLM the eval can't name; "
                 "export LLM_MODEL for make eval too"]
-    if model and not synthesized:
+    if model and not synthesized and rate is not None:  # rate None: nothing answered, so nothing to say
         return [f"warning: LLM_MODEL={model} is set but 0 answers were synthesized (every answer was quoted)"]
     return []
 
@@ -314,7 +314,7 @@ def main(argv=None) -> int:
     rate, synthesized = synthesized_answer_rate(results["answers"])
     results["llm"] = {**llm, "synthesized_answer_rate": rate}
     print(f"(report-only) synthesized_answer_rate: {'n/a' if rate is None else f'{rate:.4f}'}")
-    for w in llm_warnings(llm["model"], synthesized) if results["answers"] is not None else []:
+    for w in llm_warnings(llm["model"], synthesized, rate) if results["answers"] is not None else []:
         print(w, file=sys.stderr)
     checks = check_thresholds(results, thresholds)
     print_table(checks, results["answers"], results["retrieval"])

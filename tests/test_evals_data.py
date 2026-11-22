@@ -1654,8 +1654,8 @@ def test_llm_block_names_model_host_version_digest_and_never_leaks(monkeypatch, 
     {"error": evaluate_answers.urllib.error.URLError(ConnectionRefusedError(111, "refused"))},
     {"error": evaluate_answers.urllib.error.HTTPError("http://h/api/tags", 401, "Unauthorized", {}, None)},
     {"tags": b'{"models": [{"name": "other:1b", "digest": "abc"}]}'},
-    {"version": b"<html>", "tags": b"not json"},
-], ids=["refused", "401", "model-missing", "non-json"])
+    {"version": b"<html>", "tags": b"not json"}, {"error": TimeoutError("timed out")},
+], ids=["refused", "401", "model-missing", "non-json", "timeout"])
 def test_probe_failure_never_changes_the_run(monkeypatch, tmp_path, capsys, fake):
     _fake_ollama(monkeypatch)
     ok_code, _ = _gate_main(monkeypatch, tmp_path / "ok", LLM_ENV)
@@ -1668,11 +1668,13 @@ def test_probe_failure_never_changes_the_run(monkeypatch, tmp_path, capsys, fake
     assert "sk-test-SECRET" not in capsys.readouterr().out
 
 
-def test_no_probe_without_llm_model(monkeypatch, tmp_path):
+@pytest.mark.parametrize("env,host", [({"LLM_API_KEY": "sk-test-SECRET"}, None), (  # QA r1: base URL set, model unset
+    {"LLM_BASE_URL": LLM_ENV["LLM_BASE_URL"], "LLM_API_KEY": "sk-test-SECRET"}, "llm.example:8443")], ids=["no-url", "url"])
+def test_no_probe_without_llm_model(monkeypatch, tmp_path, env, host):
     calls = _fake_ollama(monkeypatch)
-    _, written = _gate_main(monkeypatch, tmp_path, {"LLM_API_KEY": "sk-test-SECRET"}, kind="quoted")
+    _, written = _gate_main(monkeypatch, tmp_path, env, kind="quoted")
     assert calls == []
-    assert json.loads(written)["llm"] == {"model": None, "source": "env", "host": None, "ollama_version": None,
+    assert json.loads(written)["llm"] == {"model": None, "source": "env", "host": host, "ollama_version": None,
                                           "digest": None, "digest_short": None, "synthesized_answer_rate": 0.0}
 
 
@@ -1680,6 +1682,7 @@ def test_default_base_url_only_with_a_model():
     assert eval_gate._llm_root(eval_gate.LLM_DEFAULT_BASE_URL) == ("localhost:11434", "http://localhost:11434")
     assert eval_gate.llm_info({})["host"] is None
     assert eval_gate.llm_info({"LLM_BASE_URL": "http://gpu.lan:11434/v1"})["host"] == "gpu.lan:11434"
+    assert eval_gate._llm_root("http://[::1]:11434/v1") == ("[::1]:11434", "http://[::1]:11434")
 
 
 SYNTH = {**ANSWERED, "answer_kind": "synthesized",
@@ -1701,8 +1704,11 @@ def test_synthesized_answer_rate_counts_answered_full_responses_only():
     cases = [{"id": f"a{i}", "question": f"q{i}", "expected_arxiv_ids": ["1706.03762"]} for i in range(3)]
     m = evaluate_answers.evaluate(cases, [{"id": "x0", "question": "r0"}], lambda q: (copy.deepcopy(resps[q]), 1.0))
     assert eval_gate.synthesized_answer_rate(m) == (2 / 3, 2)  # stored exactly; 0.6667 to 4 dp
+    m = evaluate_answers.evaluate(cases[2:], [], lambda q: (copy.deepcopy(resps[q]), 1.0), [{"id": "n0", "question": "q0"}])
+    assert eval_gate.synthesized_answer_rate(m) == (1 / 2, 1)  # an answered near-miss counts too (QA r1, n003)
     m = evaluate_answers.evaluate([], [{"id": "x0", "question": "r0"}], lambda q: (copy.deepcopy(A_REFUSAL), 1.0))
     assert eval_gate.synthesized_answer_rate(m) == (None, 0) and eval_gate.synthesized_answer_rate(None) == (None, 0)
+    assert eval_gate.llm_warnings("qwen2.5:3b-instruct", 0, None) == []  # nothing answered: no "every answer was quoted"
 
 
 @pytest.mark.parametrize("model,synthesized,warns", [
