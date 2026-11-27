@@ -192,9 +192,11 @@ def test_save_chunks_page_rows(chunk, want_sql, want_params, want_page_number):
     n = save_sections_and_chunks(conn, 7, [{"title": "Intro", "level": 1}], [chunk])
     assert n == 1 and conn.commits == 0, "must stay inside the caller's transaction (L2)"
     calls = conn.cur.calls
-    sec_sql, chunk_call = calls[0][0], calls[2]  # section id 100, chunk id 101 (calls[1]: OPS-H6d stale-vector delete)
+    # section id 100, chunk id 101 (calls[1]: OPS-H6f chunk-row lock, calls[2]: OPS-H6d stale-vector delete)
+    sec_sql, chunk_call = calls[0][0], calls[3]
     assert sec_sql.startswith("INSERT INTO paper_sections")
-    assert calls[1] == (STALE_VECTOR_SQL, (7, 0, "h0"))
+    assert calls[1] == (CHUNK_LOCK_SQL, (7,))
+    assert calls[2] == (STALE_VECTOR_SQL, (7, 0, "h0"))
     assert chunk_call[0].startswith("INSERT INTO paper_chunks") and chunk_call[0].endswith("RETURNING id;")
     assert chunk_call[1] == (7, 100, 0, "c0", "h0", want_page_number, 5), "page_number arg must stay chunk.get('page_number', 1)"
     page_calls = [c for c in calls if "paper_chunk_pages" in c[0]]
@@ -222,6 +224,8 @@ STALE_VECTOR_SQL = (
     "AND pc.chunk_index = %s AND pc.content_hash <> %s;"
 )
 STALE_TAIL_SQL = "DELETE FROM paper_chunks WHERE paper_id = %s AND NOT (chunk_index = ANY(%s::int[]));"
+# OPS-H6f: the paper's existing chunk rows are locked (embedder order) before any of their vectors are deleted.
+CHUNK_LOCK_SQL = "SELECT id FROM paper_chunks WHERE paper_id = %s ORDER BY chunk_index FOR UPDATE;"
 
 
 @pytest.mark.parametrize(
@@ -249,6 +253,22 @@ def test_save_chunks_reprocess_deletes(indexes):
     tail = [c for c in calls if c[0].startswith("DELETE FROM paper_chunks ")]
     assert tail == [(STALE_TAIL_SQL, (7, indexes))], tail
     assert len(calls) >= 2 and calls[-2] == tail[0] and calls[-1][0].startswith("UPDATE papers SET status = 'chunked'")
+
+
+@pytest.mark.parametrize("indexes", [[0, 1, 2], [3], []], ids=["three", "single-not-zero", "empty"])
+def test_save_chunks_locks_chunk_rows_before_vector_deletes(indexes):
+    from services.common.db import save_sections_and_chunks
+
+    conn = FakeConn()
+    save_sections_and_chunks(conn, 7, [{"title": "Intro", "level": 1}], [_chunk(i, content_hash=f"new{i}") for i in indexes])
+    assert conn.commits == 0, "the lock must be held by the caller's transaction (L2)"
+    calls = conn.cur.calls
+    locks = [k for k, c in enumerate(calls) if "FOR UPDATE" in c[0] or "FOR SHARE" in c[0]]
+    assert len(locks) == 1 and calls[locks[0]] == (CHUNK_LOCK_SQL, (7,)), [calls[k] for k in locks]
+    # Before the first vector DELETE and the first chunk write (an empty parse still locks before its tail delete).
+    writes = [k for k, c in enumerate(calls) if ("chunk_embeddings" in c[0] or "paper_chunks" in c[0]) and k != locks[0]]
+    assert writes and locks[0] < min(writes), (locks, writes)
+    assert all(c[0].startswith("INSERT INTO paper_sections") for c in calls[: locks[0]]), calls[: locks[0]]
 
 
 # --- OPS-H6e: a vector is only saved while its chunk still exists with the hash it was computed from --------------
