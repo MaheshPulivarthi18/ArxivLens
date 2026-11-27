@@ -111,6 +111,16 @@ calls (`latency_stage: "quick"`); a failed quick call is an ask error. Every qua
 whose latency is the report-only `ask_full_p50_ms` / `ask_full_p95_ms`. With an LLM configured that is the written
 answer, which on a laptop model takes seconds and is shown when ready.
 
+**`/v1/search` latency is report-only** (B-QUAL; `scripts/evaluate_search.py`). After the answers phase, against the same
+`--api-url`, the gate makes one uncounted warm-up call and then times `POST /v1/search` with `{"query", "limit": 5,
+"rerank": true}` (the production path, ADR-0010) once per `retrieval.jsonl` query. `results["search"]` gets
+`search_p50_ms` / `search_p95_ms` (nearest rank, successful calls only; `null` if none succeeded), `search_count` and
+`search_error_count` (transport error, non-2xx or bad JSON; if measuring itself fails, every call counts). The summary
+prints `/v1/search p50/p95 (ms): a / b (report-only, ADR-0012 Proposed; target 1500) errors=N/M profile=...`. Nothing
+is gated: Product PRD §8's 1.5 s target has no key in `thresholds.json` until ADR-0012 is decided, so no check reads
+these keys and the exit code never depends on them. `--skip-search` (or `--skip-answers`) skips it. When ADR-0012 is
+Accepted, the follow-up is the threshold key, one `_check` in `check_thresholds` and an entry in `LATENCY_GATES`.
+
 ### What the answer eval measures (EVAL-6)
 **ADR-0003 classification** of each `/v1/ask` response (`classify()` in `scripts/evaluate_answers.py`):
 
