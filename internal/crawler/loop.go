@@ -2,7 +2,7 @@ package crawler
 
 // Scheduled crawl loop (ING-6, design docs/design/ING-6.md in arxivlens-agents). Per category and pass: walk
 // newest-first down to the watermark (decide), emit the oldest batch oldest-first, then advance the watermark
-// past the papers that were upserted and acked (act). The CLI comes in ING-6c.
+// past the papers that were upserted and acked (act). The CLI is `arxivlens crawl-loop` (cmd/arxivlens).
 
 import (
 	"context"
@@ -82,7 +82,7 @@ func walk(ctx context.Context, f pageFetcher, category string, w time.Time, hasW
 		}
 		page, err := f.Page(ctx, "cat:"+category, start, n)
 		if err != nil {
-			return nil, st, fmt.Errorf("cat:%s page start=%d: %w", category, start, err)
+			return nil, st, fmt.Errorf("page start=%d: %w", start, err) // RunOnce adds "cat:<category>: "
 		}
 		st.Pages++
 		st.Scanned += len(page)
@@ -106,7 +106,7 @@ func walk(ctx context.Context, f pageFetcher, category string, w time.Time, hasW
 			break
 		}
 		if hasW && st.Scanned >= maxScan {
-			return nil, st, fmt.Errorf("backlog in cat:%s exceeds --max-scan %d; raise --max-scan once or backfill with arxivlens crawl", category, maxScan)
+			return nil, st, fmt.Errorf("backlog exceeds --max-scan %d; raise --max-scan once or backfill with arxivlens crawl", maxScan)
 		}
 	}
 	return out, st, nil
@@ -182,7 +182,8 @@ func (l *Loop) Run(ctx context.Context) error {
 	}
 }
 
-// RunOnce makes one pass over all categories and returns the joined errors of the categories that failed.
+// RunOnce makes one pass over all categories and returns the joined errors of the categories that failed, each
+// prefixed once with "cat:<category>: ".
 // A paper (arxiv_id@version) acked for one category in this pass isn't published again for the next one.
 func (l *Loop) RunOnce(ctx context.Context) error {
 	acked := map[string]bool{}

@@ -4,6 +4,7 @@ name: Full stack
 # crawls 2 papers to `embedded` and runs `make test-full`. No secrets. arXiv is replayed from the Actions cache
 # (scripts/arxiv_replay.py): 0 arXiv requests per run once recorded, ~5 on the recording run.
 # ING-6 Risk 1: one read-only, never-failing step prints the recorded search feed's `published` order (design ING-6).
+# ING-6c: step "ING-6: crawl-loop" (second run emits 0 events, kill + restart, single-instance lock, SIGTERM).
 on:
   workflow_dispatch:
   pull_request:
@@ -257,6 +258,8 @@ jobs:
             ./bin/arxivlens status --arxiv-id "$id" | tee -a "$GITHUB_STEP_SUMMARY"
           done
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # ING-6c: the 2 crawled IDs, recorded while they are the only papers (make test-full seeds more rows later).
+          q "select arxiv_id from papers order by arxiv_id" > crawled-ids.txt
           for t in papers.discovered.dlq papers.downloaded.dlq papers.chunked.dlq; do
             ./bin/arxivlens dlq list --topic "$t"
             end="$(docker compose exec -T kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic "$t" --time -1 \
@@ -306,6 +309,78 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
+
+      # ING-6c (design ING-6 test plan AC2/AC3/SIGTERM rows), after test-full so its events can't disturb it. The
+      # downloader is stopped first. Every crawl-loop request is the recorded cs.LG URL (served by the replay proxy).
+      - name: "ING-6: crawl-loop"
+        timeout-minutes: 6
+        run: |
+          q() { docker compose exec -T postgres psql -U postgres -d arxivlens -tA -c "$1"; }
+          ends() { docker compose exec -T kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 \
+            --topic papers.discovered --time -1 | awk -F: '{s += $3} END {print s + 0}'; }
+          requests() { curl -fsS localhost:8099/stats | jq '.hits + .misses'; }
+          fail() { echo "::error::$*"; exit 1; }
+          once() { rc=0; ./bin/arxivlens crawl-loop --once --categories cs.LG --limit-per-run 2 > "$1" 2>&1 || rc=$?; cat "$1"; return "$rc"; }
+          lock_free() { for _ in $(seq 20); do [ "$(q "select count(*) from pg_locks where locktype = 'advisory'")" = 0 ] && return 0; sleep 0.5; done; fail "advisory lock still held"; }
+          wm() { q "select category, last_published_at, updated_at from crawl_watermarks order by 1"; }
+          if [ -f downloader.pid ]; then kill "$(cat downloader.pid)" 2>/dev/null || true; fi
+          # The two papers of "AC3: crawl 2 papers" (the recorded cs.LG feed crawl-loop reads), saved by the AC3 wait step
+          # before make test-full added its own rows (e.g. test_m4_chaos.py's 9999.00001).
+          mapfile -t crawled < crawled-ids.txt
+          [ "${#crawled[@]}" = 2 ] || fail "want the 2 crawled papers in crawled-ids.txt, got: ${crawled[*]}"
+          echo "crawled papers (AC3): ${crawled[*]}; all papers now: $(q "select string_agg(arxiv_id, ' ' order by arxiv_id) from papers")"
+          papers0="$(q "select count(*) || ' ' || count(distinct (arxiv_id, version)) from papers")"
+          check() {
+            got="$(q "select count(*) || ' ' || count(distinct (arxiv_id, version)) from papers")"
+            echo "AC4 $1: papers count(*) count(distinct (arxiv_id, version)) = $got (before the step: $papers0)"
+            read -r n d <<< "$got"
+            if [ "$got" != "$papers0" ] || [ "$n" != "$d" ]; then fail "$1: papers changed or duplicated"; fi
+            for id in "${crawled[@]}"; do [ "$(q "select count(*) from papers where arxiv_id = '$id'")" = 1 ] || fail "$1: $id missing"; done
+            eq="$(q "select (select last_published_at from crawl_watermarks where category = 'cs.LG') = (select max(published_at) from papers where arxiv_id in ('${crawled[0]}', '${crawled[1]}'))")"
+            echo "AC4 $1: both crawled IDs present (${crawled[*]}); W(cs.LG) = max(published_at) of them: $eq"; wm
+            [ "$eq" = t ] || fail "$1: W != max published_at of the crawled papers"
+          }
+
+          n0="$(ends)"; once once1.log || fail "first --once failed"; n1="$(ends)"
+          echo "AC2: first run produced $((n1 - n0)) papers.discovered events ($n0 -> $n1)"
+          [ "$n1" = $((n0 + 2)) ] || fail "first run: want +2 events"
+          once once2.log || fail "second --once failed"; n2="$(ends)"
+          echo "AC2: second run produced $((n2 - n1)) papers.discovered events ($n1 -> $n2)"
+          grep -h -F '[CrawlLoop] cat=cs.LG' once1.log once2.log; wm
+          [ "$n2" = "$n1" ] || fail "second run with no new papers emitted events"
+          check "after two runs"
+
+          q "DELETE FROM crawl_watermarks"
+          once once3.log || fail "--once after DELETE failed"
+          check "(i) DELETE FROM crawl_watermarks (crash after publish, before the watermark write), then --once"
+
+          nohup ./bin/arxivlens crawl-loop --categories cs.LG --limit-per-run 2 --interval 1m > loop1.log 2>&1 &
+          loop=$!
+          for _ in $(seq 60); do grep -q -F '[CrawlLoop] cat=cs.LG' loop1.log && break; sleep 0.5; done
+          grep -q -F '[CrawlLoop] cat=cs.LG' loop1.log || { cat loop1.log; fail "looping crawl-loop made no pass"; }
+          r0="$(requests)"
+          if once once4.log; then fail "--once ran beside a looping crawl-loop"; fi
+          r1="$(requests)"
+          grep -q 'another crawl-loop is running' once4.log || fail "second instance: no lock message"
+          echo "AC2 lock: --once beside a running crawl-loop exited non-zero; arXiv requests (replay hits+misses) $r0 -> $r1"
+          [ "$r1" = "$r0" ] || fail "the second instance made arXiv requests"
+
+          t0="$(date +%s%N)"; kill -TERM "$loop"
+          for _ in $(seq 50); do kill -0 "$loop" 2>/dev/null || break; sleep 0.1; done
+          if kill -0 "$loop" 2>/dev/null; then kill -KILL "$loop"; fail "crawl-loop still running 5 s after SIGTERM"; fi
+          rc=0; wait "$loop" || rc=$?
+          cat loop1.log
+          echo "AC5 SIGTERM: exit $rc after $(( ($(date +%s%N) - t0) / 1000000 )) ms"
+          [ "$rc" = 0 ] || fail "SIGTERM: want exit 0"
+          grep -q -F '[CrawlLoop] stopped' loop1.log || fail "SIGTERM: no [CrawlLoop] stopped line"
+
+          lock_free
+          nohup ./bin/arxivlens crawl-loop --categories cs.LG --limit-per-run 2 --interval 1m > loop2.log 2>&1 &
+          loop=$!; sleep 1; kill -KILL "$loop"; wait "$loop" || true
+          echo "== killed crawl-loop log (kill point not controlled; exact points: ING-6b TestRunCategoryCrashAtK)"; cat loop2.log
+          lock_free
+          once once5.log || fail "--once after kill -KILL failed"
+          check "(ii) kill -KILL of a looping crawl-loop ~1 s after start, then --once"
 
       # Every run, green or red, so the artifact always has service logs (embedder rerank timing for ADR-0015).
       # The timing block is also tee'd to the job log: agent sandboxes can't read artifacts or step summaries (OPS-H10b).
