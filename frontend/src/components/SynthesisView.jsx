@@ -1,9 +1,39 @@
 import React from 'react';
-import { FileText, Copy, Download, Info } from 'lucide-react';
+import { FileText, Copy, Download, Info, ShieldCheck, ShieldAlert } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent, CardFooter } from './ui/card';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
-import { citationState, markdownNote } from '../lib/citations';
+import { Tooltip, TooltipTrigger, TooltipContent } from './ui/tooltip';
+import { citationState, markdownNote, claimState, hasClaims, claimRows } from '../lib/citations';
+
+const CHIP_ICONS = { supported: ShieldCheck, unsupported: ShieldAlert, unchecked: Info };
+const MARKER_CLASS =
+  'inline-flex items-center justify-center font-sans text-xs font-semibold text-primary bg-accent hover:bg-accent/70 rounded px-1 mx-0.5 cursor-pointer align-baseline transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring';
+
+// A `[n]` marker (design FE-4 §2). With a card it controls `ref-<n>` and previews the passage in a tooltip (hover and
+// keyboard focus, never takes focus); without one it keeps the FE-1 hover hint. `pos` is the positional citation
+// index in claims mode; the prose fallback reports the marker alone, as before.
+function MarkerButton({ marker, pos, citation, onCitationClick }) {
+  const button = (
+    <button
+      type="button"
+      className={MARKER_CLASS}
+      onClick={() => (pos === undefined ? onCitationClick(marker) : onCitationClick(marker, pos))}
+      aria-controls={citation ? `ref-${marker}` : undefined}
+      title={citation ? undefined : `Click to inspect Evidence [${marker}]`}
+    >
+      [{marker}]
+    </button>
+  );
+  if (!citation) return button;
+  const section = citation.section ? ` · § ${citation.section}` : '';
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{button}</TooltipTrigger>
+      <TooltipContent>{`[${marker}] ${citation.title}${section} · ${citationState(citation).text}`}</TooltipContent>
+    </Tooltip>
+  );
+}
 
 const SUBTITLES = {
   quoted: 'Quoted from the papers — every sentence appears verbatim in a cited passage',
@@ -20,7 +50,7 @@ const REFUSAL_COPY = {
     "The passages found don't answer this question, so no answer is shown. They are listed as evidence. Try rephrasing the question or indexing more papers.",
 };
 
-export default function SynthesisView({ answer, traceId, citations, onCitationClick, onCopy, answerKind, refusalReason, writing }) {
+export default function SynthesisView({ answer, traceId, citations, claims, onCitationClick, onCopy, answerKind, refusalReason, writing }) {
   const titleId = React.useId();
   const cits = citations || [];
   const supportedCount = cits.filter((c) => citationState(c).kind === 'supported').length;
@@ -48,15 +78,12 @@ export default function SynthesisView({ answer, traceId, citations, onCitationCl
       }
       const marker = parseInt(match[1], 10);
       parts.push(
-        <button
+        <MarkerButton
           key={match.index}
-          type="button"
-          className="inline-flex items-center justify-center font-sans text-xs font-semibold text-primary bg-accent hover:bg-accent/70 rounded px-1 mx-0.5 cursor-pointer align-baseline transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          onClick={() => onCitationClick(marker)}
-          title={`Click to inspect Evidence [${marker}]`}
-        >
-          [{marker}]
-        </button>
+          marker={marker}
+          citation={cits.find((c) => c.marker === marker)}
+          onCitationClick={onCitationClick}
+        />
       );
       lastIndex = regex.lastIndex;
     }
@@ -67,6 +94,32 @@ export default function SynthesisView({ answer, traceId, citations, onCitationCl
 
     return parts;
   };
+
+  // Claims mode (design FE-4 §2): each statement with its markers and its own verdict chip.
+  const renderClaims = () => (
+    <ol aria-label="Claims in this answer" className="list-none pl-0 space-y-2">
+      {claimRows(claims, cits).map(({ claim, index, entries }) => {
+        const state = claimState(claim);
+        const ChipIcon = CHIP_ICONS[state.kind];
+        return (
+          <li key={index} className="pl-0">
+            {claim.text}
+            {entries.map((e, j) =>
+              e.citation ? (
+                <MarkerButton key={j} marker={e.marker} pos={e.pos} citation={e.citation} onCitationClick={onCitationClick} />
+              ) : (
+                <span key={j} className="font-sans text-xs text-muted-foreground mx-0.5">[{e.marker}]</span>
+              ),
+            )}{' '}
+            <Badge variant={state.kind} className="gap-1 font-sans text-[11px] align-middle">
+              <ChipIcon className="w-3 h-3" aria-hidden="true" />
+              <span>{state.text}</span>
+            </Badge>
+          </li>
+        );
+      })}
+    </ol>
+  );
 
   const handleCopySummary = () => {
     onCopy(answer, "📋 Clinical summary copied to clipboard!");
@@ -120,7 +173,7 @@ export default function SynthesisView({ answer, traceId, citations, onCitationCl
           </section>
         ) : (
           <div className="prose font-serif sm:prose-lg max-w-none">
-            <p>{renderFormattedAnswer(answer)}</p>
+            {hasClaims(claims) ? renderClaims() : <p>{renderFormattedAnswer(answer)}</p>}
           </div>
         )}
       </CardContent>

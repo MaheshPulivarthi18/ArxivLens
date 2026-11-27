@@ -10,6 +10,7 @@ import {
   refusalA,
   refusalB,
   refusalC,
+  synthesizedSkips,
 } from '../test/fixtures';
 
 const VERIFIED = /\bVerified\b/;
@@ -159,5 +160,50 @@ describe('ReferencesStack', () => {
   it('shows an empty state when there are no citations', () => {
     renderStack([]);
     expect(screen.getByText(/No reference papers cited/)).toBeInTheDocument();
+  });
+});
+
+// FE-4a (design docs/design/FE-4.md §3, first two bullets).
+describe('ReferencesStack: grouping and active card (FE-4a)', () => {
+  const renderWith = (citations, extra = {}) =>
+    render(<ReferencesStack citations={citations} onCopy={vi.fn()} traceId="trace-x" {...extra} />);
+
+  it('one card per distinct marker: no duplicate ref-n, heading counts cards, each check keeps its chip', () => {
+    renderWith(synthesizedSkips.citations);
+    expect(screen.getAllByRole('article')).toHaveLength(2);
+    expect(document.querySelectorAll('[id="ref-1"]')).toHaveLength(1);
+    expect(document.querySelectorAll('[id="ref-3"]')).toHaveLength(1);
+    expect(document.getElementById('ref-2')).toBeNull();
+    expect(within(screen.getByRole('heading', { name: /^References/ })).getByText('2 cited')).toBeInTheDocument();
+    expect(within(card(1)).getByRole('button', { name: 'Supported · 87.3%' })).toBeInTheDocument();
+    expect(within(card(1)).getByRole('button', { name: 'Supported · 80.1%' })).toBeInTheDocument();
+    expect(within(card(3)).getByRole('button', { name: 'Supported · 91.2%' })).toBeInTheDocument();
+    // every passage stays one click from its PDF
+    expect(screen.getAllByRole('link', { name: /open pdf/i })).toHaveLength(2);
+  });
+
+  it('cards are programmatic focus targets, not Tab stops', () => {
+    renderWith([supportedCitation, unsupportedCitation]);
+    for (const m of [1, 2]) {
+      expect(card(m)).toHaveAttribute('tabindex', '-1');
+      expect(card(m)).toHaveAttribute('id', `ref-${m}`);
+    }
+  });
+
+  it('nothing is active without an active marker', () => {
+    renderWith([supportedCitation, unsupportedCitation]);
+    expect(document.querySelectorAll('[data-active]')).toHaveLength(0);
+  });
+
+  it('the active marker marks only its own card', () => {
+    renderWith(synthesizedSkips.citations, { active: { marker: 3, pos: 2 } });
+    expect(card(3)).toHaveAttribute('data-active', 'true');
+    expect(card(1)).not.toHaveAttribute('data-active');
+    expect(document.querySelectorAll('[data-active]')).toHaveLength(1);
+  });
+
+  it('refusal mode ignores active', () => {
+    renderWith(refusalA.citations, { active: { marker: 1, pos: 0 }, refusalReason: refusalA.refusal_reason });
+    expect(document.querySelectorAll('[data-active]')).toHaveLength(0);
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { citationState, markdownNote } from './citations';
+import { citationState, markdownNote, claimState, hasClaims, claimCitations, claimRows, groupByMarker } from './citations';
 import {
   supportedCitation,
   unsupportedCitation,
@@ -8,6 +8,10 @@ import {
   partialCitation,
   contradictedCitation,
   legacyRefusalZero,
+  quotedClaims,
+  synthesizedSkips,
+  brokenPositional,
+  malformedClaims,
 } from '../test/fixtures';
 
 const SUPPORTED_WORD = /\bSupported\b/;
@@ -81,5 +85,98 @@ describe('markdownNote', () => {
       '- [2] **Entailment Checks for Citations** (§ Results) - [arXiv:2402.05678](https://arxiv.org/pdf/2402.05678v1) • Unsupported · 12.0%',
     );
     expect(lines[2]).toMatch(/• Not checked$/);
+  });
+});
+
+// FE-4a (design docs/design/FE-4.md §1).
+describe('claimState', () => {
+  it.each([
+    ['supported', 'supported', 'Supported'],
+    ['unverified', 'unchecked', 'Not checked'],
+    ['unsupported', 'unsupported', 'Unsupported'],
+    ['partially_supported', 'unsupported', 'Unsupported'],
+    ['contradicted', 'unsupported', 'Unsupported'],
+    ['bogus', 'unsupported', 'Unsupported'],
+    [undefined, 'unsupported', 'Unsupported'],
+  ])('status %s → %s "%s"', (status, kind, text) => {
+    const state = claimState({ text: 'A claim.', status, markers: [] });
+    expect(state).toEqual({ kind, text });
+    expect(state.text).not.toMatch(/verified|%/i);
+    if (kind !== 'supported') expect(state.text).not.toMatch(SUPPORTED_WORD);
+  });
+
+  it('a missing claim reads Unsupported', () => {
+    expect(claimState(undefined)).toEqual({ kind: 'unsupported', text: 'Unsupported' });
+  });
+});
+
+describe('hasClaims', () => {
+  it('accepts a non-empty list of claims with text', () => {
+    expect(hasClaims(quotedClaims.claims)).toBe(true);
+  });
+
+  it.each([['absent', undefined], ['empty', []], ...malformedClaims.map((c, i) => [`malformed ${i + 1}`, c])])(
+    '%s → false',
+    (_name, claims) => {
+      expect(hasClaims(claims)).toBe(false);
+    },
+  );
+});
+
+describe('claimCitations', () => {
+  it('maps each claim marker to its positional citation entry', () => {
+    const rows = claimCitations(synthesizedSkips.claims, synthesizedSkips.citations);
+    expect(rows.map((r) => r.entries.map((e) => [e.marker, e.pos]))).toEqual([[[1, 0]], [[1, 1], [3, 2]]]);
+    expect(rows[1].entries[0].citation).toBe(synthesizedSkips.citations[1]);
+    expect(rows.map((r) => r.index)).toEqual([0, 1]);
+  });
+
+  it('an uncited claim has no entries', () => {
+    const rows = claimCitations(quotedClaims.claims, quotedClaims.citations);
+    expect(rows[3].entries).toEqual([]);
+  });
+
+  it('returns null when a marker disagrees with its positional citation', () => {
+    expect(claimCitations(brokenPositional.claims, brokenPositional.citations)).toBeNull();
+  });
+
+  it('returns null when the citation count differs from the marker count', () => {
+    expect(claimCitations(synthesizedSkips.claims, synthesizedSkips.citations.slice(0, 2))).toBeNull();
+    expect(claimCitations(synthesizedSkips.claims, [...synthesizedSkips.citations, unsupportedCitation])).toBeNull();
+  });
+});
+
+describe('claimRows', () => {
+  it('uses the positional mapping when it is valid', () => {
+    expect(claimRows(synthesizedSkips.claims, synthesizedSkips.citations)).toEqual(
+      claimCitations(synthesizedSkips.claims, synthesizedSkips.citations),
+    );
+  });
+
+  it('broken positional invariant: markers still map by number', () => {
+    const rows = claimRows(brokenPositional.claims, brokenPositional.citations);
+    expect(rows.map((r) => r.entries.map((e) => [e.marker, e.citation.marker, e.pos]))).toEqual([
+      [[1, 1, 1]],
+      [[1, 1, 1], [3, 3, 0]],
+    ]);
+  });
+
+  it('a marker with no citation gets citation null and no position', () => {
+    const rows = claimRows([{ text: 'x', status: 'supported', markers: [9] }], [supportedCitation]);
+    expect(rows[0].entries).toEqual([{ marker: 9, citation: null, pos: undefined }]);
+  });
+});
+
+describe('groupByMarker', () => {
+  it('one group per distinct marker, in first-seen order, entries keep their positions', () => {
+    const groups = groupByMarker(synthesizedSkips.citations);
+    expect(groups.map((g) => [g.marker, g.entries.map((e) => e.pos)])).toEqual([[1, [0, 1]], [3, [2]]]);
+    expect(groups[0].entries[1].citation).toBe(synthesizedSkips.citations[1]);
+    expect(groupByMarker(brokenPositional.citations).map((g) => g.marker)).toEqual([3, 1]);
+  });
+
+  it('no citations → no groups', () => {
+    expect(groupByMarker(undefined)).toEqual([]);
+    expect(groupByMarker([])).toEqual([]);
   });
 });

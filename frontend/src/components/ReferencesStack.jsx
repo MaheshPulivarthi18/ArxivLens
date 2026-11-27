@@ -4,11 +4,13 @@ import { Card, CardHeader, CardTitle, CardContent, CardFooter } from './ui/card'
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import { Tooltip, TooltipTrigger, TooltipContent } from './ui/tooltip';
-import { citationState } from '../lib/citations';
+import { citationState, groupByMarker } from '../lib/citations';
 
 const CHIP_ICONS = { supported: ShieldCheck, unsupported: ShieldAlert, unchecked: Info };
 
-export default function ReferencesStack({ citations, activeMarker, onCopy, refusalReason }) {
+// `active` = { marker, pos } | null: the card the reader came to from a marker (design FE-4 §4). Ignored in refusal
+// mode, which has no markers. Cards are grouped by marker (one per passage) and are focus targets, not Tab stops.
+export default function ReferencesStack({ citations, active, traceId, onCopy, refusalReason }) {
   if (!citations || citations.length === 0) {
     return (
       <Card className="border-border/60 bg-card/60 p-6 text-center text-muted-foreground text-sm">
@@ -31,6 +33,8 @@ export default function ReferencesStack({ citations, activeMarker, onCopy, refus
     onCopy(bibtex, `📋 BibTeX reference copied for [${cit.marker}]!`);
   };
 
+  const groups = groupByMarker(citations);
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between px-1">
@@ -41,25 +45,26 @@ export default function ReferencesStack({ citations, activeMarker, onCopy, refus
         >
           <span>{refusalReason ? 'Retrieved passages (no answer was shown)' : 'References'}</span>
           <Badge variant="secondary" className="text-xs px-2 py-0">
-            {citations.length} {refusalReason ? (citations.length === 1 ? 'passage' : 'passages') : 'cited'}
+            {groups.length} {refusalReason ? (groups.length === 1 ? 'passage' : 'passages') : 'cited'}
           </Badge>
         </h3>
         {!refusalReason && <span className="text-xs text-muted-foreground">Click [n] in text to inspect</span>}
       </div>
 
-      {citations.map((cit) => {
-        const isHighlighted = activeMarker === cit.marker;
+      {groups.map(({ marker, entries }) => {
+        const cit = entries[0].citation;
+        const isHighlighted = !refusalReason && active?.marker === marker;
         const pdfURL = cit.pdf_url || `https://arxiv.org/pdf/${cit.arxiv_id}.pdf`;
-        const check = citationState(cit, { refusal: !!refusalReason });
-        const ChipIcon = CHIP_ICONS[check.kind];
 
         return (
           <Card
-            key={cit.marker}
-            id={`ref-${cit.marker}`}
+            key={`${traceId}-${marker}`}
+            id={`ref-${marker}`}
             role="article"
             aria-label={`Citation [${cit.marker}]: ${cit.title}`}
-            className={`transition-all duration-300 ${
+            tabIndex={-1}
+            data-active={isHighlighted ? 'true' : undefined}
+            className={`transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
               isHighlighted
                 ? 'border-primary ring-2 ring-ring/30 bg-card shadow-lg'
                 : 'border-border/70 hover:border-border bg-card/90'
@@ -76,21 +81,30 @@ export default function ReferencesStack({ citations, activeMarker, onCopy, refus
                   </Badge>
                 </div>
 
-                {/* The chip text carries the meaning; the tooltip only explains it (opens on hover and keyboard focus). */}
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      className="shrink-0 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card"
-                    >
-                      <Badge variant={check.kind} className="gap-1 text-[11px]">
-                        <ChipIcon className="w-3 h-3" aria-hidden="true" />
-                        <span>{check.text}</span>
-                      </Badge>
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>{check.tooltip}</TooltipContent>
-                </Tooltip>
+                {/* The chip text carries the meaning; the tooltip only explains it (opens on hover and keyboard focus).
+                    One chip per check: a passage cited by several claims shows each check (rows land in FE-4b). */}
+                <div className="flex flex-wrap justify-end gap-1">
+                  {entries.map(({ citation, pos }) => {
+                    const check = citationState(citation, { refusal: !!refusalReason });
+                    const ChipIcon = CHIP_ICONS[check.kind];
+                    return (
+                      <Tooltip key={pos}>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            className="shrink-0 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card"
+                          >
+                            <Badge variant={check.kind} className="gap-1 text-[11px]">
+                              <ChipIcon className="w-3 h-3" aria-hidden="true" />
+                              <span>{check.text}</span>
+                            </Badge>
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent>{check.tooltip}</TooltipContent>
+                      </Tooltip>
+                    );
+                  })}
+                </div>
               </div>
 
               <CardTitle className="text-sm font-semibold text-foreground mt-2 leading-snug">
