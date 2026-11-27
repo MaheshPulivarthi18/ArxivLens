@@ -204,8 +204,14 @@ describe('locateQuote', () => {
     ['space before .', 'the claim . Next', 'the claim.', 'the claim .'],
     ['case mismatch', 'The Claim holds', 'the claim holds', null],
     ['empty quote', 'abc', '', null],
-    ['whitespace quote', 'abc', ' \n ', null],
+    ['whitespace quote', 'a \n b', ' \n ', null],
     ['absent', 'abc', 'xyz', null],
+    // Something before the quote normalises away: the raw start is not the normalised index.
+    ['ref + spaces before', 'As shown [12]  earlier, hybrid\nsearch works well.', 'hybrid search works', 'hybrid\nsearch works'],
+    ['newlines + spaces before', 'Intro.\n\n\nWe  verify  each claim.', 'We verify each claim.', 'We  verify  each claim.'],
+    // strings.Fields collapses Unicode spaces (unicode.IsSpace), e.g. NBSP and U+2009 from PDF text.
+    ['NBSP between words', 'hybrid\u00a0search works', 'hybrid search works', 'hybrid\u00a0search works'],
+    ['U+2009 between words', 'a\u2009b c', 'a b c', 'a\u2009b c'],
     // RE2 \s is ASCII: NBSP inside [3, 4] keeps the ref in the server's normalised text.
     ['NBSP [3,\u00a04] keeps the ref', 'shown in [3,\u00a04] that', 'shown in that', null],
   ])('%s', (_name, content, quote, raw) => {
@@ -214,6 +220,11 @@ describe('locateQuote', () => {
     expect(content.slice(r.start, r.end)).toBe(raw);
     expect(normQuote(raw)).toBe(normQuote(quote));
   });
+});
+
+it('locateQuote returns exact raw offsets after a normalised prefix', () => {
+  expect(locateQuote('As shown [12]  earlier, hybrid\nsearch works well.', 'hybrid search works')).toEqual({ start: 24, end: 43 });
+  expect(locateQuote('Intro.\n\n\nWe  verify  each claim.', 'We verify each claim.')).toEqual({ start: 9, end: 32 });
 });
 
 // B-UI AC2: provenance line and PDF page.
