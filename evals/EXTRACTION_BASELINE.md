@@ -11,6 +11,10 @@ can't reach arxiv.org (the proxy answers 403 to CONNECT for `arxiv.org` and `exp
 for `evals/extraction.jsonl`, or run the detector. Writing labels from memory would make the baseline untrustworthy,
 so none were written.
 
+Still not run on `main` (B-QUAL, 2026-11-28): who labels is Mahesh's decision. Labelling, per paper: check on the arXiv
+abs page that the licence is CC BY 4.0, CC BY-SA 4.0 or CC0 1.0; pin `version` (`^v\d+$`); copy the headings by hand from
+that PDF, in document order, with level 1/2 ([rules](README.md#section-extraction-eval-ing-8)).
+
 To produce the baseline, on a machine with arxiv.org access:
 ```bash
 # 1. add >= 10 hand-annotated, licence-checked rows to evals/extraction.jsonl (>= 3 layouts), then:

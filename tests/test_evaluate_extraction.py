@@ -126,8 +126,8 @@ def test_validate_dataset_rejects_duplicate_ids():
 
 
 DATASET_PENDING = (
-    "evals/extraction.jsonl not present yet: it must be hand-annotated from the PDFs with licences checked on the "
-    "arXiv abs pages, which needs arxiv.org access (see ING-8 Notes). AC1 is NOT met while this skips."
+    "AC1 not met: no hand labels. evals/extraction.jsonl must be hand-annotated from the PDFs with licences checked "
+    "on the arXiv abs pages, which needs arxiv.org access (see evals/EXTRACTION_BASELINE.md)."
 )
 
 
@@ -307,6 +307,18 @@ def test_main_writes_results_json(tmp_path, monkeypatch):
 
 def test_main_missing_dataset_exits_2(tmp_path):
     assert ee.main(["--dataset", str(tmp_path / "nope.jsonl"), "--results-dir", str(tmp_path / "res")]) == 2
+
+
+def test_missing_dataset_exits_2(tmp_path, monkeypatch, capsys):
+    """B-QUAL AC5: no labels on main, so the real run says why it can't run, writes nothing and never fetches."""
+    monkeypatch.setattr(ee.PoliteFetcher, "fetch", lambda *a, **k: pytest.fail("fetched without a dataset"))
+    missing = tmp_path / "extraction.jsonl"
+    assert ee.main(["--dataset", str(missing), "--results-dir", str(tmp_path / "res")]) == 2
+    assert f"could not run: dataset {missing} not found" in capsys.readouterr().err
+    assert not (tmp_path / "res").exists()
+    with pytest.raises(SystemExit) as e:
+        ee.main(["--help"])
+    assert e.value.code == 0 and "--offline" in capsys.readouterr().out
 
 
 def test_main_rejects_invalid_dataset(tmp_path):
