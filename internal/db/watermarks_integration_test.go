@@ -27,7 +27,15 @@ func connectIT(t *testing.T) *DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(d.Close)
+	t.Cleanup(func() { // bounded: pgxpool's Close waits for acquired connections, so a leaked lock conn would hang the job
+		done := make(chan struct{})
+		go func() { d.Close(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Errorf("DB.Close still blocked after 10s: a pooled connection was never released (crawl-loop lock?)")
+		}
+	})
 	if err := d.RunMigrations(context.Background(), filepath.Join("..", "..", "migrations", "000005_crawl_watermarks.up.sql")); err != nil {
 		t.Fatal(err)
 	}
@@ -99,24 +107,30 @@ func TestAdvanceWatermarkMonotonic(t *testing.T) {
 func TestCrawlLoopLock(t *testing.T) {
 	ctx := context.Background()
 	a, b := connectIT(t), connectIT(t)
-	release, ok, err := a.TryCrawlLoopLock(ctx)
-	if err != nil || !ok || release == nil {
-		t.Fatalf("first acquirer: (release %v, ok %v, err %v), want the lock", release != nil, ok, err)
-	}
+	// held[i] is a lock connection still out of b's or a's pool. The cleanup (it runs before the pools close, LIFO)
+	// releases it, so a failing check below reports its message instead of hanging in DB.Close.
+	var held [2]func()
 	t.Cleanup(func() {
-		if release != nil {
-			release()
+		for _, r := range held {
+			if r != nil {
+				r()
+			}
 		}
 	})
-	if r, ok, err := b.TryCrawlLoopLock(ctx); err != nil || ok || r != nil {
-		t.Fatalf("second acquirer while held: (release %v, ok %v, err %v), want ok=false and nothing held", r != nil, ok, err)
+	var ok bool
+	var err error
+	if held[0], ok, err = a.TryCrawlLoopLock(ctx); err != nil || !ok || held[0] == nil {
+		t.Fatalf("first acquirer: (release %v, ok %v, err %v), want the lock", held[0] != nil, ok, err)
 	}
-	rel := release
-	release = nil // the cleanup must not release twice
+	if held[1], ok, err = b.TryCrawlLoopLock(ctx); err != nil || ok || held[1] != nil {
+		t.Fatalf("second acquirer while held: (release %v, ok %v, err %v), want ok=false and nothing held", held[1] != nil, ok, err)
+	}
+	rel := held[0]
+	held[0] = nil // the cleanup must not release twice
 	rel()
-	r, ok, err := b.TryCrawlLoopLock(ctx)
-	if err != nil || !ok || r == nil {
-		t.Fatalf("second acquirer after release: (release %v, ok %v, err %v), want the lock", r != nil, ok, err)
+	if held[1], ok, err = b.TryCrawlLoopLock(ctx); err != nil || !ok || held[1] == nil {
+		t.Fatalf("second acquirer after release: (release %v, ok %v, err %v), want the lock", held[1] != nil, ok, err)
 	}
-	r()
+	rel, held[1] = held[1], nil
+	rel()
 }

@@ -516,8 +516,9 @@ func TestRunOnceCancelledAfterFirstCategory(t *testing.T) {
 		}
 	}
 	err := l.RunOnce(ctx)
-	if !errors.Is(err, context.Canceled) || len(lg.calls) != 0 || minute(st.w["cs.AI"]) != 14 || minute(st.w["cs.LG"]) != 10 {
-		t.Errorf("RunOnce = %v, cs.LG %d feed requests, W cs.AI=%d cs.LG=%d; want context.Canceled, 0 requests, 14, 10",
+	// The exact text pins RunOnce's own guard: without it, cs.LG still runs and walk fails with "cat:cs.LG: context canceled".
+	if !errors.Is(err, context.Canceled) || err.Error() != "context canceled" || len(lg.calls) != 0 || minute(st.w["cs.AI"]) != 14 || minute(st.w["cs.LG"]) != 10 {
+		t.Errorf("RunOnce = %v, cs.LG %d feed requests, W cs.AI=%d cs.LG=%d; want exactly \"context canceled\", 0 requests, 14, 10",
 			err, len(lg.calls), minute(st.w["cs.AI"]), minute(st.w["cs.LG"]))
 	}
 }

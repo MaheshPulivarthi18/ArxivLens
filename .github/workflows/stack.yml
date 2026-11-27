@@ -258,6 +258,8 @@ jobs:
             ./bin/arxivlens status --arxiv-id "$id" | tee -a "$GITHUB_STEP_SUMMARY"
           done
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # ING-6c: the 2 crawled IDs, recorded while they are the only papers (make test-full seeds more rows later).
+          q "select arxiv_id from papers order by arxiv_id" > crawled-ids.txt
           for t in papers.discovered.dlq papers.downloaded.dlq papers.chunked.dlq; do
             ./bin/arxivlens dlq list --topic "$t"
             end="$(docker compose exec -T kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic "$t" --time -1 \
@@ -322,9 +324,11 @@ jobs:
           lock_free() { for _ in $(seq 20); do [ "$(q "select count(*) from pg_locks where locktype = 'advisory'")" = 0 ] && return 0; sleep 0.5; done; fail "advisory lock still held"; }
           wm() { q "select category, last_published_at, updated_at from crawl_watermarks order by 1"; }
           if [ -f downloader.pid ]; then kill "$(cat downloader.pid)" 2>/dev/null || true; fi
-          # The two papers of "AC3: crawl 2 papers": the same recorded cs.LG feed crawl-loop reads.
-          mapfile -t crawled < <(q "select arxiv_id from papers where arxiv_id <> '2608.20331' order by 1")
-          [ "${#crawled[@]}" = 2 ] || fail "want the 2 crawled papers, got: ${crawled[*]}"
+          # The two papers of "AC3: crawl 2 papers" (the recorded cs.LG feed crawl-loop reads), saved by the AC3 wait step
+          # before make test-full added its own rows (e.g. test_m4_chaos.py's 9999.00001).
+          mapfile -t crawled < crawled-ids.txt
+          [ "${#crawled[@]}" = 2 ] || fail "want the 2 crawled papers in crawled-ids.txt, got: ${crawled[*]}"
+          echo "crawled papers (AC3): ${crawled[*]}; all papers now: $(q "select string_agg(arxiv_id, ' ' order by arxiv_id) from papers")"
           papers0="$(q "select count(*) || ' ' || count(distinct (arxiv_id, version)) from papers")"
           check() {
             got="$(q "select count(*) || ' ' || count(distinct (arxiv_id, version)) from papers")"
