@@ -174,6 +174,9 @@ func TestFilterRelevantHits(t *testing.T) {
 		{"tables as last word dropped", []SearchHit{ragHit(1, "Results tables", 0.5)}, []int64{}},
 		{"table followed by hyphen dropped", []SearchHit{ragHit(1, "table-2", 0.5)}, []int64{}},
 		{"supplementary material dropped", []SearchHit{ragHit(1, "Supplementary Material", 0.5)}, []int64{}},
+		// AI-14b: right word boundary, "table" as the prefix of a longer word is not a table section.
+		{"word starting with table kept: Tablet", []SearchHit{ragHit(1, "Tablet experiments", 0.5)}, []int64{1}},
+		{"word starting with table kept: Tableau", []SearchHit{ragHit(1, "Tableau dashboards", 0.5)}, []int64{1}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
