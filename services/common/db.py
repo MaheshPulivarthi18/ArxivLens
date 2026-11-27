@@ -92,6 +92,10 @@ def save_sections_and_chunks(
             section_id_map[sec["title"]] = sec_id
 
         # 2. Upsert chunks
+        # OPS-H6f: lock the paper's existing chunk rows first. An embedder save (FOR SHARE, OPS-H6e) that got in earlier
+        # commits before this returns, so the DELETE below sees and drops its vector; one that comes later waits for our
+        # commit and re-checks the new hash. Ascending chunk_index, the embedder's order, so the two can't deadlock.
+        cur.execute("SELECT id FROM paper_chunks WHERE paper_id = %s ORDER BY chunk_index FOR UPDATE;", (paper_id,))
         for chunk in chunks:
             sec_title = chunk.get("section_title", "")
             sec_id = section_id_map.get(sec_title)
