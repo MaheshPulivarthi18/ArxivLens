@@ -480,3 +480,99 @@ def test_ingest_failed_embedder_build_keeps_cached_processor(ingest):
     assert api.ingest_paper_endpoint(ingest.req).status == "success"
     assert ingest.proc_inits == 1 and api._processor_worker is proc
     assert len(ingest.emb_inits) == 2 and ingest.emb_calls == 1
+
+
+# --- The embedder worker saves each vector with the content hash it was computed from (AI-13). Fakes only, no infra. ---
+
+class _HashConn:
+    def __init__(self):
+        self.commits = 0
+        self.rollbacks = 0
+        self.closed = False
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+    def close(self):
+        self.closed = True
+
+
+class _VecEmbedder:
+    """Vector j of a call is [len(text_j), j]: deterministic, and different per chunk."""
+
+    def __init__(self):
+        self.calls = []
+
+    def embed_texts(self, texts, is_query):
+        import numpy as np
+
+        self.calls.append((list(texts), is_query))
+        return np.array([[float(len(t)), float(j)] for j, t in enumerate(texts)], dtype=np.float32)
+
+
+def _run_embed_worker(monkeypatch, caplog, chunks, written):
+    import logging
+
+    from services.embedder import worker
+
+    conn, saved, statuses = _HashConn(), [], []
+    monkeypatch.setattr(worker, "get_db_connection", lambda: conn)
+    monkeypatch.setattr(worker, "get_chunks_for_embedding", lambda c, pid, model: [dict(ch) for ch in chunks])
+
+    def fake_save(c, items):
+        assert c is conn
+        saved.append(list(items))
+        return written
+
+    monkeypatch.setattr(worker, "save_chunk_embeddings", fake_save)
+    monkeypatch.setattr(worker, "update_paper_status", lambda c, pid, status: statuses.append((c, pid, status, conn.commits)))
+    w = worker.EmbedderWorker(embedder=_VecEmbedder())
+    w.batch_size = 2  # three chunks to embed -> two batches
+    env = SimpleNamespace(paper_id="2608.00001", version=1, payload={"paper_db_id": 42})  # the fields process_message reads
+    with caplog.at_level(logging.INFO, logger="embedder"):
+        w.process_message(env, None)
+    return w, conn, saved, statuses
+
+
+_HASH_CHUNKS = [
+    {"chunk_id": 11, "chunk_index": 0, "content": "T — S\n\nalpha", "content_hash": "h-11", "existing_model": None},
+    {"chunk_id": 12, "chunk_index": 1, "content": "T — S\n\nbeta beta", "content_hash": "h-12", "existing_model": "bge"},
+    {"chunk_id": 13, "chunk_index": 2, "content": "T — S\n\ngamma gamma gamma", "content_hash": "h-13", "existing_model": None},
+    {"chunk_id": 14, "chunk_index": 3, "content": "T — S\n\nd", "content_hash": "h-14", "existing_model": None},
+]
+
+
+def _saved_logs(caplog):
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith("Saved ")]
+
+
+def test_embedder_worker_passes_each_chunks_content_hash(monkeypatch, caplog):
+    """AC1: every saved item is (chunk_id, model, vector, that chunk's content_hash), for exactly the chunks it embedded."""
+    w, conn, saved, statuses = _run_embed_worker(monkeypatch, caplog, _HASH_CHUNKS, written=3)
+    assert len(saved) == 1
+    items = saved[0]
+    assert all(len(it) == 4 for it in items), items
+    to_embed = [c for c in _HASH_CHUNKS if c["existing_model"] is None]
+    assert [(it[0], it[1], it[3]) for it in items] == [(c["chunk_id"], w.model_name, c["content_hash"]) for c in to_embed]
+    # Each vector is the one computed from that chunk's own text (batches of 2: positions 0,1 then 0).
+    assert [it[2] for it in items] == [[float(len(_HASH_CHUNKS[0]["content"])), 0.0],
+                                       [float(len(_HASH_CHUNKS[2]["content"])), 1.0],
+                                       [float(len(_HASH_CHUNKS[3]["content"])), 0.0]]
+    assert w.embedder.calls == [([_HASH_CHUNKS[0]["content"], _HASH_CHUNKS[2]["content"]], False),
+                                ([_HASH_CHUNKS[3]["content"]], False)]
+    assert _saved_logs(caplog) == ["Saved 3 embeddings for 2608.00001"]
+    assert statuses == [(conn, 42, "embedded", 0)] and conn.commits == 1 and conn.rollbacks == 0 and conn.closed
+
+
+def test_embedder_worker_logs_written_and_skipped_and_still_marks_embedded(monkeypatch, caplog):
+    """AC2 + AC3: the log reports the returned count and the skipped count; skips don't fail the message."""
+    _, conn, saved, statuses = _run_embed_worker(monkeypatch, caplog, _HASH_CHUNKS, written=1)
+    assert len(saved) == 1 and len(saved[0]) == 3
+    assert _saved_logs(caplog) == ["Saved 1 embeddings for 2608.00001 (2 skipped: chunk text changed or removed since read)"]
+    assert not any("Saved 3 " in r.getMessage() or "saved 3 " in r.getMessage() for r in caplog.records)
+    # Status set before the single commit, in the same transaction; no rollback.
+    assert statuses == [(conn, 42, "embedded", 0)]
+    assert conn.commits == 1 and conn.rollbacks == 0 and conn.closed

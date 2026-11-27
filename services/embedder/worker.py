@@ -61,7 +61,9 @@ class EmbedderWorker:
                 logger.info(f"All {len(chunks)} chunks already embedded with {self.model_name}. Skipping compute.")
             else:
                 logger.info(f"Embedding {len(chunks_to_embed)} new/updated chunks in batches of {self.batch_size}...")
-                embeddings_to_save: List[Tuple[int, str, List[float]]] = []
+                # (chunk_id, model, vector, content_hash): save_chunk_embeddings writes a vector only while the chunk
+                # still has the hash it was computed from, so text the processor replaced or removed mid-run is skipped.
+                embeddings_to_save: List[Tuple[int, str, List[float], str]] = []
 
                 for i in range(0, len(chunks_to_embed), self.batch_size):
                     batch = chunks_to_embed[i : i + self.batch_size]
@@ -70,11 +72,16 @@ class EmbedderWorker:
 
                     for j, c in enumerate(batch):
                         vec_list = vectors[j].tolist()
-                        embeddings_to_save.append((c["chunk_id"], self.model_name, vec_list))
+                        embeddings_to_save.append((c["chunk_id"], self.model_name, vec_list, c["content_hash"]))
 
-                # 3. Save batch to database
-                save_chunk_embeddings(conn, embeddings_to_save)
-                logger.info(f"Successfully saved {len(embeddings_to_save)} embeddings for {arxiv_id}")
+                # 3. Save batch to database; log what was actually written, not what was computed.
+                written = save_chunk_embeddings(conn, embeddings_to_save)
+                skipped = len(embeddings_to_save) - written
+                if skipped > 0:
+                    logger.info(f"Saved {written} embeddings for {arxiv_id} "
+                                f"({skipped} skipped: chunk text changed or removed since read)")
+                else:
+                    logger.info(f"Saved {written} embeddings for {arxiv_id}")
 
             # 4. Update status to 'embedded'
             update_paper_status(conn, paper_db_id, status="embedded")
