@@ -48,7 +48,7 @@ export default function HeroSearch({ onSearch, loading }) {
     <div className="max-w-4xl mx-auto text-center my-8 sm:my-12">
       <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-accent border border-transparent text-primary text-xs font-medium mb-4">
         <Sparkles className="w-3.5 h-3.5" aria-hidden="true" />
-        <span>Evidence-Grounded Synthesis with Sentence-Level Verification</span>
+        <span>Evidence-Grounded Answers with Cited Passages</span>
       </div>
 
       <h1 className="font-title font-bold text-3xl sm:text-4xl text-foreground tracking-tight mb-3">

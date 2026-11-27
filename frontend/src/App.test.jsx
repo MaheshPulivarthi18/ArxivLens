@@ -324,6 +324,39 @@ describe('App: claim markers focus their card (FE-4a)', () => {
     expect(activeCards()).toHaveLength(0);
   });
 
+  it('AC3 (B-UI): the second [1] makes the "Cited by claim 2" row current, not claim 1', async () => {
+    stubFetch({ quick: synthesizedSkips });
+    const user = userEvent.setup();
+    render(<App />);
+    await ask(user);
+    const items = within(await claimsList()).getAllByRole('listitem');
+    const rows = () => within(citationCard(1)).getAllByRole('listitem');
+    const current = () => citationCard(1).querySelectorAll('[aria-current]');
+    expect(rows().map((r) => r.firstChild.textContent)).toEqual(['Cited by claim 1', 'Cited by claim 2']);
+    expect(current()).toHaveLength(0);
+
+    await user.click(within(items[1]).getByRole('button', { name: '[1]' }));
+    expect(rows()[1]).toHaveAttribute('aria-current', 'true');
+    expect(current()).toHaveLength(1);
+    await user.click(within(items[0]).getByRole('button', { name: '[1]' }));
+    expect(rows()[0]).toHaveAttribute('aria-current', 'true');
+    expect(current()).toHaveLength(1);
+  });
+
+  it('AC3 (B-UI): with a broken positional invariant the rows read "Check n"', async () => {
+    stubFetch({ quick: brokenPositional });
+    const user = userEvent.setup();
+    render(<App />);
+    await ask(user);
+    const items = within(await claimsList()).getAllByRole('listitem');
+    const rows = within(citationCard(1)).getAllByRole('listitem');
+    expect(rows.map((r) => r.firstChild.textContent)).toEqual(['Check 1', 'Check 2']);
+    expect(document.body.textContent).not.toMatch(/Cited by claim/);
+    await user.click(within(items[1]).getByRole('button', { name: '[1]' }));
+    expect(rows[0]).toHaveAttribute('aria-current', 'true');
+    expect(citationCard(1).querySelectorAll('[aria-current]')).toHaveLength(1);
+  });
+
   it.each([
     [true, 'auto'],
     [false, 'smooth'],
