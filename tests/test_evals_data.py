@@ -1083,7 +1083,8 @@ def test_case_records_hold_ids_and_numbers_only():
     assert [(r["id"], r["set"], r["outcome"]) for r in recs] == \
         [("a1", "answer", "answered"), ("x1", "refusal", "refusal"), ("n1", "near_miss", "error")]
     assert recs[0]["citations"][0] == {"arxiv_id": "1706.03762", "chunk_id": 7, "marker": 1,
-                                       "supported": True, "score": 0.6}
+                                       "supported": True, "score": 0.6, "status": None}
+    assert [r["answer_kind"] for r in recs] == [None, None, None]
     assert recs[0]["cited_units"] == 2 and recs[0]["total_units"] == 2 and recs[0]["latency_ms"] == 100.0
     assert recs[1]["refused"] is True and recs[1]["refusal_reason"] == "all_citations_unsupported"
     assert not {"answer", "content", "text", "question", "title"} & set(_keys(recs))
@@ -1181,7 +1182,7 @@ def test_malformed_citations_are_one_error_case(citations, kept):
     assert m["expected_paper_hit_rate"] == 0.0 and m["answer_refused_ids"] == []
     assert m["citations_total"] == 0 and m["supported_citation_rate"] == 0.0
     if kept is not None:
-        want = [{k: c.get(k) for k in ("arxiv_id", "chunk_id", "marker", "supported", "score")} for c in kept]
+        want = [{k: c.get(k) for k in ("arxiv_id", "chunk_id", "marker", "supported", "score", "status")} for c in kept]
         assert all(r["citations"] == want for r in m["cases"])
     json.dumps(m)
 
@@ -1551,9 +1552,14 @@ def test_claims_and_citation_fields_leave_eval_results_unchanged():
                               {"text": "Z holds.", "status": "supported", "markers": [2]}]}
     refused = {**A_REFUSAL, "citations": [{**c, "paper_version": 2, "page": 4, "status": "unsupported"}
                                    for c in A_REFUSAL["citations"]]}
+    def without_8c(rec):  # EVAL-8c records answer_kind and citation status; everything else must stay the same
+        return {**{k: v for k, v in rec.items() if k != "answer_kind"},
+                "citations": [{k: v for k, v in c.items() if k != "status"} for c in rec["citations"]]}
+
     for old, cur in ((answered, with_claims), (A_REFUSAL, refused)):
         assert evaluate_answers.classify(cur) == evaluate_answers.classify(old)
-        assert evaluate_answers.case_record("a1", "answer", cur, 5.0) == evaluate_answers.case_record("a1", "answer", old, 5.0)
+        assert without_8c(evaluate_answers.case_record("a1", "answer", cur, 5.0)) == \
+            without_8c(evaluate_answers.case_record("a1", "answer", old, 5.0))
     assert evaluate_answers.coverage_units(with_claims) == evaluate_answers.coverage_units(answered) == (2, 3)
     assert evaluate_answers.case_record("a1", "answer", with_claims, 5.0)["total_units"] == 3
 
@@ -1582,3 +1588,147 @@ def test_no_hint_for_other_errors():
 def test_make_prefers_project_venv():
     with open(os.path.join(os.path.dirname(EVALS), "Makefile"), encoding="utf-8") as f:
         assert "PY      ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)" in f.read()
+
+
+# --- EVAL-8c: results record which LLM answered (report-only; no check, threshold or exit-code change) ---
+
+DIGEST = "357c53fb659c" + "0123456789abcdef" * 3 + "0123"
+LLM_ENV = {"LLM_MODEL": "qwen2.5:3b-instruct", "LLM_BASE_URL": "https://u:p@llm.example:8443/v1?x=1",
+           "LLM_API_KEY": "sk-test-SECRET"}
+TAGS_OK = {"models": [{"name": "other:1b", "digest": "f" * 64}, {"name": "qwen2.5:3b-instruct", "digest": DIGEST}]}
+
+
+def _fake_ollama(monkeypatch, version=b'{"version":"0.40.16"}', tags=None, error=None):
+    calls = []
+
+    class R:
+        def __init__(self, body): self.body = body
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return self.body
+
+    def urlopen(req, timeout=None):
+        calls.append((req.full_url, req.get_header("Authorization"), timeout))
+        if error is not None:
+            raise error
+        return R(version if req.full_url.endswith("/api/version") else (tags or json.dumps(TAGS_OK).encode()))
+
+    monkeypatch.setattr(eval_gate.urllib.request, "urlopen", urlopen)
+    return calls
+
+
+def _gate_main(monkeypatch, tmp_path, env, kind="synthesized"):
+    for k in ("LLM_MODEL", "LLM_BASE_URL", "LLM_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(eval_gate, "embedder_device", lambda url: "mps")
+    monkeypatch.setattr(eval_gate.er, "run_retrieval_evaluation", lambda **k: _results()["retrieval"])
+    resp = {**ANSWERED, "answer_kind": kind}
+    monkeypatch.setattr(evaluate_answers, "make_http_ask", lambda url, t, max_citations=5, quick=False:
+                        lambda q: (copy.deepcopy(resp), 10.0))
+    code = eval_gate.main(["--results-dir", str(tmp_path)])
+    (out,) = [os.path.join(tmp_path, f) for f in os.listdir(tmp_path)]
+    with open(out, encoding="utf-8") as f:
+        return code, f.read()
+
+
+def test_llm_block_names_model_host_version_digest_and_never_leaks(monkeypatch, tmp_path, capsys):
+    calls = _fake_ollama(monkeypatch)
+    code, written = _gate_main(monkeypatch, tmp_path, LLM_ENV)
+    llm = json.loads(written)["llm"]
+    assert llm == {"model": "qwen2.5:3b-instruct", "source": "env", "host": "llm.example:8443",
+                   "ollama_version": "0.40.16", "digest": DIGEST, "digest_short": "357c53fb659c",
+                   "synthesized_answer_rate": 1.0}
+    assert [(u, a) for u, a, _ in calls] == [("https://llm.example:8443/api/version", "Bearer sk-test-SECRET"),
+                                             ("https://llm.example:8443/api/tags", "Bearer sk-test-SECRET")]
+    assert all(t <= 5 for _, _, t in calls)
+    captured = capsys.readouterr()
+    for blob in (written, captured.out, captured.err):
+        assert "sk-test-SECRET" not in blob and "u:p" not in blob and "x=1" not in blob
+    assert "llm: model=qwen2.5:3b-instruct host=llm.example:8443 ollama=0.40.16 digest=357c53fb659c" in captured.out
+    assert code == 1  # the fake answers the refusal set too, so correct_refusal_rate fails as before EVAL-8c
+
+
+@pytest.mark.parametrize("fake", [
+    {"error": evaluate_answers.urllib.error.URLError(ConnectionRefusedError(111, "refused"))},
+    {"error": evaluate_answers.urllib.error.HTTPError("http://h/api/tags", 401, "Unauthorized", {}, None)},
+    {"tags": b'{"models": [{"name": "other:1b", "digest": "abc"}]}'},
+    {"version": b"<html>", "tags": b"not json"}, {"error": TimeoutError("timed out")},
+], ids=["refused", "401", "model-missing", "non-json", "timeout"])
+def test_probe_failure_never_changes_the_run(monkeypatch, tmp_path, capsys, fake):
+    _fake_ollama(monkeypatch)
+    ok_code, _ = _gate_main(monkeypatch, tmp_path / "ok", LLM_ENV)
+    _fake_ollama(monkeypatch, **fake)
+    code, written = _gate_main(monkeypatch, tmp_path / "bad", LLM_ENV)
+    llm = json.loads(written)["llm"]
+    assert code == ok_code and llm["digest"] is None and llm["digest_short"] is None
+    assert llm["probe_error"] and "sk-test-SECRET" not in llm["probe_error"]
+    assert llm["model"] == "qwen2.5:3b-instruct" and llm["host"] == "llm.example:8443"
+    assert "sk-test-SECRET" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("env,host", [({"LLM_API_KEY": "sk-test-SECRET"}, None), (  # QA r1: base URL set, model unset
+    {"LLM_BASE_URL": LLM_ENV["LLM_BASE_URL"], "LLM_API_KEY": "sk-test-SECRET"}, "llm.example:8443")], ids=["no-url", "url"])
+def test_no_probe_without_llm_model(monkeypatch, tmp_path, env, host):
+    calls = _fake_ollama(monkeypatch)
+    _, written = _gate_main(monkeypatch, tmp_path, env, kind="quoted")
+    assert calls == []
+    assert json.loads(written)["llm"] == {"model": None, "source": "env", "host": host, "ollama_version": None,
+                                          "digest": None, "digest_short": None, "synthesized_answer_rate": 0.0}
+
+
+def test_default_base_url_only_with_a_model():
+    assert eval_gate._llm_root(eval_gate.LLM_DEFAULT_BASE_URL) == ("localhost:11434", "http://localhost:11434")
+    assert eval_gate.llm_info({})["host"] is None
+    assert eval_gate.llm_info({"LLM_BASE_URL": "http://gpu.lan:11434/v1"})["host"] == "gpu.lan:11434"
+    assert eval_gate._llm_root("http://[::1]:11434/v1") == ("[::1]:11434", "http://[::1]:11434")
+
+
+SYNTH = {**ANSWERED, "answer_kind": "synthesized",
+         "citations": [{**_cite(1), "status": "supported"}, {**_cite(2), "status": "unsupported"}]}
+QUOTED = {**ANSWERED, "answer_kind": "quoted"}
+
+
+def test_case_record_carries_answer_kind_and_citation_status():
+    rec = evaluate_answers.case_record
+    s, q, r = rec("a1", "answer", SYNTH, 1.0), rec("a2", "answer", QUOTED, 1.0), rec("x1", "refusal", A_REFUSAL, 1.0)
+    assert (s["answer_kind"], [c["status"] for c in s["citations"]]) == ("synthesized", ["supported", "unsupported"])
+    assert (q["answer_kind"], [c["status"] for c in q["citations"]]) == ("quoted", [None, None])
+    assert r["answer_kind"] is None and r["citations"] and all(c["status"] is None for c in r["citations"])
+    assert rec("a1", "answer", {**SYNTH, "answer_kind": 3}, 1.0)["answer_kind"] is None
+
+
+def test_synthesized_answer_rate_counts_answered_full_responses_only():
+    resps = {"q0": SYNTH, "q1": SYNTH, "q2": QUOTED, "r0": A_REFUSAL}
+    cases = [{"id": f"a{i}", "question": f"q{i}", "expected_arxiv_ids": ["1706.03762"]} for i in range(3)]
+    m = evaluate_answers.evaluate(cases, [{"id": "x0", "question": "r0"}], lambda q: (copy.deepcopy(resps[q]), 1.0))
+    assert eval_gate.synthesized_answer_rate(m) == (2 / 3, 2)  # stored exactly; 0.6667 to 4 dp
+    m = evaluate_answers.evaluate(cases[2:], [], lambda q: (copy.deepcopy(resps[q]), 1.0), [{"id": "n0", "question": "q0"}])
+    assert eval_gate.synthesized_answer_rate(m) == (1 / 2, 1)  # an answered near-miss counts too (QA r1, n003)
+    m = evaluate_answers.evaluate([], [{"id": "x0", "question": "r0"}], lambda q: (copy.deepcopy(A_REFUSAL), 1.0))
+    assert eval_gate.synthesized_answer_rate(m) == (None, 0) and eval_gate.synthesized_answer_rate(None) == (None, 0)
+    assert eval_gate.llm_warnings("qwen2.5:3b-instruct", 0, None) == []  # nothing answered: no "every answer was quoted"
+
+
+@pytest.mark.parametrize("model,synthesized,warns", [
+    (None, 0, None), (None, 2, "can't name"), ("qwen2.5:3b-instruct", 0, "0 answers were synthesized"),
+    ("qwen2.5:3b-instruct", 2, None)])
+def test_llm_warnings(model, synthesized, warns):
+    w = eval_gate.llm_warnings(model, synthesized)
+    assert (w == []) if warns is None else (len(w) == 1 and warns in w[0])
+
+
+def test_warning_goes_to_stderr_and_keeps_the_exit_code(monkeypatch, tmp_path, capsys):
+    _fake_ollama(monkeypatch)
+    quiet, _ = _gate_main(monkeypatch, tmp_path / "a", LLM_ENV)
+    assert "warning" not in capsys.readouterr().err
+    warned, _ = _gate_main(monkeypatch, tmp_path / "b", {}, kind="synthesized")
+    assert "export LLM_MODEL" in capsys.readouterr().err and warned == quiet
+
+
+def test_llm_block_adds_no_check():
+    res = _results()
+    res["llm"] = {"model": "m", "synthesized_answer_rate": 0.0, "digest": None}
+    assert eval_gate.check_thresholds(res, eval_gate.load_thresholds()) == \
+        eval_gate.check_thresholds(_results(), eval_gate.load_thresholds())

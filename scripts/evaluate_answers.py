@@ -184,7 +184,10 @@ def case_record(case_id: str, case_set: str, resp: Optional[Dict[str, Any]], ms:
     rec: Dict[str, Any] = {
         "id": case_id, "set": case_set, "outcome": outcome, "refused": outcome == "refusal",
         "refusal_reason": _reason_str(r) or None, "latency_ms": round(ms, 1),
-        "citations": [{k: c.get(k) for k in ("arxiv_id", "chunk_id", "marker", "supported", "score")}
+        # EVAL-8c: how the answer was written (quoted | synthesized) and each citation's ADR-0014 status; null if absent
+        "answer_kind": r.get("answer_kind") if isinstance(r.get("answer_kind"), str) else None,
+        "citations": [{**{k: c.get(k) for k in ("arxiv_id", "chunk_id", "marker", "supported", "score")},
+                       "status": c.get("status") if isinstance(c.get("status"), str) else None}
                       for c in _citation_items(r)],
     }
     if outcome == "answered":

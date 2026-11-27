@@ -17,8 +17,9 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EVALS_DIR = os.path.join(REPO_ROOT, "evals")
@@ -63,6 +64,98 @@ def embedder_device(embedder_url: str, timeout_s: float = 10.0) -> Optional[str]
     except (urllib.error.URLError, TimeoutError, ValueError, OSError, AttributeError):
         return None
     return device if isinstance(device, str) else None
+
+
+# EVAL-8c (report-only, never read by check_thresholds): which LLM answered. Mirrors internal/llm/config.go: no
+# LLM_MODEL means no LLM; LLM_BASE_URL defaults to Ollama's only when a model is set. Only the host is recorded, never
+# the scheme, path, query, userinfo or LLM_API_KEY.
+LLM_DEFAULT_BASE_URL = "http://localhost:11434/v1"
+LLM_PROBE_TIMEOUT_S = 5.0
+
+
+def _llm_root(base_url: str) -> Tuple[Optional[str], Optional[str]]:
+    """(host[:port], Ollama native API root without userinfo, query or a trailing /v1), or (None, None)."""
+    try:
+        u = urllib.parse.urlsplit(base_url)
+        host, port = u.hostname, u.port
+    except ValueError:
+        return None, None
+    if not host or u.scheme not in ("http", "https"):
+        return None, None
+    hostport = (f"[{host}]" if ":" in host else host) + (f":{port}" if port else "")
+    path = u.path.rstrip("/")
+    path = path[:-3] if path.endswith("/v1") else path
+    return hostport, f"{u.scheme}://{hostport}{path}"
+
+
+def _probe_error(path: str, e: BaseException) -> str:
+    code = f" {e.code}" if isinstance(e, urllib.error.HTTPError) else ""
+    reason = getattr(e, "reason", None)
+    why = f" ({type(reason).__name__})" if isinstance(reason, BaseException) else ""
+    return f"GET {path}: {type(e).__name__}{code}{why}"  # never the URL, headers or body
+
+
+def probe_ollama(root: str, model: str, api_key: str, timeout_s: float = LLM_PROBE_TIMEOUT_S) -> Dict[str, Any]:
+    """Best-effort Ollama version + model digest. Never raises; failures give None plus probe_error."""
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    out: Dict[str, Any] = {"ollama_version": None, "digest": None, "digest_short": None}
+    errors: List[str] = []
+
+    def get(path: str) -> Any:
+        req = urllib.request.Request(root + path, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout_s) as r:
+            return json.loads(r.read().decode("utf-8"))
+
+    try:
+        v = get("/api/version").get("version")
+        out["ollama_version"] = v if isinstance(v, str) else None
+    except Exception as e:  # noqa: BLE001 (best effort: report, never fail the run)
+        errors.append(_probe_error("/api/version", e))
+    try:
+        listed = [m for m in get("/api/tags").get("models") or [] if isinstance(m, dict)
+                  and model in (m.get("name"), m.get("model"))]
+        digest = listed[0].get("digest") if listed else None
+        if isinstance(digest, str) and digest:
+            digest = digest.split(":", 1)[-1]  # tolerate a "sha256:" prefix
+            out.update(digest=digest, digest_short=digest[:12])
+        else:
+            errors.append(f"GET /api/tags: {model} not listed")
+    except Exception as e:  # noqa: BLE001
+        errors.append(_probe_error("/api/tags", e))
+    if errors:
+        out["probe_error"] = "; ".join(errors)
+    return out
+
+
+def llm_info(environ: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """The results "llm" block minus synthesized_answer_rate; probes Ollama only when LLM_MODEL is set."""
+    env = os.environ if environ is None else environ
+    model = env.get("LLM_MODEL", "").strip() or None
+    base = env.get("LLM_BASE_URL", "").strip() or (LLM_DEFAULT_BASE_URL if model else "")
+    host, root = _llm_root(base) if base else (None, None)
+    info: Dict[str, Any] = {"model": model, "source": "env", "host": host,
+                            "ollama_version": None, "digest": None, "digest_short": None}
+    if model and root:
+        info.update(probe_ollama(root, model, env.get("LLM_API_KEY", "").strip()))
+    elif model:
+        info["probe_error"] = "LLM_BASE_URL is not an absolute http(s) URL"
+    return info
+
+
+def synthesized_answer_rate(answers: Optional[Dict[str, Any]]) -> Tuple[Optional[float], int]:
+    """(synthesized / answered full responses over every set, or None if none answered; synthesized count)."""
+    answered = [c for c in (answers or {}).get("cases") or [] if c.get("outcome") == "answered"]
+    synth = sum(1 for c in answered if c.get("answer_kind") == "synthesized")
+    return (synth / len(answered) if answered else None), synth
+
+
+def llm_warnings(model: Optional[str], synthesized: int, rate: Optional[float] = 0.0) -> List[str]:
+    if not model and synthesized:
+        return [f"warning: {synthesized} written answers came from an LLM the eval can't name; "
+                "export LLM_MODEL for make eval too"]
+    if model and not synthesized and rate is not None:  # rate None: nothing answered, so nothing to say
+        return [f"warning: LLM_MODEL={model} is set but 0 answers were synthesized (every answer was quoted)"]
+    return []
 
 
 def load_thresholds(path: str = os.path.join(EVALS_DIR, "thresholds.json")) -> Dict[str, Any]:
@@ -192,6 +285,9 @@ def main(argv=None) -> int:
     results: Dict[str, Any] = {"retrieval": None, "answers": None,
                                "hardware": {"device": device, "profile": hardware_profile(device)}}
     print(f"hardware: embedder device={device or 'unknown'} profile={hardware_profile(device) or 'unknown (latency gated)'}")
+    llm = llm_info()
+    print(f"llm: model={llm['model'] or 'unset'} host={llm['host'] or 'n/a'} ollama={llm['ollama_version'] or 'unknown'} "
+          f"digest={llm['digest_short'] or 'unknown'}" + (f" ({llm['probe_error']})" if llm.get("probe_error") else ""))
 
     try:
         if not args.skip_retrieval:
@@ -215,6 +311,11 @@ def main(argv=None) -> int:
             print(f"hint: {hint}", file=sys.stderr)
         return 2
 
+    rate, synthesized = synthesized_answer_rate(results["answers"])
+    results["llm"] = {**llm, "synthesized_answer_rate": rate}
+    print(f"(report-only) synthesized_answer_rate: {'n/a' if rate is None else f'{rate:.4f}'}")
+    for w in llm_warnings(llm["model"], synthesized, rate) if results["answers"] is not None else []:
+        print(w, file=sys.stderr)
     checks = check_thresholds(results, thresholds)
     print_table(checks, results["answers"], results["retrieval"])
 
