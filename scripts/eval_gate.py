@@ -35,7 +35,9 @@ from scripts import evaluate_retrieval as er  # noqa: E402  (stdlib-only at impo
 GATED_MODE = er.RERANK_MODE
 BASELINE_MODES = ("BM25 Keyword", "Dense Vector")
 # Printed by print_table, never read by check_thresholds (EVAL-6). Definitions: evals/README.md.
-REPORT_ONLY_KEYS = ("ask_full_p95_ms", "citation_coverage", "near_miss_correct_refusal_rate", "verification_unavailable_count")
+# The search_* keys live in results["search"] (B-QUAL; report-only while ADR-0012 is Proposed, no threshold key).
+REPORT_ONLY_KEYS = ("ask_full_p95_ms", "citation_coverage", "near_miss_correct_refusal_rate", "verification_unavailable_count",
+                    "search_p50_ms", "search_p95_ms", "search_count", "search_error_count")
 
 
 # Technical PRD §9 "Reference hardware" (Accepted 2026-11-15): latency targets are gated on the reference profile, a
@@ -220,7 +222,7 @@ def check_thresholds(results: Dict[str, Any], thresholds: Dict[str, Any]) -> Lis
 
 
 def print_table(checks: List[Dict[str, Any]], answers: Optional[Dict[str, Any]],
-                retrieval: Optional[Dict[str, Any]] = None) -> None:
+                retrieval: Optional[Dict[str, Any]] = None, search: Optional[Dict[str, Any]] = None) -> None:
     print("\n" + "=" * 78)
     print(f"{'Metric':<48} | {'Value':>9} | {'Target':>10} | Result")
     print("-" * 78)
@@ -241,11 +243,23 @@ def print_table(checks: List[Dict[str, Any]], answers: Optional[Dict[str, Any]],
         print("-" * 78)
         print("report-only (EVAL-6; not gated, promoting one to a gate needs an ADR)")
         for key in REPORT_ONLY_KEYS:
-            v = answers.get(key)
+            v = {**answers, **(search or {})}.get(key)
             val = "n/a" if v is None else (f"{v:.4f}" if isinstance(v, float) else str(v))
             print(f"{'(report-only) ' + key:<48} | {val:>9} |")
         print(f"{'(report-only) refusal_reason_counts':<48} | {json.dumps(answers.get('refusal_reason_counts', {}))}")
     print("=" * 78)
+
+
+def run_search(api_url: str, timeout_s: float) -> Dict[str, Any]:
+    """Report-only /v1/search timing (B-QUAL). Never raises: a failure counts every call as an error."""
+    from scripts import evaluate_search as es
+    queries: List[str] = []
+    try:
+        queries = [c["query"] for c in er.load_cases()]
+        return es.measure(queries, es.make_http_search(api_url, timeout_s))
+    except Exception as e:
+        print(f"search latency could not be measured: {type(e).__name__}: {e}", file=sys.stderr)
+        return es.failed(len(queries))
 
 
 def could_not_run_hint(e: BaseException) -> Optional[str]:
@@ -278,6 +292,8 @@ def main(argv=None) -> int:
                         help="Per request timeout for /v1/ask and the embedder API (s)")
     parser.add_argument("--skip-retrieval", action="store_true", help="Measure answers only (gate will fail)")
     parser.add_argument("--skip-answers", action="store_true", help="Measure retrieval only (gate will fail)")
+    parser.add_argument("--skip-search", action="store_true",
+                        help="Don't time /v1/search (report-only; also skipped with --skip-answers)")
     args = parser.parse_args(argv)
 
     thresholds = load_thresholds(args.thresholds)
@@ -311,13 +327,19 @@ def main(argv=None) -> int:
             print(f"hint: {hint}", file=sys.stderr)
         return 2
 
+    if not (args.skip_answers or args.skip_search):
+        results["search"] = run_search(args.api_url, args.timeout)
+
     rate, synthesized = synthesized_answer_rate(results["answers"])
     results["llm"] = {**llm, "synthesized_answer_rate": rate}
     print(f"(report-only) synthesized_answer_rate: {'n/a' if rate is None else f'{rate:.4f}'}")
     for w in llm_warnings(llm["model"], synthesized, rate) if results["answers"] is not None else []:
         print(w, file=sys.stderr)
     checks = check_thresholds(results, thresholds)
-    print_table(checks, results["answers"], results["retrieval"])
+    print_table(checks, results["answers"], results["retrieval"], results.get("search"))
+    if results.get("search"):
+        from scripts import evaluate_search as es
+        print(es.summary_line(results["search"], results["hardware"]["profile"]))
 
     os.makedirs(args.results_dir, exist_ok=True)
     stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
