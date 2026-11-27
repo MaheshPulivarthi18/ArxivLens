@@ -60,7 +60,7 @@ export default function HeroSearch({ onSearch, loading }) {
 
       {/* Main Clinical Search Bar */}
       <form onSubmit={handleSubmit} className="relative max-w-3xl mx-auto">
-        <div className="relative flex items-center bg-card border border-border/90 rounded-xl p-1.5 shadow-2xl shadow-black/40 focus-within:border-input focus-within:ring-2 focus-within:ring-ring/30 transition-all">
+        <div className="relative flex items-center bg-card border border-input rounded-xl p-1.5 shadow-2xl shadow-black/40 focus-within:border-input focus-within:ring-2 focus-within:ring-ring transition-all">
           <Search className="w-5 h-5 text-muted-foreground ml-3 shrink-0" />
           <input
             type="text"
