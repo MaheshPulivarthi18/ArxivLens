@@ -49,3 +49,60 @@ export function markdownNote(answer, citations) {
   });
   return md;
 }
+
+// Claim verdict (design FE-4 §1). Claims carry no score; same conservative order as citationState: only
+// `supported` reads Supported, `unverified` reads Not checked, anything else (reserved, unknown, missing) Unsupported.
+export function claimState(claim) {
+  const status = claim?.status;
+  if (status === 'supported') return { kind: 'supported', text: 'Supported' };
+  if (status === 'unverified') return { kind: 'unchecked', text: 'Not checked' };
+  return { kind: 'unsupported', text: 'Unsupported' };
+}
+
+// True when the response carries a usable claims list; otherwise the view falls back to the prose (FE-3).
+export const hasClaims = (claims) =>
+  Array.isArray(claims) && claims.length > 0 && claims.every((c) => typeof c?.text === 'string');
+
+const markersOf = (claim) => (Array.isArray(claim?.markers) ? claim.markers : []);
+
+// Positional mapping (rag.go: claim i's citations are citations[o_i : o_i + len(markers_i)]).
+// → [{ claim, index, entries: [{ marker, citation, pos }] }], or null when the response breaks the invariant,
+// so a malformed response can never pin a claim to the wrong passage.
+export function claimCitations(claims, citations) {
+  const cits = citations || [];
+  const rows = [];
+  let o = 0;
+  for (const [index, claim] of claims.entries()) {
+    const entries = markersOf(claim).map((marker, j) => ({ marker, citation: cits[o + j] ?? null, pos: o + j }));
+    if (entries.some((e) => e.citation?.marker !== e.marker)) return null;
+    rows.push({ claim, index, entries });
+    o += entries.length;
+  }
+  return o === cits.length ? rows : null;
+}
+
+// Rows for the claims list: positional when valid, else each marker maps to the first citation with its number
+// (citation null, pos undefined when there is none).
+export function claimRows(claims, citations) {
+  const exact = claimCitations(claims, citations);
+  if (exact) return exact;
+  const cits = citations || [];
+  return claims.map((claim, index) => ({
+    claim,
+    index,
+    entries: markersOf(claim).map((marker) => {
+      const pos = cits.findIndex((c) => c.marker === marker);
+      return pos < 0 ? { marker, citation: null, pos: undefined } : { marker, citation: cits[pos], pos };
+    }),
+  }));
+}
+
+// One card per distinct marker, in first-seen order (a written answer can cite one passage from several claims).
+export function groupByMarker(citations) {
+  const groups = new Map();
+  (citations || []).forEach((citation, pos) => {
+    if (!groups.has(citation.marker)) groups.set(citation.marker, { marker: citation.marker, entries: [] });
+    groups.get(citation.marker).entries.push({ citation, pos });
+  });
+  return [...groups.values()];
+}

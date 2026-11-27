@@ -106,3 +106,70 @@ export const contradictorySupported = { ...supportedCitation, status: 'supported
 export const partialCitation = { ...supportedCitation, status: 'partially_supported', supported: false };
 export const contradictedCitation = { ...supportedCitation, status: 'contradicted', supported: false };
 export const legacyRefusalZero = { ...unverifiedCitation, status: undefined, score: 0, supported: false };
+
+// FE-4a: responses with `claims` (rag.go Claim: text, status, markers; citations positional per claim).
+// Quoted answer: one claim per status, plus an uncited sentence. Citation 1's content crosses a line break and holds
+// an inline [12]; its quote is the server's normalised form (used by FE-4b).
+export const quotedClaims = {
+  answer:
+    'We retrieve passages with hybrid search and check each claim [1]. Entailment scores fall below the support threshold [2]. An introductory passage [3]. Results vary across domains.',
+  citations: [
+    {
+      ...supportedCitation,
+      content: 'We retrieve passages with hybrid\nsearch [12] and check each claim.',
+      quote: 'We retrieve passages with hybrid search and check each claim.',
+    },
+    unsupportedCitation,
+    unverifiedCitation,
+  ],
+  claims: [
+    { text: 'We retrieve passages with hybrid search and check each claim.', status: 'supported', markers: [1] },
+    { text: 'Entailment scores fall below the support threshold.', status: 'unsupported', markers: [2] },
+    { text: 'An introductory passage.', status: 'unverified', markers: [3] },
+    { text: 'Results vary across domains.', status: 'unverified', markers: [] },
+  ],
+  trace_id: 'trace-claims-0001',
+  answer_kind: 'quoted',
+};
+
+// Written answer (ADR-0019): passage 1 cited by both claims (repeat) and no [2] (skip); all supported, no quotes, page on [3] only.
+const skipsM1 = { ...supportedCitation, quote: undefined, page: undefined };
+const skipsM3 = {
+  ...supportedCitation,
+  marker: 3,
+  arxiv_id: '2405.04321',
+  title: 'Claim-Level Checking in Practice',
+  chunk_id: 505,
+  section: 'Evaluation',
+  content: 'Each statement is compared with the passage it cites.',
+  pdf_url: 'https://arxiv.org/pdf/2405.04321v1',
+  paper_version: 1,
+  page: 7,
+  quote: undefined,
+  score: 0.912,
+};
+export const synthesizedSkips = {
+  answer: 'Retrieval grounds each answer [1]. Statements are compared with their passages [1] [3].',
+  citations: [skipsM1, { ...skipsM1, score: 0.801 }, skipsM3],
+  claims: [
+    { text: 'Retrieval grounds each answer.', status: 'supported', markers: [1] },
+    { text: 'Statements are compared with their passages.', status: 'supported', markers: [1, 3] },
+  ],
+  trace_id: 'trace-skips-0001',
+  answer_kind: 'synthesized',
+};
+
+// Same claims, but citations out of positional order: markers must still map by number.
+export const brokenPositional = {
+  ...synthesizedSkips,
+  citations: [skipsM3, skipsM1, { ...skipsM1, score: 0.801 }],
+  trace_id: 'trace-broken-0001',
+};
+
+// `claims` values that must fall back to the FE-3 prose.
+export const malformedClaims = [
+  'not a list',
+  [{ status: 'supported', markers: [1] }],
+  [null],
+  [{ text: 'Fine.', status: 'supported', markers: [1] }, { text: 7, status: 'supported', markers: [2] }],
+];

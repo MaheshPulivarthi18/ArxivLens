@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import App from './App';
-import { earlyRefusal, quotedAnswer, refusalA, refusalB, refusalC, synthesizedAnswer } from './test/fixtures';
+import {
+  earlyRefusal, quotedAnswer, refusalA, refusalB, refusalC, synthesizedAnswer,
+  supportedCitation, quotedClaims, synthesizedSkips, brokenPositional,
+} from './test/fixtures';
 
 // App-level regression tests for FE-3a (design docs/design/FE-3.md §Test plan, App.test.jsx rows).
 // Toast is mocked so every message it was rendered with can be inspected; it renders nothing.
@@ -198,5 +201,156 @@ describe('App: two-stage answer (FE-3a)', () => {
     expect(screen.queryByText('No answer shown')).toBeNull();
     expect(screen.queryByRole('status', { name: /no answer shown/i })).toBeNull();
     expectNoToastMessage();
+  });
+});
+
+// FE-4a (design docs/design/FE-4.md §4, test plan rows AC2, AC2b, AC2c).
+const claimsList = () => screen.findByRole('list', { name: 'Claims in this answer' });
+const citationCard = (marker) => screen.getByRole('article', { name: new RegExp(`^Citation \\[${marker}\\]`) });
+const activeCards = () => document.querySelectorAll('[data-active]');
+
+describe('App: claim markers focus their card (FE-4a)', () => {
+  it('AC2/AC2c: clicking [3] focuses card [3] and marks it active; heading counts cards, footer counts checks', async () => {
+    stubFetch({ quick: synthesizedSkips });
+    const user = userEvent.setup();
+    render(<App />);
+    await ask(user);
+    const list = await claimsList();
+
+    expect(within(screen.getByRole('heading', { name: /^References/ })).getByText('2 cited')).toBeInTheDocument();
+    expect(screen.getByText('3 of 3 citations supported')).toBeInTheDocument();
+    expect(document.querySelectorAll('[id="ref-1"]')).toHaveLength(1);
+    expect(activeCards()).toHaveLength(0);
+
+    await user.click(within(list).getByRole('button', { name: '[3]' }));
+    expect(document.activeElement).toBe(citationCard(3));
+    expect(citationCard(3)).toHaveAttribute('data-active', 'true');
+    expect(activeCards()).toHaveLength(1);
+  });
+
+  it('AC2: Tab to [1] opens its preview tooltip; Enter moves focus to card [1] and the tooltip closes', async () => {
+    stubFetch({ quick: synthesizedSkips });
+    const user = userEvent.setup();
+    render(<App />);
+    await ask(user);
+    const list = await claimsList();
+
+    const m1 = within(within(list).getAllByRole('listitem')[0]).getByRole('button', { name: '[1]' });
+    for (let i = 0; i < 60 && document.activeElement !== m1; i++) await user.tab();
+    expect(m1).toHaveFocus();
+    const tip = await screen.findByRole('tooltip');
+    expect(tip).toHaveTextContent(supportedCitation.title);
+    expect(tip).toHaveTextContent('Supported · 87.3%');
+
+    await user.keyboard('{Enter}');
+    expect(document.activeElement).toBe(citationCard(1));
+    expect(citationCard(1)).toHaveAttribute('data-active', 'true');
+    await waitFor(() => expect(screen.queryByRole('tooltip')).toBeNull());
+  });
+
+  it('AC2: Space on a marker also focuses its card', async () => {
+    stubFetch({ quick: synthesizedSkips });
+    const user = userEvent.setup();
+    render(<App />);
+    await ask(user);
+    const list = await claimsList();
+    const m3 = within(list).getByRole('button', { name: '[3]' });
+    for (let i = 0; i < 60 && document.activeElement !== m3; i++) await user.tab();
+    await user.keyboard(' ');
+    expect(document.activeElement).toBe(citationCard(3));
+  });
+
+  it('AC2: with a broken positional invariant, markers still map by number', async () => {
+    stubFetch({ quick: brokenPositional });
+    const user = userEvent.setup();
+    render(<App />);
+    await ask(user);
+    const items = within(await claimsList()).getAllByRole('listitem');
+
+    await user.click(within(items[1]).getByRole('button', { name: '[3]' }));
+    expect(document.activeElement).toBe(citationCard(3));
+    await user.click(within(items[0]).getByRole('button', { name: '[1]' }));
+    expect(document.activeElement).toBe(citationCard(1));
+    expect(activeCards()).toHaveLength(1);
+  });
+
+  it.each([
+    ['quoted answer (prose)', { ...quotedAnswer, synthesis_available: false }],
+    ['quoted claims', quotedClaims],
+    ['refusal A', refusalA],
+    ['refusal B', refusalB],
+    ['refusal C', refusalC],
+  ])('AC2b: %s: no card is active on load', async (_name, response) => {
+    stubFetch({ quick: response });
+    const user = userEvent.setup();
+    render(<App />);
+    await ask(user);
+    await waitFor(() => expect(screen.getAllByRole('article').length).toBeGreaterThan(0));
+    expect(activeCards()).toHaveLength(0);
+  });
+
+  it('AC2b: after the written answer replaces the quoted one, no card is active', async () => {
+    const full = deferred();
+    stubFetch({ quick: { ...quotedClaims, synthesis_available: true }, full: () => full.promise });
+    const user = userEvent.setup();
+    render(<App />);
+    await ask(user);
+    const list = await claimsList();
+    // [1] has a card in both answers, so a stale `active` would still match one after the swap.
+    await user.click(within(list).getByRole('button', { name: '[1]' }));
+    expect(citationCard(1)).toHaveAttribute('data-active', 'true');
+    expect(activeCards()).toHaveLength(1);
+
+    await act(async () => {
+      full.resolve(synthesizedSkips);
+    });
+    expect(await screen.findByText(synthesizedSkips.claims[0].text)).toBeInTheDocument();
+    expect(citationCard(1)).not.toHaveAttribute('data-active');
+    expect(activeCards()).toHaveLength(0);
+  });
+
+  it('a new search clears the active card', async () => {
+    const fetchMock = stubFetch({ quick: synthesizedSkips });
+    const user = userEvent.setup();
+    render(<App />);
+    await ask(user);
+    await user.click(within(await claimsList()).getByRole('button', { name: '[3]' }));
+    expect(citationCard(3)).toHaveAttribute('data-active', 'true');
+
+    await ask(user);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await claimsList();
+    expect(citationCard(3)).not.toHaveAttribute('data-active');
+    expect(activeCards()).toHaveLength(0);
+  });
+
+  it.each([
+    [true, 'auto'],
+    [false, 'smooth'],
+  ])('prefers-reduced-motion %s scrolls the card with behavior "%s"', async (reduce, behavior) => {
+    vi.stubGlobal('matchMedia', vi.fn((query) => ({
+      matches: query.includes('prefers-reduced-motion') ? reduce : false,
+      media: query,
+      addEventListener() {},
+      removeEventListener() {},
+      addListener() {},
+      removeListener() {},
+    })));
+    const scrollSpy = vi.fn();
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scrollSpy;
+    try {
+      stubFetch({ quick: synthesizedSkips });
+      const user = userEvent.setup();
+      render(<App />);
+      await ask(user);
+      await user.click(within(await claimsList()).getByRole('button', { name: '[3]' }));
+      expect(document.activeElement).toBe(citationCard(3));
+      expect(scrollSpy).toHaveBeenLastCalledWith({ behavior, block: 'nearest' });
+      expect(scrollSpy.mock.contexts.at(-1)).toBe(citationCard(3));
+    } finally {
+      if (original) Element.prototype.scrollIntoView = original;
+      else delete Element.prototype.scrollIntoView;
+    }
   });
 });

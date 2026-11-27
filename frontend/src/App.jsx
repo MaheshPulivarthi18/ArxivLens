@@ -19,7 +19,8 @@ export default function App() {
   const [earlyRefusal, setEarlyRefusal] = useState(false);
   const [lastQuestion, setLastQuestion] = useState('');
   const [discovering, setDiscovering] = useState(false);
-  const [activeMarker, setActiveMarker] = useState(1);
+  // The card reached from a `[n]` marker ({ marker, pos }); nothing is active until a marker is used (design FE-4 §4).
+  const [active, setActive] = useState(null);
   const [toastMessage, setToastMessage] = useState('');
   // 'writing' while the synthesized answer is being written after the quoted one is shown.
   const [synthesis, setSynthesis] = useState('idle');
@@ -80,6 +81,7 @@ export default function App() {
     setLoading(true);
     setEarlyRefusal(false);
     setSearchResult(null);
+    setActive(null);
     setSynthesis('idle');
 
     let quick;
@@ -91,9 +93,6 @@ export default function App() {
         return;
       }
       setSearchResult(quick);
-      if (quick.citations && quick.citations.length > 0) {
-        setActiveMarker(quick.citations[0].marker);
-      }
     } catch (err) {
       console.error("Search request failed:", err);
       if (seq === searchSeq.current) showToast("❌ Search request failed. Make sure backend is running.");
@@ -109,8 +108,9 @@ export default function App() {
       if (seq !== searchSeq.current) return;
       // Keep the quoted answer if the written one was refused: the quotes are already verified evidence.
       if (full.answer_kind === 'synthesized') {
+        // Marker numbers refer to a different passage set after the swap, so no card stays active.
         setSearchResult(full);
-        if (full.citations && full.citations.length > 0) setActiveMarker(full.citations[0].marker);
+        setActive(null);
       }
     } catch (err) {
       console.error("Synthesis request failed:", err);
@@ -144,11 +144,14 @@ export default function App() {
     }
   };
 
-  const handleCitationClick = (marker) => {
-    setActiveMarker(marker);
+  // Focus moves to the card (screen readers read its label); scrolling respects reduced motion.
+  const handleCitationClick = (marker, pos) => {
+    setActive({ marker, pos });
     const targetElement = document.getElementById(`ref-${marker}`);
     if (targetElement) {
-      targetElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+      targetElement.focus({ preventScroll: true });
+      targetElement.scrollIntoView?.({ behavior: reduce ? 'auto' : 'smooth', block: 'nearest' });
     }
   };
 
@@ -203,6 +206,7 @@ export default function App() {
                     refusalReason={searchResult.refusal_reason}
                     writing={synthesis === 'writing'}
                     citations={searchResult.citations}
+                    claims={searchResult.claims}
                     onCitationClick={handleCitationClick}
                     onCopy={handleCopy}
                   />
@@ -211,7 +215,8 @@ export default function App() {
                 <div className="lg:col-span-5">
                   <ReferencesStack
                     citations={searchResult.citations}
-                    activeMarker={activeMarker}
+                    active={active}
+                    traceId={searchResult.trace_id}
                     onCopy={handleCopy}
                     refusalReason={searchResult.refusal_reason}
                   />
