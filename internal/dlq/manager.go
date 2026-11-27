@@ -2,29 +2,26 @@ package dlq
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
-	"arxivlens/internal/kafka"
 	"arxivlens/shared/events"
 	"github.com/twmb/franz-go/pkg/kerr"
-	"github.com/twmb/franz-go/pkg/kgo"
 )
 
+// Manager lists and replays one DLQ topic. List needs only the Reader; Replay also needs the Publisher and the Store.
 type Manager struct {
-	brokers []string
-	reader  Reader // List (dlq list / inspect); Replay still reads with ListEvents until OPS-H7b
+	reader Reader
+	pub    Publisher
+	store  Store
 }
 
-// NewManager: reader may be nil for Replay-only use.
-func NewManager(brokers []string, reader Reader) *Manager {
-	return &Manager{brokers: brokers, reader: reader}
+// NewManager: pub and store may be nil when only List is called (dlq list / inspect).
+func NewManager(reader Reader, pub Publisher, store Store) *Manager {
+	return &Manager{reader: reader, pub: pub, store: store}
 }
 
 // DefaultPageSize is the page size when ListOptions.PageSize <= 0 (dlq list --page-size default).
@@ -162,103 +159,179 @@ func (e *missingTopicError) Error() string {
 
 func (e *missingTopicError) Unwrap() error { return e.err }
 
-// ListEvents reads messages from a DLQ topic without committing offsets
-func (m *Manager) ListEvents(ctx context.Context, dlqTopic string, limit int) ([]events.DLQPayload, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-
-	client, err := kgo.NewClient(
-		kgo.SeedBrokers(m.brokers...),
-		kgo.ConsumeTopics(dlqTopic),
-		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create dlq client: %w", err)
-	}
-	defer client.Close()
-
-	var results []events.DLQPayload
-	deadline := time.Now().Add(2 * time.Second)
-
-	for len(results) < limit && time.Now().Before(deadline) {
-		pollCtx, pollCancel := context.WithTimeout(ctx, 1*time.Second)
-		fetches := client.PollFetches(pollCtx)
-		pollCancel()
-
-		if fetches.IsClientClosed() {
-			break
-		}
-		if errs := fetches.Errors(); len(errs) > 0 {
-			break
-		}
-		if fetches.NumRecords() == 0 {
-			break
-		}
-
-		iter := fetches.RecordIter()
-		for !iter.Done() && len(results) < limit {
-			rec := iter.Next()
-			var payload events.DLQPayload
-			if err := json.Unmarshal(rec.Value, &payload); err == nil {
-				results = append(results, payload)
-			}
-		}
-	}
-
-	return results, nil
+// Publisher publishes an envelope and returns only after the broker acked it (*kafka.Producer: ProduceSync).
+type Publisher interface {
+	Publish(ctx context.Context, topic string, e events.EventEnvelope) error
 }
 
-// Replay republishes original values from DLQ topic back to original topic (§6)
-func (m *Manager) Replay(
-	ctx context.Context,
-	dlqTopic string,
-	errorTypeFilter string,
-	limit int,
-	dryRun bool,
-) (int, error) {
-	dlqEvents, err := m.ListEvents(ctx, dlqTopic, limit)
-	if err != nil {
-		return 0, err
+// Store keeps replay state in Postgres (design OPS-H7 Q1): a per-partition checkpoint (every offset below it is
+// resolved) and one log row per resolved DLQ record. *PGStore in production, a fake in tests.
+type Store interface {
+	Checkpoints(ctx context.Context, dlqTopic string) (map[int32]int64, error)
+	// Resolved: the offsets >= from of partition p that have a log row.
+	Resolved(ctx context.Context, dlqTopic string, p int32, from int64) (map[int64]bool, error)
+	// MarkResolved writes r's log row (none when r.Outcome is "") and, when r.Next > 0, moves the partition's
+	// checkpoint up to r.Next (never down), in one transaction.
+	MarkResolved(ctx context.Context, r Resolution) error
+}
+
+// Resolution outcomes (dlq_replay_log.outcome).
+const (
+	OutcomeReplayed     = "replayed"
+	OutcomeUnreplayable = "unreplayable"
+)
+
+// Resolution is one MarkResolved call. Outcome "" moves only the checkpoint (records that were already resolved).
+type Resolution struct {
+	DLQTopic    string
+	Partition   int32
+	Offset      int64
+	Outcome     string
+	TargetTopic string
+	EventID     string
+	Next        int64 // new checkpoint; 0 = unchanged (a skipped record earlier in the run pins it)
+}
+
+// ReplayOptions: ErrorType filters (case-insensitive); Limit caps published records across partitions (<= 0: no cap).
+type ReplayOptions struct {
+	ErrorType string
+	Limit     int
+	DryRun    bool
+}
+
+// ReplayItem is one record the run published (or would publish, in a dry run) or resolved as unreplayable.
+type ReplayItem struct {
+	Partition int32
+	Offset    int64
+	Outcome   string
+	Target    string
+	EventID   string
+	Reason    string // unreplayable only
+}
+
+// ReplayResult: Published counts replayed records (would-be, in a dry run). Checkpoints are the ones read at the start.
+type ReplayResult struct {
+	Published   int
+	Items       []ReplayItem
+	Checkpoints map[int32]int64
+	Watermarks  map[int32]Watermark
+	Warnings    []string
+}
+
+// Replay republishes the unresolved records of a DLQ topic, in (partition, offset) order, up to the high watermarks
+// taken at the start (design OPS-H7 Q1-Q7). Per record: Publish, and only after the ack MarkResolved, so the checkpoint
+// never passes an un-acked publish; a crash between the two re-publishes the record (a full envelope keeps its event_id).
+// A record the ErrorType filter skips gets no row and pins its partition's checkpoint, so it stays eligible. A dry run
+// writes nothing. Two concurrent runs of the same DLQ are not yet prevented (lock: B-PIPE-2).
+func (m *Manager) Replay(ctx context.Context, topic string, opt ReplayOptions) (res ReplayResult, err error) {
+	if m.reader == nil || m.store == nil || (m.pub == nil && !opt.DryRun) {
+		return res, errors.New("dlq: Replay needs a Reader, a Store and (unless --dry-run) a Publisher")
 	}
-
-	producer, err := kafka.NewProducer(m.brokers)
-	if err != nil {
-		return 0, err
+	if res.Checkpoints, err = m.store.Checkpoints(ctx, topic); err != nil {
+		return res, storeError(err) // before any Kafka read
 	}
-	defer producer.Close()
-
-	replayedCount := 0
-
-	for _, dlqEv := range dlqEvents {
-		if errorTypeFilter != "" && !strings.EqualFold(dlqEv.ErrorType, errorTypeFilter) {
-			continue
+	if res.Watermarks, err = m.reader.Watermarks(ctx, topic); errors.Is(err, kerr.UnknownTopicOrPartition) {
+		return res, &missingTopicError{topic, err}
+	} else if err != nil {
+		return res, err
+	}
+	parts := make([]int32, 0, len(res.Watermarks))
+	for p := range res.Watermarks {
+		parts = append(parts, p)
+	}
+	sort.Slice(parts, func(i, j int) bool { return parts[i] < parts[j] })
+	for _, p := range parts {
+		if done, err := m.replayPartition(ctx, topic, p, opt, &res); err != nil || done {
+			return res, err
 		}
+	}
+	return res, nil
+}
 
-		origTopic := dlqEv.OriginalTopic
-		if origTopic == "" {
-			// Fallback: strip .dlq suffix
-			origTopic = strings.TrimSuffix(dlqTopic, ".dlq")
+// replayPartition replays one partition from its checkpoint; done is true once opt.Limit records were published.
+func (m *Manager) replayPartition(ctx context.Context, topic string, p int32, opt ReplayOptions, res *ReplayResult) (done bool, err error) {
+	wm, cp := res.Watermarks[p], res.Checkpoints[p]
+	from := cp
+	if from < wm.Low { // retention deleted records that were never resolved (design Q2)
+		res.Warnings = append(res.Warnings, fmt.Sprintf("WARNING partition %d: offsets %d..%d expired before replay", p, from, wm.Low-1))
+		from = wm.Low
+	}
+	if from >= wm.High {
+		if from > cp && !opt.DryRun { // every record left has expired: start the next run at Low
+			err = m.store.MarkResolved(ctx, Resolution{DLQTopic: topic, Partition: p, Next: from})
 		}
-
-		// Same rule in dry-run and real runs, so a dry-run's count equals what a real run publishes.
-		envelope, reason, ok := replayEnvelope(dlqEv, origTopic)
-		if !ok {
-			log.Print(skipLine(dlqEv, reason))
-			continue
+		return false, err
+	}
+	resolved, err := m.store.Resolved(ctx, topic, p, from)
+	if err != nil {
+		return false, storeError(err)
+	}
+	contiguous, next, written := true, from, cp // next: checkpoint the resolved prefix allows; written: stored value
+	mark := func(r Resolution) error {
+		if contiguous {
+			r.Next, next, written = r.Offset+1, r.Offset+1, r.Offset+1
 		}
-
-		log.Printf("[DLQ Replay] Event key=%s (error=%s) -> Target Topic: %s (DryRun=%v)",
-			dlqEv.OriginalKey, dlqEv.ErrorType, origTopic, dryRun)
-
-		if !dryRun {
-			if err := producer.Publish(ctx, origTopic, envelope); err != nil {
-				return replayedCount, fmt.Errorf("failed to republish to %s: %w", origTopic, err)
+		if opt.DryRun {
+			return nil
+		}
+		if err := m.store.MarkResolved(ctx, r); err != nil {
+			return fmt.Errorf("dlq: mark %d/%d resolved (a published record is re-published by the next run): %w",
+				r.Partition, r.Offset, storeError(err))
+		}
+		return nil
+	}
+	var stepErr error
+	err = m.reader.Read(ctx, topic, p, from, wm.High, func(r Record) bool {
+		if resolved[r.Offset] {
+			if contiguous {
+				next = r.Offset + 1
+			}
+			return true
+		}
+		item := ReplayItem{Partition: p, Offset: r.Offset, Outcome: OutcomeUnreplayable, Reason: "the DLQ record is not a DLQ payload (undecodable)"}
+		var env events.EventEnvelope
+		if r.Payload != nil {
+			item.Target = r.Payload.OriginalTopic
+			if item.Target == "" {
+				item.Target = strings.TrimSuffix(topic, ".dlq")
+			}
+			var ok bool
+			if env, item.Reason, ok = replayEnvelope(*r.Payload, item.Target); ok {
+				if opt.ErrorType != "" && !strings.EqualFold(r.Payload.ErrorType, opt.ErrorType) {
+					contiguous = false // filtered out: no row, stays eligible, pins the checkpoint (design Q6)
+					return true
+				}
+				item.Outcome, item.EventID = OutcomeReplayed, env.EventID
 			}
 		}
-
-		replayedCount++
+		if item.Outcome == OutcomeReplayed && !opt.DryRun {
+			if stepErr = m.pub.Publish(ctx, item.Target, env); stepErr != nil {
+				stepErr = fmt.Errorf("dlq: publish %d/%d to %s (nothing marked resolved): %w", p, r.Offset, item.Target, stepErr)
+				return false
+			}
+		}
+		if stepErr = mark(Resolution{DLQTopic: topic, Partition: p, Offset: r.Offset, Outcome: item.Outcome,
+			TargetTopic: item.Target, EventID: item.EventID}); stepErr != nil {
+			return false
+		}
+		res.Items = append(res.Items, item)
+		if item.Outcome == OutcomeReplayed {
+			res.Published++
+		}
+		done = opt.Limit > 0 && res.Published >= opt.Limit
+		return !done
+	})
+	if err == nil {
+		err = stepErr
 	}
+	if err == nil && !done && !opt.DryRun && contiguous && next > written {
+		// The partition ended on already-resolved records: move the checkpoint over them.
+		err = m.store.MarkResolved(ctx, Resolution{DLQTopic: topic, Partition: p, Next: next})
+	}
+	return done, err
+}
 
-	return replayedCount, nil
+// storeError points at `arxivlens migrate` when the replay tables or Postgres itself are not there.
+func storeError(err error) error {
+	return fmt.Errorf("dlq replay needs a migrated PostgreSQL (DATABASE_URL; run 'arxivlens migrate'): %w", err)
 }

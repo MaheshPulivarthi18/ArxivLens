@@ -57,3 +57,19 @@ func TestCrawlLoopFlags(t *testing.T) {
 		}
 	}
 }
+
+// AC12 (ING-9b): a --rate-limit below arXiv's 3 s fails before any connection (cfg is nil here: a connect would panic).
+func TestCrawlRateLimitFlag(t *testing.T) {
+	for _, rl := range []string{"1s", "2.999s", "0s"} {
+		cmd := newCrawlCmd()
+		cmd.SetArgs([]string{"--rate-limit", rl})
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "--rate-limit "+rl+": must be at least 3s") {
+			t.Errorf("--rate-limit %s: err %v, want the 3s minimum", rl, err)
+		}
+	}
+	if f := newCrawlCmd().Flags().Lookup("rate-limit"); f.DefValue != "3s" {
+		t.Errorf("--rate-limit default %s, want 3s", f.DefValue)
+	}
+}

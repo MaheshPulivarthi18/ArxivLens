@@ -35,24 +35,21 @@ var (
 
 func main() {
 	cfg = config.LoadConfig()
-
-	rootCmd := &cobra.Command{
-		Use:   "arxivlens",
-		Short: "ArxivLens — Distributed Paper Ingestion & Semantic Search Pipeline",
-	}
-
-	rootCmd.AddCommand(newMigrateCmd())
-	rootCmd.AddCommand(newCrawlCmd())
-	rootCmd.AddCommand(newCrawlLoopCmd())
-	rootCmd.AddCommand(newDownloadCmd())
-	rootCmd.AddCommand(newStatusCmd())
-	rootCmd.AddCommand(newQueryCmd())
-	rootCmd.AddCommand(newDLQCmd())
-
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	if err := newRootCmd(newDLQCmd()).Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err) // the only place an error is printed (SilenceErrors)
 		os.Exit(1)
 	}
+}
+
+// newRootCmd: cobra prints no "Error:" line of its own, so main prints each error exactly once.
+func newRootCmd(dlqCmd *cobra.Command) *cobra.Command {
+	rootCmd := &cobra.Command{
+		Use:           "arxivlens",
+		Short:         "ArxivLens — Distributed Paper Ingestion & Semantic Search Pipeline",
+		SilenceErrors: true,
+	}
+	rootCmd.AddCommand(newMigrateCmd(), newCrawlCmd(), newCrawlLoopCmd(), newDownloadCmd(), newStatusCmd(), newQueryCmd(), dlqCmd)
+	return rootCmd
 }
 
 func newMigrateCmd() *cobra.Command {
@@ -110,6 +107,9 @@ func newCrawlCmd() *cobra.Command {
 		Use:   "crawl",
 		Short: "Crawl arXiv papers and publish to papers.discovered topic",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if rateLimit < arxiv.DefaultInterval { // before any connection (ING-9b)
+				return fmt.Errorf("--rate-limit %v: must be at least %v (arXiv allows 1 request / 3 s)", rateLimit, arxiv.DefaultInterval)
+			}
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
 
@@ -138,7 +138,7 @@ func newCrawlCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&query, "query", "cat:cs.AI OR cat:cs.LG", "arXiv search query")
 	cmd.Flags().IntVar(&limit, "limit", 5, "Maximum number of papers to crawl")
-	cmd.Flags().DurationVar(&rateLimit, "rate-limit", 3*time.Second, "Delay between arXiv requests")
+	cmd.Flags().DurationVar(&rateLimit, "rate-limit", arxiv.DefaultInterval, "Minimum gap between arXiv requests (>= 3s)")
 	return cmd
 }
 
@@ -359,6 +359,9 @@ type dlqReader interface {
 	Close()
 }
 
+// replayDeps is what dlq replay needs besides the reader; closeFn releases them. *kafka.Producer and *dlq.PGStore in production.
+type replayDeps func(ctx context.Context) (pub dlq.Publisher, store dlq.Store, closeFn func(), err error)
+
 func newDLQCmd() *cobra.Command {
 	return newDLQCmdWith(func() (dlqReader, error) {
 		r, err := dlq.NewKafkaReader(cfg.KafkaBrokers)
@@ -366,20 +369,41 @@ func newDLQCmd() *cobra.Command {
 			return nil, err // not a typed nil in the interface
 		}
 		return r, nil
+	}, func(ctx context.Context) (dlq.Publisher, dlq.Store, func(), error) {
+		database, err := db.Connect(ctx, cfg.PostgresURL)
+		if err != nil { // before any Kafka read
+			return nil, nil, nil, fmt.Errorf("dlq replay needs a migrated PostgreSQL (DATABASE_URL; run 'arxivlens migrate'): %w", err)
+		}
+		producer, err := kafka.NewProducer(cfg.KafkaBrokers)
+		if err != nil {
+			database.Close()
+			return nil, nil, nil, err
+		}
+		return producer, dlq.NewPGStore(database.Pool), func() { producer.Close(); database.Close() }, nil
 	})
 }
 
 // withDLQManager builds a reader, runs fn on a Manager that holds it, and closes the reader on every path.
 // list and inspect only call List through here, so List never runs on a nil-reader Manager (OPS-H7a2 AC7).
-func withDLQManager(newReader func() (dlqReader, error), fn func(context.Context, *dlq.Manager) error) error {
+// replay passes deps: the Postgres store and the producer are built (and closed) here, after the reader.
+func withDLQManager(newReader func() (dlqReader, error), deps replayDeps, fn func(context.Context, *dlq.Manager) error) error {
 	r, err := newReader()
 	if err != nil {
 		return err
 	}
 	defer r.Close()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-	return fn(ctx, dlq.NewManager(nil, r))
+	defer cancel() // SIGINT/SIGTERM cancel ctx: Replay returns and its deferred unlock runs
+	var pub dlq.Publisher
+	var store dlq.Store
+	if deps != nil {
+		var closeFn func()
+		if pub, store, closeFn, err = deps(ctx); err != nil {
+			return err
+		}
+		defer closeFn()
+	}
+	return fn(ctx, dlq.NewManager(r, pub, store))
 }
 
 // printDLQRecord prints one record as P/O first (the form --from takes); an undecodable record is never hidden.
@@ -407,7 +431,7 @@ func watermarkList(wm map[int32]dlq.Watermark) string {
 	return strings.Join(out, " ")
 }
 
-func newDLQCmdWith(newReader func() (dlqReader, error)) *cobra.Command {
+func newDLQCmdWith(newReader func() (dlqReader, error), deps replayDeps) *cobra.Command {
 	dlqCmd := &cobra.Command{
 		Use:   "dlq",
 		Short: "Manage and replay dead-letter queue (DLQ) messages",
@@ -442,7 +466,7 @@ func newDLQCmdWith(newReader func() (dlqReader, error)) *cobra.Command {
 				opt.From = c
 			}
 			out, errOut := cmd.OutOrStdout(), cmd.ErrOrStderr()
-			return withDLQManager(newReader, func(ctx context.Context, mgr *dlq.Manager) error {
+			return withDLQManager(newReader, nil, func(ctx context.Context, mgr *dlq.Manager) error {
 				fmt.Fprintf(out, "=== DLQ topic: %s ===\n", topic)
 				n := 0
 				for {
@@ -462,7 +486,7 @@ func newDLQCmdWith(newReader func() (dlqReader, error)) *cobra.Command {
 						return nil
 					}
 					if !all {
-						fmt.Fprintf(out, "next page: arxivlens dlq list --topic %s --from %s\n", topic, page.Next)
+						fmt.Fprintf(out, "next page: arxivlens dlq list --topic %s%s --from %s\n", topic, footerFlags(cmd, partition, pageSize), page.Next)
 						return nil
 					}
 					opt.From, opt.Snapshot = page.Next, page.Watermarks // --all: one start-time snapshot for the whole run
@@ -484,10 +508,11 @@ func newDLQCmdWith(newReader func() (dlqReader, error)) *cobra.Command {
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out := cmd.OutOrStdout()
-			return withDLQManager(newReader, func(ctx context.Context, mgr *dlq.Manager) error {
-				opt := dlq.ListOptions{PageSize: 500}
+			return withDLQManager(newReader, nil, func(ctx context.Context, mgr *dlq.Manager) error {
+				opt, seen := dlq.ListOptions{PageSize: 500}, 0
 				for {
 					page, err := mgr.List(ctx, topic, opt) // From is always >= the snapshot's Low here, so no expiry Warnings
+					seen += len(page.Records)
 					for _, r := range page.Records {
 						ev := r.Payload
 						if key != "" && (ev == nil || ev.OriginalKey != key) {
@@ -516,6 +541,8 @@ func newDLQCmdWith(newReader func() (dlqReader, error)) *cobra.Command {
 				}
 				if key != "" {
 					fmt.Fprintf(out, "No DLQ events found for key: %s\n", key)
+				} else if seen == 0 {
+					fmt.Fprintf(out, "No DLQ events in topic: %s\n", topic)
 				}
 				return nil
 			})
@@ -525,27 +552,68 @@ func newDLQCmdWith(newReader func() (dlqReader, error)) *cobra.Command {
 	inspectCmd.Flags().StringVar(&key, "key", "", "Paper key to inspect")
 
 	replayCmd := &cobra.Command{
-		Use:   "replay",
-		Short: "Republish DLQ events back to their original topics with attempt reset",
+		Use:          "replay",
+		Short:        "Republish unresolved DLQ events to their original topics (attempt reset), resuming from the Postgres checkpoint",
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := context.Background()
-			mgr := dlq.NewManager(cfg.KafkaBrokers, nil)
-			count, err := mgr.Replay(ctx, topic, errorType, limit, dryRun)
-			if err != nil {
+			out, errOut := cmd.OutOrStdout(), cmd.ErrOrStderr()
+			return withDLQManager(newReader, deps, func(ctx context.Context, mgr *dlq.Manager) error {
+				res, err := mgr.Replay(ctx, topic, dlq.ReplayOptions{ErrorType: errorType, Limit: limit, DryRun: dryRun})
+				printReplay(out, errOut, topic, dryRun, res)
 				return err
-			}
-
-			fmt.Printf("Successfully processed replay for %d events (DryRun=%v)\n", count, dryRun)
-			return nil
+			})
 		},
 	}
 	replayCmd.Flags().StringVar(&topic, "topic", "papers.downloaded.dlq", "DLQ topic name")
 	replayCmd.Flags().StringVar(&errorType, "error-type", "", "Filter by error type (e.g. PdfParseError)")
-	replayCmd.Flags().IntVar(&limit, "limit", 100, "Max events to replay")
-	replayCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Simulate replay without publishing")
+	replayCmd.Flags().IntVar(&limit, "limit", 100, "Max events to publish in this run (the next run resumes after them)")
+	replayCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print what a real run would publish; writes and publishes nothing")
 
 	dlqCmd.AddCommand(listCmd)
 	dlqCmd.AddCommand(inspectCmd)
 	dlqCmd.AddCommand(replayCmd)
 	return dlqCmd
+}
+
+// footerFlags repeats --partition and --page-size in the next-page footer when they were given (--limit is printed as
+// --page-size), so pasting the footer continues the same listing.
+func footerFlags(cmd *cobra.Command, partition int32, pageSize int) string {
+	var b strings.Builder
+	if cmd.Flags().Changed("partition") {
+		fmt.Fprintf(&b, " --partition %d", partition)
+	}
+	if cmd.Flags().Changed("page-size") || cmd.Flags().Changed("limit") {
+		fmt.Fprintf(&b, " --page-size %d", pageSize)
+	}
+	return b.String()
+}
+
+// printReplay prints a replay run: one P/O line per resolved (or, in a dry run, would-be) record, then a summary.
+func printReplay(out, errOut io.Writer, topic string, dryRun bool, res dlq.ReplayResult) {
+	if res.Watermarks == nil {
+		return // failed before reading the topic (Postgres down or not migrated, missing topic)
+	}
+	verb, resolved := "replayed", "resolved"
+	if dryRun {
+		verb, resolved = "would replay", "would be resolved"
+		fmt.Fprintln(out, "DRY RUN (no lock taken; may race a concurrent replay)")
+	}
+	cps := make(map[int32]dlq.Watermark, len(res.Watermarks)) // watermarkList prints .High
+	for p := range res.Watermarks {
+		cps[p] = dlq.Watermark{High: res.Checkpoints[p]}
+	}
+	fmt.Fprintf(out, "=== DLQ replay: %s (checkpoints at start: %s; high watermarks at start: %s) ===\n", topic, watermarkList(cps), watermarkList(res.Watermarks))
+	for _, w := range res.Warnings {
+		fmt.Fprintln(errOut, w)
+	}
+	unreplayable := 0
+	for _, it := range res.Items {
+		if it.Outcome == dlq.OutcomeReplayed {
+			fmt.Fprintf(out, "%d/%d  %s -> %s  event_id=%s\n", it.Partition, it.Offset, verb, it.Target, it.EventID)
+		} else {
+			unreplayable++
+			fmt.Fprintf(out, "%d/%d  unreplayable (%s without publishing): %s\n", it.Partition, it.Offset, resolved, it.Reason)
+		}
+	}
+	fmt.Fprintf(out, "replay summary: published=%d unreplayable=%d dry_run=%v\n", res.Published, unreplayable, dryRun)
 }

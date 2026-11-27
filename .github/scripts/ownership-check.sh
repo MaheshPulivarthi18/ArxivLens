@@ -41,8 +41,8 @@ done <<< "$(git -c core.quotePath=false diff --no-renames --name-only "$BASE"...
 # --no-renames: a moved file reports both its old and new path, so moving code out of another area is caught.
 
 lines="$(git diff --no-renames --shortstat "$BASE"...HEAD | { grep -Eo '[0-9]+ (insertion|deletion)' || true; } | awk '{s+=$1} END {print s+0}')"
-if [ "$lines" -gt 400 ]; then
-  echo "::warning::$lines changed lines (> 400). Consider splitting the change."
+if [ "$lines" -gt 800 ]; then
+  echo "::warning::$lines changed lines (> 800, the bundle size in arxivlens-agents AGENTS.md). Consider splitting the change."
 fi
 
 [ "$fail" -eq 0 ] && echo "Ownership OK for role=$ROLE ($lines changed lines)"

@@ -2,17 +2,21 @@ package crawler
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"arxivlens/internal/arxiv"
+	"arxivlens/internal/db"
+	"arxivlens/shared/events"
 )
 
 func TestParseAtomFeed(t *testing.T) {
@@ -131,6 +135,7 @@ func TestCrawlRetriesRateLimit(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("ARXIV_API_URL", srv.URL)
 	c := NewCrawler(nil, nil, time.Millisecond)
+	c.lim = arxiv.NewLimiter(time.Millisecond)
 	c.retry = arxiv.Retry{Attempts: 3, Base: time.Millisecond}
 	n, err := c.Crawl(context.Background(), "cat:cs.LG", 2)
 	if err != nil || n != 0 || hits.Load() != 2 {
@@ -146,5 +151,59 @@ func TestCrawlRetriesRateLimit(t *testing.T) {
 	c.retry = arxiv.NoRetry
 	if _, err := c.Crawl(context.Background(), "cat:cs.LG", 2); err == nil || !strings.Contains(err.Error(), "status 429") {
 		t.Errorf("err = %v, want a status 429 error", err)
+	}
+}
+
+type nopUpserter struct{}
+
+func (nopUpserter) UpsertDiscoveredPaper(context.Context, *db.PaperRecord) (int64, error) {
+	return 1, nil
+}
+
+type countPub struct{ n int }
+
+func (p *countPub) Publish(context.Context, string, events.EventEnvelope) error { p.n++; return nil }
+
+// AC12 (ING-9b): NewCrawler never goes below arXiv's 3 s, and every Crawl request, a 429 retry included, waits on
+// the limiter: 3 pages + 1 retry are 4 requests, each at least the interval after the one before.
+func TestCrawlWaitsOnLimiter(t *testing.T) {
+	for _, rl := range []time.Duration{0, time.Second, 5 * time.Second} {
+		if got := NewCrawler(nil, nil, rl).lim.Interval(); got != max(rl, arxiv.DefaultInterval) {
+			t.Errorf("NewCrawler(rate-limit %v): limiter interval %v, want %v", rl, got, max(rl, arxiv.DefaultInterval))
+		}
+	}
+	const interval = 80 * time.Millisecond
+	var mu sync.Mutex
+	var at []time.Time
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		at = append(at, time.Now())
+		n := len(at)
+		mu.Unlock()
+		if n == 2 { // the second page is rate-limited once
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		start := r.URL.Query().Get("start")
+		_, _ = fmt.Fprintf(w, `<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>http://arxiv.org/abs/2401.0%s000v1</id>`+
+			`<published>2024-01-01T00:00:00Z</published><title>t</title></entry></feed>`, start)
+	}))
+	defer srv.Close()
+	t.Setenv("ARXIV_API_URL", srv.URL)
+	pub := &countPub{}
+	c := NewCrawler(nopUpserter{}, pub, 0)
+	c.lim = arxiv.NewLimiter(interval)
+	c.retry = arxiv.Retry{Attempts: 2, Base: time.Microsecond} // the backoff alone would allow an immediate retry
+	n, err := c.Crawl(context.Background(), "cat:cs.LG", 41)   // pages start=0, 20, 40 (page size 20)
+	if err != nil || n != 3 || pub.n != 3 {
+		t.Fatalf("Crawl = %d, %v (published %d); want 3 papers over 3 pages", n, err, pub.n)
+	}
+	if len(at) != 4 {
+		t.Fatalf("%d requests, want 4 (3 pages + 1 retry)", len(at))
+	}
+	for i := 1; i < len(at); i++ {
+		if gap := at[i].Sub(at[i-1]); gap < interval-5*time.Millisecond {
+			t.Errorf("request %d came %v after request %d, want >= %v (limiter)", i+1, gap, i, interval)
+		}
 	}
 }

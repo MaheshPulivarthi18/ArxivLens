@@ -4,6 +4,7 @@ name: DB
 # HNSW index; the vector arm of the hybrid query is planned and measured against an exact scan.
 # OPS-H9: pgvector >= 0.8.0 check (hnsw.iterative_scan) and the EVAL-5 real_postgres eval-data test.
 # ING-6c: crawl watermark SQL and the crawl-loop advisory lock (internal/db, -tags integration).
+# B-PIPE: migration 000004 (DLQ replay tables), the replay Store and a resumed replay on real Kafka (internal/dlq).
 on:
   pull_request:
   push:
@@ -75,12 +76,22 @@ jobs:
           grep -E '^index\|chunk_embeddings_hnsw_idx\|.*USING hnsw \(embedding halfvec_cosine_ops\) WITH \(m=.?16.?, ef_construction=.?64.?\)' /tmp/run1.txt
           grep -E '^index_valid\|chunk_embeddings_hnsw_idx\|true$' /tmp/run1.txt
           grep -E '^column\|paper_chunk_pages\.page_start\|integer$' /tmp/run1.txt
+          grep -E '^column\|dlq_replay_checkpoints\.next_offset\|bigint$' /tmp/run1.txt
+          grep -E '^column\|dlq_replay_log\.dlq_offset\|bigint$' /tmp/run1.txt
       - name: Migrate run 2 (idempotent, schema unchanged)
         run: |
           ./bin/arxivlens migrate
           $PSQL -At < /tmp/snapshot.sql > /tmp/run2.txt
           diff -u /tmp/run1.txt /tmp/run2.txt
           echo "Schema identical after run 2: $(wc -l < /tmp/run2.txt) objects (extensions, columns, indexes)"
+          grep -E '^column\|dlq_replay_(checkpoints|log)\.' /tmp/run2.txt
+      - name: Migration 000004 down drops the DLQ replay tables (then up again)
+        run: |
+          $PSQL < migrations/000004_dlq_replay.down.sql
+          left="$($PSQL -At -c "SELECT count(*) FROM information_schema.tables WHERE table_name IN ('dlq_replay_checkpoints', 'dlq_replay_log')")"
+          echo "dlq_replay tables after 000004 down: $left"
+          [ "$left" = 0 ] || { echo "::error::000004 down left $left table(s)"; exit 1; }
+          $PSQL < migrations/000004_dlq_replay.up.sql
       - name: pgvector >= 0.8.0 (hnsw.iterative_scan, OPS-H5)
         run: |
           MIN=0.8.0
@@ -131,7 +142,15 @@ jobs:
           left="$($PSQL -At -c "SELECT count(*) FROM crawl_watermarks WHERE category LIKE 'it-test.%'")"
           echo "crawl_watermarks rows left by the tests (category LIKE 'it-test.%'): $left"
           [ "$left" = 0 ] || { echo "::error::test rows not cleaned up"; exit 1; }
-      - name: DLQ reader on real Kafka (3 partitions, 1,500 records, paged fetches)
+      - name: DLQ reader on real Kafka + replay Store and resume on real Postgres (B-PIPE)
         run: |
+          set -o pipefail
           go vet -tags integration ./internal/dlq/
-          KAFKA_BROKERS=localhost:9092 go test -tags integration -race -count=1 -v -timeout 10m ./internal/dlq/
+          KAFKA_BROKERS=localhost:9092 go test -tags integration -race -count=1 -v -timeout 10m ./internal/dlq/ | tee /tmp/dlq-it.txt
+          if grep -q -- '--- SKIP' /tmp/dlq-it.txt; then echo "::error::DLQ integration tests skipped"; exit 1; fi
+          for t in TestReadStopsAtSnapshot_Integration TestPGStore_Integration TestReplayResumes_Integration; do
+            grep -q -- "--- PASS: $t " /tmp/dlq-it.txt || { echo "::error::$t did not pass"; exit 1; }
+          done
+          left="$($PSQL -At -c "SELECT (SELECT count(*) FROM dlq_replay_log WHERE dlq_topic LIKE 'it.dlq.%') + (SELECT count(*) FROM dlq_replay_checkpoints WHERE dlq_topic LIKE 'it.dlq.%')")"
+          echo "dlq_replay rows left by the tests (dlq_topic LIKE 'it.dlq.%'): $left"
+          [ "$left" = 0 ] || { echo "::error::test rows not cleaned up"; exit 1; }
