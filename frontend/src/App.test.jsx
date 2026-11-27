@@ -296,13 +296,61 @@ describe('App: claim markers focus their card (FE-4a)', () => {
     render(<App />);
     await ask(user);
     const list = await claimsList();
-    await user.click(within(list).getByRole('button', { name: '[2]' }));
-    expect(citationCard(2)).toHaveAttribute('data-active', 'true');
+    // [1] has a card in both answers, so a stale `active` would still match one after the swap.
+    await user.click(within(list).getByRole('button', { name: '[1]' }));
+    expect(citationCard(1)).toHaveAttribute('data-active', 'true');
+    expect(activeCards()).toHaveLength(1);
 
     await act(async () => {
       full.resolve(synthesizedSkips);
     });
     expect(await screen.findByText(synthesizedSkips.claims[0].text)).toBeInTheDocument();
+    expect(citationCard(1)).not.toHaveAttribute('data-active');
     expect(activeCards()).toHaveLength(0);
+  });
+
+  it('a new search clears the active card', async () => {
+    const fetchMock = stubFetch({ quick: synthesizedSkips });
+    const user = userEvent.setup();
+    render(<App />);
+    await ask(user);
+    await user.click(within(await claimsList()).getByRole('button', { name: '[3]' }));
+    expect(citationCard(3)).toHaveAttribute('data-active', 'true');
+
+    await ask(user);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await claimsList();
+    expect(citationCard(3)).not.toHaveAttribute('data-active');
+    expect(activeCards()).toHaveLength(0);
+  });
+
+  it.each([
+    [true, 'auto'],
+    [false, 'smooth'],
+  ])('prefers-reduced-motion %s scrolls the card with behavior "%s"', async (reduce, behavior) => {
+    vi.stubGlobal('matchMedia', vi.fn((query) => ({
+      matches: query.includes('prefers-reduced-motion') ? reduce : false,
+      media: query,
+      addEventListener() {},
+      removeEventListener() {},
+      addListener() {},
+      removeListener() {},
+    })));
+    const scrollSpy = vi.fn();
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scrollSpy;
+    try {
+      stubFetch({ quick: synthesizedSkips });
+      const user = userEvent.setup();
+      render(<App />);
+      await ask(user);
+      await user.click(within(await claimsList()).getByRole('button', { name: '[3]' }));
+      expect(document.activeElement).toBe(citationCard(3));
+      expect(scrollSpy).toHaveBeenLastCalledWith({ behavior, block: 'nearest' });
+      expect(scrollSpy.mock.contexts.at(-1)).toBe(citationCard(3));
+    } finally {
+      if (original) Element.prototype.scrollIntoView = original;
+      else delete Element.prototype.scrollIntoView;
+    }
   });
 });

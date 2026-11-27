@@ -104,6 +104,7 @@ export default function SynthesisView({ answer, traceId, citations, claims, onCi
         return (
           <li key={index} className="pl-0">
             {claim.text}
+            {entries.length > 0 && ' '}
             {entries.map((e, j) =>
               e.citation ? (
                 <MarkerButton key={j} marker={e.marker} pos={e.pos} citation={e.citation} onCitationClick={onCitationClick} />
