@@ -567,7 +567,7 @@ func newDLQCmdWith(newReader func() (dlqReader, error), deps replayDeps) *cobra.
 	replayCmd.Flags().StringVar(&topic, "topic", "papers.downloaded.dlq", "DLQ topic name")
 	replayCmd.Flags().StringVar(&errorType, "error-type", "", "Filter by error type (e.g. PdfParseError)")
 	replayCmd.Flags().IntVar(&limit, "limit", 100, "Max events to publish in this run (the next run resumes after them)")
-	replayCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print what a real run would publish; writes and publishes nothing")
+	replayCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print what a real run would publish; takes no lock, writes and publishes nothing")
 
 	dlqCmd.AddCommand(listCmd)
 	dlqCmd.AddCommand(inspectCmd)
@@ -591,7 +591,7 @@ func footerFlags(cmd *cobra.Command, partition int32, pageSize int) string {
 // printReplay prints a replay run: one P/O line per resolved (or, in a dry run, would-be) record, then a summary.
 func printReplay(out, errOut io.Writer, topic string, dryRun bool, res dlq.ReplayResult) {
 	if res.Watermarks == nil {
-		return // failed before reading the topic (Postgres down or not migrated, missing topic)
+		return // failed before reading the topic (lock held, Postgres down or not migrated, missing topic)
 	}
 	verb, resolved := "replayed", "resolved"
 	if dryRun {

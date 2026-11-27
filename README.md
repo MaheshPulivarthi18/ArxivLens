@@ -219,11 +219,18 @@ taken at the start, with `attempt` reset to 0. It keeps its progress in PostgreS
 migration `000004`), so it needs `DATABASE_URL` and `arxivlens migrate`; without them it fails before reading Kafka.
 - **Resumable:** repeated `--limit N` runs work through the whole DLQ; each record is resolved once (replayed, or
   `unreplayable` when there is nothing valid to republish). A record is marked resolved only after the broker acked its publish,
-  so a crash re-publishes at most that record, with the same `event_id` for a full envelope (the consumers' idempotency absorbs it).
+  so a crash re-publishes at most that record, with the same `event_id` (the consumers' idempotency absorbs it).
 - **Filters:** with `--error-type X`, records of other types stay unresolved and the next run without the filter picks them up.
 - **Run `--dry-run` first after deploy:** the first run has no checkpoint and replays everything still in retention. A dry run
   lists each would-be `P/O` and `event_id` under `DRY RUN`, writes nothing and publishes nothing.
-- **Don't run two replays of the same DLQ at once** (a lock that refuses the second run is coming in B-PIPE-2).
+- **One replay per DLQ at a time:** a real run holds a PostgreSQL session advisory lock for its DLQ topic. A second run of the same
+  DLQ exits 1 with `another 'dlq replay' holds the lock for <topic> (pid P on <addr>, since <time>)` and publishes nothing; other DLQs
+  replay in parallel, and `--dry-run` takes no lock. A crashed or killed holder releases the lock with its session. A **hung** holder keeps it:
+  find it with `SELECT a.pid, a.client_addr, a.backend_start, a.state FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid WHERE l.locktype = 'advisory';`
+  and release it with `SELECT pg_terminate_backend(<pid>);`. SIGINT/SIGTERM stop a run cleanly and release the lock.
+- **Event IDs:** a replayed full envelope keeps its `event_id`. A raw payload (not a full envelope) is wrapped in a new envelope whose
+  `event_id` is a ULID derived from the DLQ record's (topic, partition, offset), so every replay of it has the same ID. Its time part (and
+  `occurred_at`) is the DLQ record's Kafka timestamp, not the original event's.
 - **Reset a DLQ** (replay everything again): `DELETE FROM dlq_replay_log WHERE dlq_topic = $1; DELETE FROM dlq_replay_checkpoints WHERE dlq_topic = $1;`
 
 ---

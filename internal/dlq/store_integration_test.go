@@ -82,6 +82,47 @@ func TestPGStore_Integration(t *testing.T) {
 	}
 }
 
+// AC8: A holds the lock, B can't take it; after A's backend is terminated (a crash), B gets it; another topic locks at once.
+func TestAdvisoryLock_Integration(t *testing.T) {
+	topic := fmt.Sprintf("it.dlq.lock.%d", time.Now().UnixNano())
+	a, b, ctx := NewPGStore(pgIT(t, topic)), NewPGStore(pgIT(t, topic)), context.Background()
+	unlockA, ok, _, err := a.TryLock(ctx, topic)
+	if err != nil || !ok {
+		t.Fatalf("A: ok %v, err %v; want the lock", ok, err)
+	}
+	defer unlockA()
+	_, ok, holder, err := b.TryLock(ctx, topic)
+	if err != nil || ok || !strings.HasPrefix(holder, "pid ") {
+		t.Fatalf("B while A holds: ok %v, holder %q, err %v; want refused with the holder's pid", ok, holder, err)
+	}
+	unlockOther, ok, _, err := b.TryLock(ctx, topic+".other")
+	if err != nil || !ok {
+		t.Fatalf("B on another topic: ok %v, err %v; want the lock at once", ok, err)
+	}
+	unlockOther()
+	var pid int
+	if _, err := fmt.Sscanf(holder, "pid %d", &pid); err != nil {
+		t.Fatal(err)
+	}
+	var killed bool
+	if err := b.pool.QueryRow(ctx, `SELECT pg_terminate_backend($1)`, pid).Scan(&killed); err != nil || !killed {
+		t.Fatalf("pg_terminate_backend(%d) = %v, %v", pid, killed, err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		unlockB, ok, _, err := b.TryLock(ctx, topic)
+		if err == nil && ok {
+			t.Logf("TestAdvisoryLock: B got the lock after A's backend (pid %d) was terminated", pid)
+			unlockB()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("B still refused 10 s after A's backend was terminated: ok %v, err %v", ok, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // AC3 on real Kafka + Postgres: 2N DLQ records over 2 partitions, --limit N twice, then the target topic holds each
 // record's envelope once, in (partition, offset) order, and a third run publishes nothing.
 func TestReplayResumes_Integration(t *testing.T) {

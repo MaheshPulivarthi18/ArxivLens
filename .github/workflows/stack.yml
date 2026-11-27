@@ -5,6 +5,7 @@ name: Full stack
 # (scripts/arxiv_replay.py): 0 arXiv requests per run once recorded, ~5 on the recording run.
 # ING-6 Risk 1: one read-only, never-failing step prints the recorded search feed's `published` order (design ING-6).
 # ING-6c: step "ING-6: crawl-loop" (second run emits 0 events, kill + restart, single-instance lock, SIGTERM).
+# B-PIPE: step "B-PIPE: dlq replay ..." (two resumed --limit 1 runs, offsets before/after, two concurrent runs and the lock).
 on:
   workflow_dispatch:
   pull_request:
@@ -381,6 +382,56 @@ jobs:
           lock_free
           once once5.log || fail "--once after kill -KILL failed"
           check "(ii) kill -KILL of a looping crawl-loop ~1 s after start, then --once"
+
+      # B-PIPE AC10, after make test-full (test_m4_chaos.py leaves corrupt-PDF records in papers.downloaded.dlq). All evidence
+      # goes to the job log. The concurrent pair is made deterministic by pausing Kafka: run A takes the lock (Postgres) and then
+      # waits on Kafka, so run B starts while A provably holds the lock.
+      - name: "B-PIPE: dlq replay resumes and refuses a concurrent run"
+        timeout-minutes: 6
+        run: |
+          T=papers.downloaded.dlq
+          fail() { echo "::error::$1"; exit 1; }
+          q() { docker compose exec -T postgres psql -U postgres -d arxivlens -tA -c "$1"; }
+          ends() { docker compose exec -T kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 \
+            --topic papers.downloaded --time -1 | awk -F: '{s += $3} END {print s + 0}'; }
+          state() { q "select partition, next_offset from dlq_replay_checkpoints where dlq_topic = '$T' order by 1"
+            q "select partition, dlq_offset, outcome, event_id from dlq_replay_log where dlq_topic = '$T' order by 1, 2"; }
+          echo "== dlq list --all (before)"; ./bin/arxivlens dlq list --topic "$T" --all
+          echo "== dlq replay --dry-run"; ./bin/arxivlens dlq replay --topic "$T" --limit 1 --dry-run
+          for run in 1 2; do
+            before="$(ends)"
+            ./bin/arxivlens dlq replay --topic "$T" --limit 1 | tee "replay$run.log"
+            after="$(ends)"
+            pub="$(sed -n 's/^replay summary: published=\([0-9]*\) .*/\1/p' "replay$run.log")"
+            echo "run $run: kafka-get-offsets papers.downloaded (sum of end offsets) $before -> $after; replay summary published=$pub"
+            echo "replay state after run $run (checkpoints, then log rows):"; state
+            if [ "$pub" != 0 ] && [ "$pub" != 1 ]; then fail "run $run: published=$pub, want 0 or 1 with --limit 1"; fi
+            [ "$((after - before))" = "$pub" ] || fail "run $run: papers.downloaded grew by $((after - before)), replay says published=$pub"
+          done
+          [ "$(sed -n 's/^replay summary: published=\([0-9]*\) .*/\1/p' replay1.log)" = 1 ] || fail "run 1 published nothing"
+          r1="$(grep -Eo '^[0-9]+/[0-9]+  replayed' replay1.log)"; r2="$(grep -Eo '^[0-9]+/[0-9]+  replayed' replay2.log || true)"
+          [ "$r1" != "$r2" ] || fail "run 2 replayed the same record as run 1 ($r1)"
+          echo "== dlq list --all (after)"; ./bin/arxivlens dlq list --topic "$T" --all
+
+          lockheld() { q "select count(*) from pg_locks l, (select hashtextextended('arxivlens.dlq.replay/$T', 0) k) key
+            where l.locktype = 'advisory' and l.granted and l.objsubid = 1
+              and l.classid = ((key.k >> 32) & 4294967295)::oid and l.objid = (key.k & 4294967295)::oid"; }
+          docker compose pause kafka
+          ./bin/arxivlens dlq replay --topic "$T" --limit 1 > replayA.log 2>&1 &
+          a=$!
+          for _ in $(seq 50); do [ "$(lockheld)" = 1 ] && break; sleep 0.2; done
+          held="$(lockheld)"
+          rcB=0
+          if [ "$held" = 1 ]; then ./bin/arxivlens dlq replay --topic "$T" --limit 1 > replayB.log 2>&1 || rcB=$?; fi
+          docker compose unpause kafka
+          rcA=0; wait "$a" || rcA=$?
+          echo "== concurrent replay A (started first; exit $rcA)"; cat replayA.log
+          echo "== concurrent replay B (started while A held the lock: $held; exit $rcB)"; cat replayB.log 2>/dev/null || true
+          [ "$held" = 1 ] || fail "replay A never showed up in pg_locks"
+          if [ "$rcA" != 0 ] || [ "$rcB" != 1 ]; then fail "want exactly one exit 1 (B); got A=$rcA B=$rcB"; fi
+          grep -q "another 'dlq replay' holds the lock for $T (pid " replayB.log || fail "B: no lock message"
+          if grep -q '^replay summary' replayB.log; then fail "B printed a replay summary"; fi
+          echo "AC10: exactly one of two concurrent replays exited 1 with the lock message"
 
       # Every run, green or red, so the artifact always has service logs (embedder rerank timing for ADR-0015).
       # The timing block is also tee'd to the job log: agent sandboxes can't read artifacts or step summaries (OPS-H10b).

@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"arxivlens/shared/events"
 	"github.com/oklog/ulid/v2"
@@ -14,6 +15,8 @@ const (
 	testTrace  = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 	testID     = "01JC0000000000000000000000"
 )
+
+var testSrc = source{Topic: "papers.discovered.dlq", Partition: 3, Offset: 17, Timestamp: time.UnixMilli(1764000000123)}
 
 type envelopeCase struct {
 	name   string
@@ -68,7 +71,7 @@ func envelopeCases() []envelopeCase {
 func TestReplayEnvelope(t *testing.T) {
 	for _, tc := range envelopeCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			env, reason, ok := replayEnvelope(tc.in, testTarget)
+			env, reason, ok := replayEnvelope(tc.in, testTarget, testSrc)
 			switch tc.want {
 			case "keep":
 				if !ok || reason != "" {
@@ -89,8 +92,8 @@ func TestReplayEnvelope(t *testing.T) {
 				if !ok || reason != "" {
 					t.Fatalf("ok=%v reason=%q, want a new envelope", ok, reason)
 				}
-				if _, err := ulid.Parse(env.EventID); err != nil {
-					t.Errorf("event_id %q is not a ULID: %v", env.EventID, err)
+				if env.EventID != replayID(testSrc) || env.OccurredAt != "2025-11-24T16:00:00.123Z" {
+					t.Errorf("event_id %q occurred_at %q, want the deterministic %q and the DLQ record's time", env.EventID, env.OccurredAt, replayID(testSrc))
 				}
 				if env.EventType != testTarget || env.PaperID != tc.in.OriginalKey || env.Version != 1 || env.Attempt != 0 {
 					t.Errorf("envelope = %+v, want event_type=%s paper_id=%s version=1 attempt=0", env, testTarget, tc.in.OriginalKey)
@@ -116,7 +119,7 @@ func TestReplayEnvelope(t *testing.T) {
 // AC2: whatever the input, an envelope the helper returns never has an empty ID field.
 func TestReplayEnvelopeNeverEmpty(t *testing.T) {
 	for _, tc := range envelopeCases() {
-		env, _, ok := replayEnvelope(tc.in, testTarget)
+		env, _, ok := replayEnvelope(tc.in, testTarget, testSrc)
 		if ok && (env.EventID == "" || env.EventType == "" || env.PaperID == "") {
 			t.Errorf("%s: returned envelope with an empty field: event_id=%q event_type=%q paper_id=%q",
 				tc.name, env.EventID, env.EventType, env.PaperID)
@@ -141,5 +144,42 @@ func TestReplaySkipLine(t *testing.T) {
 		if !strings.Contains(line, want) {
 			t.Errorf("skip line %q does not contain %q", line, want)
 		}
+	}
+}
+
+// AC9: a re-enveloped record's ID is a ULID derived from (dlq topic, partition, offset) with the DLQ record's time.
+func TestReplayID(t *testing.T) {
+	base := replayID(testSrc)
+	id, err := ulid.Parse(base)
+	if err != nil || id.Time() != uint64(testSrc.Timestamp.UnixMilli()) {
+		t.Fatalf("replayID = %q (parse err %v, time %d), want a ULID with time %d", base, err, id.Time(), testSrc.Timestamp.UnixMilli())
+	}
+	later := testSrc
+	later.Timestamp = later.Timestamp.Add(time.Hour)
+	if replayID(testSrc) != base {
+		t.Error("replayID is not stable for the same record")
+	}
+	for name, s := range map[string]source{
+		"other offset":                    {testSrc.Topic, testSrc.Partition, testSrc.Offset + 1, testSrc.Timestamp},
+		"other partition":                 {testSrc.Topic, testSrc.Partition + 1, testSrc.Offset, testSrc.Timestamp},
+		"other topic":                     {"papers.chunked.dlq", testSrc.Partition, testSrc.Offset, testSrc.Timestamp},
+		"partition/offset digits shifted": {testSrc.Topic, 31, 7, testSrc.Timestamp},
+	} {
+		if got := replayID(s); got == base || got[10:] == base[10:] {
+			t.Errorf("%s: replayID %q shares the ID or entropy of %q", name, got, base)
+		}
+	}
+	if got := replayID(later); got[10:] != base[10:] || got == base {
+		t.Errorf("a later DLQ timestamp changes only the time part: %q vs %q", got, base)
+	}
+	if _, err := ulid.Parse(replayID(source{Topic: "t", Timestamp: time.Time{}})); err != nil {
+		t.Errorf("zero timestamp: %v", err)
+	}
+	// The wrong-field-type row (OPS-H7f b): a new ID, stable across replays.
+	in := dlqRec("2401.00001", map[string]interface{}{"event_id": testID, "event_type": testTarget, "paper_id": float64(7)})
+	a, _, okA := replayEnvelope(in, testTarget, testSrc)
+	b, _, okB := replayEnvelope(in, testTarget, testSrc)
+	if !okA || !okB || a.EventID == testID || a.EventID != b.EventID || !reflect.DeepEqual(a, b) {
+		t.Errorf("wrong field type: %+v / %+v, want one new event_id, identical on both replays", a, b)
 	}
 }
