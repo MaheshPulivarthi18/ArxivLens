@@ -5,6 +5,7 @@ https://github.com/MaheshPulivarthi18/arxivlens-agents/tree/main/docs/adr
 """
 
 import copy
+import http.client
 import json
 import math
 import os
@@ -14,7 +15,7 @@ import types
 
 import pytest
 
-from scripts import answer_review, eval_gate, evaluate_answers, evaluate_retrieval
+from scripts import answer_review, eval_gate, evaluate_answers, evaluate_retrieval, evaluate_search
 
 EVALS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "evals")
 ARXIV_ID = re.compile(r"^\d{4}\.\d{4,5}$")
@@ -1627,6 +1628,7 @@ def _gate_main(monkeypatch, tmp_path, env, kind="synthesized"):
     resp = {**ANSWERED, "answer_kind": kind}
     monkeypatch.setattr(evaluate_answers, "make_http_ask", lambda url, t, max_citations=5, quick=False:
                         lambda q: (copy.deepcopy(resp), 10.0))
+    monkeypatch.setattr(evaluate_search, "make_http_search", lambda url, t: lambda q: (True, 7.0))
     code = eval_gate.main(["--results-dir", str(tmp_path)])
     (out,) = [os.path.join(tmp_path, f) for f in os.listdir(tmp_path)]
     with open(out, encoding="utf-8") as f:
@@ -1732,3 +1734,87 @@ def test_llm_block_adds_no_check():
     res["llm"] = {"model": "m", "synthesized_answer_rate": 0.0, "digest": None}
     assert eval_gate.check_thresholds(res, eval_gate.load_thresholds()) == \
         eval_gate.check_thresholds(_results(), eval_gate.load_thresholds())
+
+
+# ---------------------------------------------------------------- /v1/search latency (B-QUAL, report-only)
+def test_search_measure_warmup_excluded_and_keys():
+    calls, times = [], iter([9999.0] + [float(i) for i in range(1, 21)])
+
+    def search(q):
+        calls.append(q)
+        return True, next(times)
+    m = evaluate_search.measure([f"q{i}" for i in range(20)], search)
+    assert calls[:2] == ["q0", "q0"] and len(calls) == 21  # one uncounted warm-up, then one call per query
+    assert m == {"search_p50_ms": 10.0, "search_p95_ms": 19.0, "search_count": 20, "search_error_count": 0}
+    assert set(evaluate_search.SEARCH_KEYS) <= set(eval_gate.REPORT_ONLY_KEYS)
+    failing = evaluate_search.measure(["a", "b"], lambda q: (False, 50.0))
+    assert failing == {"search_p50_ms": None, "search_p95_ms": None, "search_count": 2, "search_error_count": 2}
+
+
+def test_search_line_printed():
+    line = evaluate_search.summary_line({"search_p50_ms": 412.3, "search_p95_ms": 980.0, "search_count": 78,
+                                         "search_error_count": 1}, eval_gate.CPU_PROFILE)
+    assert line == ("/v1/search p50/p95 (ms): 412 / 980 (report-only, ADR-0012 Proposed; target 1500) "
+                    "errors=1/78 profile=cpu-only")
+
+
+def test_search_latency_is_report_only():
+    """AC2: a slow, failing search changes no check and no exit decision; no threshold key exists."""
+    thresholds = eval_gate.load_thresholds()
+    assert not any("search" in k for k in thresholds)
+    for res in (_results(), _results(refusal=0.5)):
+        base = eval_gate.check_thresholds(res, thresholds)
+        res["search"] = {"search_p50_ms": 4000.0, "search_p95_ms": 5000.0, "search_count": 78, "search_error_count": 2}
+        with_search = eval_gate.check_thresholds(res, thresholds)
+        assert with_search == base and all(c["passed"] for c in with_search) == all(c["passed"] for c in base)
+    assert all(c["passed"] for c in eval_gate.check_thresholds(_results(), thresholds))
+    assert not any(k.startswith("search") for k in eval_gate.LATENCY_GATES)
+
+
+@pytest.mark.parametrize("search", ["slow-and-failing", "raises"])
+def test_search_errors_never_exit_2(monkeypatch, tmp_path, capsys, search):
+    """AC2: with every gated check passing, a slow, failing or crashing search still exits 0, like --skip-search."""
+    monkeypatch.setattr(eval_gate, "embedder_device", lambda url: "mps")
+    monkeypatch.setattr(eval_gate, "llm_info", lambda: {"model": None, "host": None, "ollama_version": None,
+                                                        "digest_short": None, "source": "env"})
+    monkeypatch.setattr(eval_gate.er, "run_retrieval_evaluation", lambda **k: _results()["retrieval"])
+    refusal_qs = {c["question"] for c in evaluate_answers.load_cases(os.path.join(eval_gate.EVALS_DIR, "refusal.jsonl"))}
+    monkeypatch.setattr(evaluate_answers, "make_http_ask", lambda url, t, max_citations=5, quick=False: lambda q: (
+        copy.deepcopy(A_REFUSAL if q in refusal_qs else ANSWERED), 10.0))
+
+    def make(url, t):
+        if search == "raises":
+            raise RuntimeError("boom")
+        flaky = iter([True, False] * 100)
+        return lambda q: (next(flaky), 5000.0)
+    monkeypatch.setattr(evaluate_search, "make_http_search", make)
+
+    skipped = eval_gate.main(["--results-dir", str(tmp_path / "skip"), "--skip-search"])
+    assert "/v1/search" not in capsys.readouterr().out
+    code = eval_gate.main(["--results-dir", str(tmp_path / "with")])
+    assert skipped == 0 and code == 0
+    (f,) = list((tmp_path / "with").iterdir())
+    block = json.loads(f.read_text())["search"]
+    assert block["search_count"] == 78
+    assert block["search_error_count"] == (78 if search == "raises" else 39)
+    assert "/v1/search p50/p95 (ms): " in capsys.readouterr().out
+
+
+def test_http_search_counts_a_broken_response_as_one_error(monkeypatch):
+    """One IncompleteRead (http.client.HTTPException) is one error; the other timings are kept."""
+    replies = iter([b'{"hits": []}', http.client.IncompleteRead(b"{"), b'{"hits": []}'])
+
+    class R:
+        def __init__(self, item): self.item = item
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+        def read(self):
+            if isinstance(self.item, Exception):
+                raise self.item
+            return self.item
+    monkeypatch.setattr(evaluate_search.urllib.request, "urlopen", lambda req, timeout=None: R(next(replies)))
+    search = evaluate_search.make_http_search("http://api", 1.0)
+    m = evaluate_search.measure(["a", "b"], search)  # warm-up ok, then "a" broken, "b" ok
+    assert m["search_count"] == 2 and m["search_error_count"] == 1 and m["search_p95_ms"] is not None
+

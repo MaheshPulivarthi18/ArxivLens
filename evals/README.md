@@ -111,6 +111,16 @@ calls (`latency_stage: "quick"`); a failed quick call is an ask error. Every qua
 whose latency is the report-only `ask_full_p50_ms` / `ask_full_p95_ms`. With an LLM configured that is the written
 answer, which on a laptop model takes seconds and is shown when ready.
 
+**`/v1/search` latency is report-only** (B-QUAL; `scripts/evaluate_search.py`). After the answers phase, against the same
+`--api-url`, the gate makes one uncounted warm-up call and then times `POST /v1/search` with `{"query", "limit": 5,
+"rerank": true}` (the production path, ADR-0010) once per `retrieval.jsonl` query. `results["search"]` gets
+`search_p50_ms` / `search_p95_ms` (nearest rank, successful calls only; `null` if none succeeded), `search_count` and
+`search_error_count` (transport error, non-2xx or bad JSON; if measuring itself fails, every call counts). The summary
+prints `/v1/search p50/p95 (ms): a / b (report-only, ADR-0012 Proposed; target 1500) errors=N/M profile=...`. Nothing
+is gated: Product PRD §8's 1.5 s target has no key in `thresholds.json` until ADR-0012 is decided, so no check reads
+these keys and the exit code never depends on them. `--skip-search` (or `--skip-answers`) skips it. When ADR-0012 is
+Accepted, the follow-up is the threshold key, one `_check` in `check_thresholds` and an entry in `LATENCY_GATES`.
+
 ### What the answer eval measures (EVAL-6)
 **ADR-0003 classification** of each `/v1/ask` response (`classify()` in `scripts/evaluate_answers.py`):
 
@@ -199,3 +209,52 @@ Or, for papers already downloaded by the crawler/downloader pipeline: `python3 s
    clearly outside the corpus (cooking, sports, geography, ...), not adjacent ML topics.
 4. Run `python3 -m pytest tests/test_evals_data.py -q` (schema, sizes, corpus membership, unique IDs).
 5. Re-run `make eval` and put before/after numbers in the PR.
+
+## Section-extraction eval (ING-8)
+Measures how often the **production** section detector (`services/processor/worker.py`
+`ProcessorWorker._parse_doc_sections`, Technical PRD §6.1) finds the real headings of a paper. Every chunk is prefixed
+with its section title, so this measures part of chunk quality. It is a measurement only: it has no gate and is not in
+`thresholds.json`. Baseline: [`EXTRACTION_BASELINE.md`](EXTRACTION_BASELINE.md).
+
+| File | Schema | Min size |
+|---|---|---|
+| `extraction.jsonl` | `{"arxiv_id","version","license","layout","expected_headings":[{"title","level"}...]}` | 10 rows, ≥ 3 layouts |
+
+```bash
+pip install pymupdf numpy   # plus what services/processor/worker.py imports (requirements-m0.txt, confluent-kafka)
+python3 scripts/evaluate_extraction.py            # fetches PDFs, writes evals/results/extraction-<ts>.json, prints a table
+python3 scripts/evaluate_extraction.py --offline  # re-score cached PDFs only, no network
+python3 -m pytest -q tests/test_evaluate_extraction.py   # no network, no PDFs
+```
+Exit code 0 means every paper was scored. Exit code 2 means the eval could not run, or some paper failed to fetch or
+parse (see `error` in the output). A failed paper counts with zero predicted headings, so it lowers micro recall
+instead of disappearing from the numbers.
+
+**Licence and PDF rules.**
+- Only papers whose arXiv licence (checked on the abs page) is `CC BY 4.0`, `CC BY-SA 4.0` or `CC0 1.0`. Record it in `license`.
+- Pin `version` (`v1`, `v2`, ...) because headings can change between versions.
+- PDFs are fetched at run time from `https://arxiv.org/pdf/<id><version>`, with at most one request every 3 s and an
+  identifying User-Agent (Technical PRD §9). They are cached in `.cache/extraction/` (git-ignored). The script refuses
+  a cache dir under `evals/`. **Never commit a PDF.**
+
+**Annotating.** Write `expected_headings` by hand from the PDF, in document order, including appendix headings. Use
+level 1 for sections and 2 for subsections. Copy titles as printed. Numbering is optional because it gets normalised
+away. Never generate labels with the detector being measured.
+
+**Scoring rules.**
+1. Normalise a title: strip leading numbering (`^\s*(\d+(\.\d+)*|[IVXLCDM]+|[A-Z])[.)]?\s+`, applied before
+   lower-casing so Roman numerals and appendix letters are recognised), lower-case, collapse whitespace, strip
+   trailing punctuation. `"3.1 Results."` becomes `results`. A side effect is that a title starting with a single-letter
+   word (`"A Study of X"`) loses that word. Both lists are normalised the same way, so matching is unaffected.
+2. `Abstract` is excluded from both lists. The detector puts text before the first heading into an implicit `Abstract`
+   section (PRD §6.1 rule 4).
+3. Walk the predicted headings in order. Match each one greedily to the first unmatched expected heading with an equal
+   normalised title after the last match, so order is preserved and an out-of-order duplicate doesn't match. TP = matched.
+4. **Boundary precision** = TP / predicted (0 if nothing is predicted). **Boundary recall** = TP / expected.
+   F1 = 2PR / (P + R). These are reported per paper and micro-averaged (summed TP, predicted and expected).
+   Level accuracy over the TPs is informational only.
+5. Each paper lists its `false_positives` and `missed` titles, so follow-ups can target them.
+
+"Predicted" means the sections the detector **emits**, which become chunk prefixes, not every line it classifies as a
+heading. The detector drops a section that has no body text, such as a section heading followed directly by its
+first subsection. Such a heading counts as missed.
