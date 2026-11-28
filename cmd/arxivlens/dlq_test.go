@@ -240,8 +240,19 @@ func TestDLQFooterRoundTrip(t *testing.T) {
 }
 
 // cliStore / cliPub: minimal replay dependencies for the CLI wiring (the replay logic is tested in internal/dlq).
-type cliStore struct{ marks []dlq.Resolution }
+type cliStore struct {
+	held      string // non-empty: the lock is held by this holder
+	lockCalls int
+	marks     []dlq.Resolution
+}
 
+func (s *cliStore) TryLock(context.Context, string) (func(), bool, string, error) {
+	s.lockCalls++
+	if s.held != "" {
+		return nil, false, s.held, nil
+	}
+	return func() {}, true, "", nil
+}
 func (s *cliStore) Checkpoints(context.Context, string) (map[int32]int64, error) {
 	return map[int32]int64{}, nil
 }
@@ -268,27 +279,32 @@ func TestDLQReplayCLI(t *testing.T) {
 		}
 	}
 	cases := []struct {
-		name            string
-		args            []string
-		wantOut, notOut []string
-		marks, publish  int
-		reads           []string
+		name               string
+		held               string
+		args               []string
+		wantErr            string
+		wantOut, notOut    []string
+		lockCalls, publish int
+		reads              []string
 	}{
+		{name: "lock held: nothing read or published", held: "pid 7 on 10.0.0.1, since 2026-11-28T00:00:00Z", args: []string{"replay"},
+			wantErr: "another 'dlq replay' holds the lock for papers.downloaded.dlq (pid 7 on 10.0.0.1, since 2026-11-28T00:00:00Z)",
+			notOut:  []string{"replay summary"}, lockCalls: 1},
 		{name: "dry run lists P/O and event_id, takes no lock", args: []string{"replay", "--dry-run", "--error-type", "pdfparseerror"},
 			wantOut: []string{"DRY RUN (no lock taken; may race a concurrent replay)\n", "0/0  would replay -> papers.downloaded  event_id=E1\n",
 				"0/1  would replay -> papers.downloaded  event_id=E2\n", "0/2  unreplayable (would be resolved without publishing)",
 				"replay summary: published=2 unreplayable=1 dry_run=true\n"}, reads: []string{"0:0-3"}},
-		{name: "--limit 1 publishes one", args: []string{"replay", "--limit", "1"}, marks: 1, publish: 1, reads: []string{"0:0-3"},
+		{name: "--limit 1 publishes one", args: []string{"replay", "--limit", "1"}, lockCalls: 1, publish: 1, reads: []string{"0:0-3"},
 			wantOut: []string{"=== DLQ replay: papers.downloaded.dlq (checkpoints at start: 0=0; high watermarks at start: 0=3) ===\n",
 				"0/0  replayed -> papers.downloaded  event_id=E1\n", "replay summary: published=1 unreplayable=0 dry_run=false\n"}, notOut: []string{"0/1", "DRY RUN"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f, st, pub := newFakeDLQ(map[int32]int{0: 3}), &cliStore{}, &cliPub{}
+			f, st, pub := newFakeDLQ(map[int32]int{0: 3}), &cliStore{held: tc.held}, &cliPub{}
 			replayable(f)
 			out, errOut, err := runDLQReplay(f, nil, st, pub, tc.args...)
-			if err != nil {
-				t.Fatalf("err = %v", err)
+			if tc.wantErr == "" && err != nil || tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr) || !errors.Is(err, dlq.ErrLocked)) {
+				t.Fatalf("err = %v, want %q", err, tc.wantErr)
 			}
 			if strings.Contains(errOut, "Error: ") {
 				t.Errorf("stderr has a cobra Error: line: %q", errOut)
@@ -303,8 +319,8 @@ func TestDLQReplayCLI(t *testing.T) {
 					t.Errorf("stdout has %q:\n%s", s, out)
 				}
 			}
-			if len(st.marks) != tc.marks || len(pub.envs) != tc.publish || !reflect.DeepEqual(f.reads, tc.reads) || f.closed != 1 {
-				t.Errorf("MarkResolved %d, Publish %d, reads %v, Close %d; want %d, %d, %v, 1", len(st.marks), len(pub.envs), f.reads, f.closed, tc.marks, tc.publish, tc.reads)
+			if st.lockCalls != tc.lockCalls || len(pub.envs) != tc.publish || !reflect.DeepEqual(f.reads, tc.reads) || f.closed != 1 {
+				t.Errorf("TryLock %d, Publish %d, reads %v, Close %d; want %d, %d, %v, 1", st.lockCalls, len(pub.envs), f.reads, f.closed, tc.lockCalls, tc.publish, tc.reads)
 			}
 		})
 	}

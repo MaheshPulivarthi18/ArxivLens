@@ -4,7 +4,7 @@ name: DB
 # HNSW index; the vector arm of the hybrid query is planned and measured against an exact scan.
 # OPS-H9: pgvector >= 0.8.0 check (hnsw.iterative_scan) and the EVAL-5 real_postgres eval-data test.
 # ING-6c: crawl watermark SQL and the crawl-loop advisory lock (internal/db, -tags integration).
-# B-PIPE: migration 000004 (DLQ replay tables), the replay Store and a resumed replay on real Kafka (internal/dlq).
+# B-PIPE: migration 000004 (DLQ replay tables), the replay Store, its advisory lock and a replay on real Kafka (internal/dlq).
 on:
   pull_request:
   push:
@@ -142,13 +142,13 @@ jobs:
           left="$($PSQL -At -c "SELECT count(*) FROM crawl_watermarks WHERE category LIKE 'it-test.%'")"
           echo "crawl_watermarks rows left by the tests (category LIKE 'it-test.%'): $left"
           [ "$left" = 0 ] || { echo "::error::test rows not cleaned up"; exit 1; }
-      - name: DLQ reader on real Kafka + replay Store and resume on real Postgres (B-PIPE)
+      - name: DLQ reader on real Kafka + replay Store, lock and resume on real Postgres (B-PIPE)
         run: |
           set -o pipefail
           go vet -tags integration ./internal/dlq/
           KAFKA_BROKERS=localhost:9092 go test -tags integration -race -count=1 -v -timeout 10m ./internal/dlq/ | tee /tmp/dlq-it.txt
           if grep -q -- '--- SKIP' /tmp/dlq-it.txt; then echo "::error::DLQ integration tests skipped"; exit 1; fi
-          for t in TestReadStopsAtSnapshot_Integration TestPGStore_Integration TestReplayResumes_Integration; do
+          for t in TestReadStopsAtSnapshot_Integration TestPGStore_Integration TestAdvisoryLock_Integration TestReplayResumes_Integration; do
             grep -q -- "--- PASS: $t " /tmp/dlq-it.txt || { echo "::error::$t did not pass"; exit 1; }
           done
           left="$($PSQL -At -c "SELECT (SELECT count(*) FROM dlq_replay_log WHERE dlq_topic LIKE 'it.dlq.%') + (SELECT count(*) FROM dlq_replay_checkpoints WHERE dlq_topic LIKE 'it.dlq.%')")"

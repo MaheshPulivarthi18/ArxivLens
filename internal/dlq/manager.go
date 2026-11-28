@@ -164,9 +164,12 @@ type Publisher interface {
 	Publish(ctx context.Context, topic string, e events.EventEnvelope) error
 }
 
-// Store keeps replay state in Postgres (design OPS-H7 Q1): a per-partition checkpoint (every offset below it is
+// Store keeps replay state in Postgres (design OPS-H7 Q1, Q4): a per-partition checkpoint (every offset below it is
 // resolved) and one log row per resolved DLQ record. *PGStore in production, a fake in tests.
 type Store interface {
+	// TryLock takes the per-DLQ-topic replay lock. When another session holds it: unlock nil, ok false, and holder
+	// describes that session (best effort, may be "").
+	TryLock(ctx context.Context, dlqTopic string) (unlock func(), ok bool, holder string, err error)
 	Checkpoints(ctx context.Context, dlqTopic string) (map[int32]int64, error)
 	// Resolved: the offsets >= from of partition p that have a log row.
 	Resolved(ctx context.Context, dlqTopic string, p int32, from int64) (map[int64]bool, error)
@@ -191,6 +194,21 @@ type Resolution struct {
 	EventID     string
 	Next        int64 // new checkpoint; 0 = unchanged (a skipped record earlier in the run pins it)
 }
+
+// ErrLocked: another replay of the same DLQ topic holds the lock. Replay's error wraps it (errors.Is).
+var ErrLocked = errors.New("dlq: replay lock held")
+
+type lockedError struct{ topic, holder string }
+
+func (e *lockedError) Error() string {
+	s := "another 'dlq replay' holds the lock for " + e.topic
+	if e.holder != "" {
+		s += " (" + e.holder + ")"
+	}
+	return s + "; wait for it to finish, or see README \"DLQ replay\" for a hung holder"
+}
+
+func (e *lockedError) Is(target error) bool { return target == ErrLocked }
 
 // ReplayOptions: ErrorType filters (case-insensitive); Limit caps published records across partitions (<= 0: no cap).
 type ReplayOptions struct {
@@ -220,12 +238,22 @@ type ReplayResult struct {
 
 // Replay republishes the unresolved records of a DLQ topic, in (partition, offset) order, up to the high watermarks
 // taken at the start (design OPS-H7 Q1-Q7). Per record: Publish, and only after the ack MarkResolved, so the checkpoint
-// never passes an un-acked publish; a crash between the two re-publishes the record (a full envelope keeps its event_id).
-// A record the ErrorType filter skips gets no row and pins its partition's checkpoint, so it stays eligible. A dry run
-// writes nothing. Two concurrent runs of the same DLQ are not yet prevented (lock: B-PIPE-2).
+// never passes an un-acked publish; a crash between the two re-publishes the record with the same event_id. A record
+// the ErrorType filter skips gets no row and pins its partition's checkpoint, so it stays eligible. A real run holds the
+// per-topic lock for its whole length; a dry run takes no lock and writes nothing.
 func (m *Manager) Replay(ctx context.Context, topic string, opt ReplayOptions) (res ReplayResult, err error) {
 	if m.reader == nil || m.store == nil || (m.pub == nil && !opt.DryRun) {
 		return res, errors.New("dlq: Replay needs a Reader, a Store and (unless --dry-run) a Publisher")
+	}
+	if !opt.DryRun {
+		unlock, ok, holder, err := m.store.TryLock(ctx, topic)
+		if err != nil {
+			return res, storeError(err)
+		}
+		if !ok {
+			return res, &lockedError{topic, holder}
+		}
+		defer unlock()
 	}
 	if res.Checkpoints, err = m.store.Checkpoints(ctx, topic); err != nil {
 		return res, storeError(err) // before any Kafka read
@@ -276,7 +304,7 @@ func (m *Manager) replayPartition(ctx context.Context, topic string, p int32, op
 		}
 		// WithoutCancel: a Ctrl-C right after a publish ack still records it, so the next run doesn't re-publish it.
 		if err := m.store.MarkResolved(context.WithoutCancel(ctx), r); err != nil {
-			return fmt.Errorf("dlq: mark %d/%d resolved (a published record is re-published by the next run): %w",
+			return fmt.Errorf("dlq: mark %d/%d resolved (a published record is re-published by the next run, same event_id): %w",
 				r.Partition, r.Offset, storeError(err))
 		}
 		return nil
@@ -297,7 +325,7 @@ func (m *Manager) replayPartition(ctx context.Context, topic string, p int32, op
 				item.Target = strings.TrimSuffix(topic, ".dlq")
 			}
 			var ok bool
-			if env, item.Reason, ok = replayEnvelope(*r.Payload, item.Target); ok {
+			if env, item.Reason, ok = replayEnvelope(*r.Payload, item.Target, source{topic, p, r.Offset, r.Timestamp}); ok {
 				if opt.ErrorType != "" && !strings.EqualFold(r.Payload.ErrorType, opt.ErrorType) {
 					contiguous = false // filtered out: no row, stays eligible, pins the checkpoint (design Q6)
 					return true

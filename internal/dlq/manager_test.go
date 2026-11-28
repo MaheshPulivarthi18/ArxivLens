@@ -258,14 +258,21 @@ type fakePublisher struct {
 	failOn int
 	sent   []string // "P/O=event_id" of each acked publish, from the envelope's payload marker
 	ids    map[string]string
+	acked  func() // called after each successful publish (the broker ack)
 }
 
 func (f *fakePublisher) Publish(_ context.Context, topic string, e events.EventEnvelope) error {
 	f.calls++
+	if f.acked != nil {
+		defer f.acked()
+	}
 	if f.calls == f.failOn {
 		return errors.New("broker down")
 	}
 	po, _ := e.Payload["po"].(string)
+	if po == "" { // a re-enveloped raw payload carries the marker as its value
+		po, _ = e.Payload["raw_po"].(string)
+	}
 	f.sent = append(f.sent, po)
 	if f.ids == nil {
 		f.ids = map[string]string{}
@@ -277,18 +284,34 @@ func (f *fakePublisher) Publish(_ context.Context, topic string, e events.EventE
 	return nil
 }
 
-// fakeStore is an in-memory Store: per-partition checkpoints and a log of resolved offsets.
+// fakeStore is an in-memory Store: per-partition checkpoints, a log of resolved offsets, an optional held lock.
 type fakeStore struct {
 	cps         map[int32]int64
 	log         map[string]Resolution // "P/O"
+	held        bool
+	lockCalls   int
+	unlocks     int
 	marks       int
 	failMarkAt  string // "P/O": MarkResolved for that record fails (once)
 	cpErr       error
 	resolvedErr error
+	lockErr     error
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{cps: map[int32]int64{}, log: map[string]Resolution{}}
+}
+
+func (s *fakeStore) TryLock(context.Context, string) (func(), bool, string, error) {
+	s.lockCalls++
+	if s.lockErr != nil {
+		return nil, false, "", s.lockErr
+	}
+	if s.held {
+		return nil, false, "pid 42 on 10.0.0.9, since 2026-11-28T00:00:00Z", nil
+	}
+	s.held = true
+	return func() { s.held = false; s.unlocks++ }, true, "", nil
 }
 
 func (s *fakeStore) Checkpoints(context.Context, string) (map[int32]int64, error) {
@@ -312,8 +335,11 @@ func (s *fakeStore) Resolved(_ context.Context, _ string, p int32, from int64) (
 	return out, nil
 }
 
-func (s *fakeStore) MarkResolved(_ context.Context, r Resolution) error {
+func (s *fakeStore) MarkResolved(ctx context.Context, r Resolution) error {
 	s.marks++
+	if err := ctx.Err(); err != nil { // like pgx: a cancelled ctx fails the tx
+		return err
+	}
 	if k := fmt.Sprintf("%d/%d", r.Partition, r.Offset); r.Outcome != "" && k == s.failMarkAt {
 		s.failMarkAt = ""
 		return errors.New("connection reset")
@@ -328,7 +354,7 @@ func (s *fakeStore) MarkResolved(_ context.Context, r Resolution) error {
 }
 
 // dlqTopic builds a fake DLQ: spec per partition, one letter per record. A/B: full envelopes with that error_type;
-// U: nil original_value (unreplayable); X: undecodable bytes.
+// R: raw payload (re-enveloped, deterministic ID); U: nil original_value (unreplayable); X: undecodable bytes.
 func dlqTopic(spec map[int32]string) *fakeReader {
 	f := &fakeReader{low: map[int32]int64{}, log: map[int32][]Record{}, failAt: -1}
 	for p, kinds := range spec {
@@ -341,6 +367,8 @@ func dlqTopic(spec map[int32]string) *fakeReader {
 			case 'A', 'B':
 				pl.OriginalValue = map[string]interface{}{"event_id": "ev-" + po, "event_type": "papers.downloaded",
 					"paper_id": pl.OriginalKey, "attempt": float64(3), "payload": map[string]interface{}{"po": po}}
+			case 'R':
+				pl.OriginalValue = map[string]interface{}{"raw_po": po}
 			case 'X':
 				pl = nil
 			}
@@ -353,7 +381,11 @@ func dlqTopic(spec map[int32]string) *fakeReader {
 
 func runReplay(t *testing.T, r *fakeReader, pub *fakePublisher, st *fakeStore, opt ReplayOptions) (ReplayResult, error) {
 	t.Helper()
-	return NewManager(r, pub, st).Replay(context.Background(), "papers.downloaded.dlq", opt)
+	res, err := NewManager(r, pub, st).Replay(context.Background(), "papers.downloaded.dlq", opt)
+	if st.held && !opt.DryRun {
+		t.Errorf("lock still held after Replay returned (err %v)", err)
+	}
+	return res, err
 }
 
 // AC3: two runs of --limit N over 2N records publish 1..N then N+1..2N in (partition, offset) order; a third publishes 0.
@@ -367,15 +399,15 @@ func TestReplayResumes(t *testing.T) {
 			t.Fatalf("run %d: err %v, published %v (count %d), want %v", run+1, err, got, res.Published, w)
 		}
 	}
-	if !reflect.DeepEqual(st.cps, map[int32]int64{0: 4, 1: 2}) || len(st.log) != 6 {
-		t.Errorf("checkpoints %v, %d log rows; want {0:4 1:2} = High, 6", st.cps, len(st.log))
+	if !reflect.DeepEqual(st.cps, map[int32]int64{0: 4, 1: 2}) || len(st.log) != 6 || st.lockCalls != 3 || st.unlocks != 3 {
+		t.Errorf("checkpoints %v, %d log rows, %d locks / %d unlocks; want {0:4 1:2} = High, 6, 3/3", st.cps, len(st.log), st.lockCalls, st.unlocks)
 	}
 }
 
-// AC4: MarkResolved fails right after record k was acked. The checkpoint stays at k, and the next run publishes k
-// again with the identical event_id, then carries on.
+// AC4 + AC9: MarkResolved fails right after record k was acked. The checkpoint stays at k, and the next run publishes k
+// again with the identical event_id (original for an envelope, deterministic ULID for a raw payload), then carries on.
 func TestReplayCrashAfterPublish(t *testing.T) {
-	for _, kind := range []string{"AAAAA"} { // B-PIPE-2 adds a raw-payload row (deterministic ULID)
+	for _, kind := range []string{"AAAAA", "AARAA"} {
 		t.Run(kind, func(t *testing.T) {
 			r, pub, st := dlqTopic(map[int32]string{0: kind}), &fakePublisher{}, newFakeStore()
 			st.failMarkAt = "0/2"
@@ -437,13 +469,13 @@ func TestReplayFilterKeepsSkippedEligible(t *testing.T) {
 	}
 }
 
-// AC6: a dry run publishes and writes nothing, and lists what a real run then publishes, same IDs.
+// AC6: a dry run takes no lock, publishes and writes nothing, and lists what a real run then publishes, same IDs.
 func TestReplayDryRun(t *testing.T) {
-	r, pub, st := dlqTopic(map[int32]string{0: "AUAAX", 1: "BX"}), &fakePublisher{}, newFakeStore()
+	r, pub, st := dlqTopic(map[int32]string{0: "AUARX", 1: "BX"}), &fakePublisher{}, newFakeStore()
 	st.cps[0] = 1
 	dry, err := runReplay(t, r, nil, st, ReplayOptions{DryRun: true})
-	if err != nil || pub.calls != 0 || st.marks != 0 || !reflect.DeepEqual(st.cps, map[int32]int64{0: 1}) {
-		t.Fatalf("dry run: err %v, %d publishes, %d marks, checkpoints %v; want 0, 0, unchanged", err, pub.calls, st.marks, st.cps)
+	if err != nil || pub.calls != 0 || st.marks != 0 || st.lockCalls != 0 || !reflect.DeepEqual(st.cps, map[int32]int64{0: 1}) {
+		t.Fatalf("dry run: err %v, %d publishes, %d marks, %d locks, checkpoints %v; want 0, 0, 0, unchanged", err, pub.calls, st.marks, st.lockCalls, st.cps)
 	}
 	real, err := runReplay(t, r, pub, st, ReplayOptions{})
 	if err != nil || dry.Published != pub.calls || dry.Published != 3 || !reflect.DeepEqual(dry.Items, real.Items) {
@@ -454,6 +486,19 @@ func TestReplayDryRun(t *testing.T) {
 	}
 	if it := dry.Items[1]; it.Offset != 2 || it.EventID != "ev-0/2" {
 		t.Errorf("dry-run item %+v, want 0/2 with event_id ev-0/2", it)
+	}
+}
+
+// AC8: while another session holds the lock, Replay returns ErrLocked before any Kafka read or publish.
+func TestReplayRefusedWhileLocked(t *testing.T) {
+	r, pub, st := dlqTopic(map[int32]string{0: "AA"}), &fakePublisher{}, newFakeStore()
+	st.held = true
+	_, err := NewManager(r, pub, st).Replay(context.Background(), "papers.downloaded.dlq", ReplayOptions{})
+	if !errors.Is(err, ErrLocked) || !strings.HasPrefix(err.Error(), "another 'dlq replay' holds the lock for papers.downloaded.dlq (pid 42 on 10.0.0.9") {
+		t.Fatalf("err = %v, want ErrLocked naming the topic and holder", err)
+	}
+	if len(r.reads) != 0 || r.wmCalls != 0 || pub.calls != 0 || st.marks != 0 {
+		t.Errorf("%d reads, %d Watermarks, %d publishes, %d marks; want all 0", len(r.reads), r.wmCalls, pub.calls, st.marks)
 	}
 }
 
@@ -541,5 +586,51 @@ func TestReplayTargetFallback(t *testing.T) {
 	res, err := runReplay(t, r, pub, st, ReplayOptions{})
 	if err != nil || len(res.Items) != 1 || res.Items[0].Target != "papers.downloaded" || pub.calls != 1 {
 		t.Errorf("err %v, items %+v; want one publish to papers.downloaded", err, res.Items)
+	}
+}
+
+// AC9 at the Manager level: each raw-payload record is published with replayID of its own (topic, partition, offset,
+// Kafka timestamp), so two raw records never share an event_id (which the processor's ledger would dedupe away).
+func TestReplayRawIDsPerRecord(t *testing.T) {
+	r, pub, st := dlqTopic(map[int32]string{0: "RR", 1: "R"}), &fakePublisher{}, newFakeStore()
+	r.log[1][0].Timestamp = r.log[1][0].Timestamp.Add(time.Hour) // partitions differ in time as well as coordinates
+	if _, err := runReplay(t, r, pub, st, ReplayOptions{}); err != nil || !reflect.DeepEqual(pub.sent, []string{"0/0", "0/1", "1/0"}) {
+		t.Fatalf("err %v, sent %v; want 0/0 0/1 1/0", err, pub.sent)
+	}
+	seen := map[string]bool{}
+	for i, po := range pub.sent {
+		var p int32
+		var o int64
+		fmt.Sscanf(po, "%d/%d", &p, &o)
+		got, want := pub.ids[fmt.Sprintf("%s#%d", po, i+1)], replayID(source{"papers.downloaded.dlq", p, o, r.log[p][o].Timestamp})
+		if got != want || seen[got] {
+			t.Errorf("%s published with %q (duplicate %v), want its own replayID %q", po, got, seen[got], want)
+		}
+		seen[got] = true
+	}
+}
+
+// AC8: a TryLock error (Postgres gone) stops the run before any read or publish.
+func TestReplayLockErrorStops(t *testing.T) {
+	r, pub, st := dlqTopic(map[int32]string{0: "AA"}), &fakePublisher{}, newFakeStore()
+	st.lockErr = errors.New("conn reset")
+	_, err := runReplay(t, r, pub, st, ReplayOptions{})
+	if err == nil || !strings.Contains(err.Error(), "conn reset") || errors.Is(err, ErrLocked) || pub.calls != 0 || len(r.reads) != 0 || r.wmCalls != 0 {
+		t.Errorf("err %v, %d publishes, %d reads, %d Watermarks; want the lock error and nothing read or published", err, pub.calls, len(r.reads), r.wmCalls)
+	}
+}
+
+// A SIGINT (ctx cancelled) right after a publish ack still commits that record and the tail checkpoint, so the next
+// run doesn't re-publish it: MarkResolved runs with context.WithoutCancel.
+func TestReplayCommitSurvivesCancel(t *testing.T) {
+	r, st := dlqTopic(map[int32]string{0: "AA"}), newFakeStore()
+	st.log["0/1"] = Resolution{Partition: 0, Offset: 1, Outcome: OutcomeReplayed}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pub := &fakePublisher{acked: cancel}
+	_, err := NewManager(r, pub, st).Replay(ctx, "papers.downloaded.dlq", ReplayOptions{})
+	if err != nil || st.log["0/0"].Outcome != OutcomeReplayed || st.cps[0] != 2 || st.held {
+		t.Errorf("err %v, 0/0 logged %q, checkpoint %d, lock held %v; want 0/0 committed, checkpoint 2 (tail), lock released",
+			err, st.log["0/0"].Outcome, st.cps[0], st.held)
 	}
 }

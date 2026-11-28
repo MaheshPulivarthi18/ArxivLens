@@ -3,17 +3,64 @@ package dlq
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// PGStore is the Postgres Store (migration 000004_dlq_replay; design OPS-H7 Q1).
+// PGStore is the Postgres Store (migration 000004_dlq_replay; design OPS-H7 Q1, Q4).
 type PGStore struct{ pool *pgxpool.Pool }
 
 var _ Store = (*PGStore)(nil)
 
 func NewPGStore(pool *pgxpool.Pool) *PGStore { return &PGStore{pool: pool} }
+
+// lockKeySQL is the per-DLQ-topic advisory lock key: replays of different DLQs run in parallel.
+const lockKeySQL = `hashtextextended('arxivlens.dlq.replay/' || $1, 0)`
+
+// lockHolderSQL finds the session holding the key (a bigint key is split into classid/objid, objsubid 1).
+const lockHolderSQL = `
+	SELECT a.pid, coalesce(host(a.client_addr), 'local socket'), a.backend_start
+	FROM (SELECT ` + lockKeySQL + ` AS k) key, pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+	WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1
+	  AND l.classid = ((key.k >> 32) & 4294967295)::oid AND l.objid = (key.k & 4294967295)::oid
+	LIMIT 1`
+
+// TryLock takes the session advisory lock on a connection taken out of the pool and kept until unlock, so the lock
+// lives as long as the process and is released by Postgres when its session ends (crash, kill). Not acquired: holder
+// names the other session, best effort.
+func (s *PGStore) TryLock(ctx context.Context, dlqTopic string) (unlock func(), ok bool, holder string, err error) {
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return nil, false, "", fmt.Errorf("replay lock: acquire connection: %w", err)
+	}
+	// Bounds how long a network-partitioned holder keeps the lock (design Q4); best effort.
+	_, _ = conn.Exec(ctx, `SET tcp_keepalives_idle = 30`)
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock(`+lockKeySQL+`)`, dlqTopic).Scan(&ok); err != nil || !ok {
+		if err == nil {
+			var pid int
+			var addr string
+			var since time.Time
+			if conn.QueryRow(ctx, lockHolderSQL, dlqTopic).Scan(&pid, &addr, &since) == nil {
+				holder = fmt.Sprintf("pid %d on %s, since %s", pid, addr, since.UTC().Format(time.RFC3339))
+			}
+		}
+		conn.Release()
+		if err != nil {
+			return nil, false, "", fmt.Errorf("replay lock: %w", err)
+		}
+		return nil, false, holder, nil
+	}
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := conn.Exec(ctx, `SELECT pg_advisory_unlock(`+lockKeySQL+`)`, dlqTopic); err != nil {
+			_ = conn.Conn().Close(ctx) // closing the session releases the lock; the pool drops the closed connection
+		}
+		conn.Release()
+	}, true, "", nil
+}
 
 func (s *PGStore) Checkpoints(ctx context.Context, dlqTopic string) (map[int32]int64, error) {
 	rows, err := s.pool.Query(ctx, `SELECT partition, next_offset FROM dlq_replay_checkpoints WHERE dlq_topic = $1`, dlqTopic)
