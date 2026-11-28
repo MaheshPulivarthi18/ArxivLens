@@ -5,6 +5,7 @@ https://github.com/MaheshPulivarthi18/arxivlens-agents/tree/main/docs/adr
 """
 
 import copy
+import http.client
 import json
 import math
 import os
@@ -1772,9 +1773,14 @@ def test_search_latency_is_report_only():
 
 @pytest.mark.parametrize("search", ["slow-and-failing", "raises"])
 def test_search_errors_never_exit_2(monkeypatch, tmp_path, capsys, search):
-    """AC2: main's exit code with a slow, failing or crashing search equals the code with --skip-search."""
-    _gate_main(monkeypatch, tmp_path / "setup", {})  # installs the retrieval/answer/device stubs
-    capsys.readouterr()
+    """AC2: with every gated check passing, a slow, failing or crashing search still exits 0, like --skip-search."""
+    monkeypatch.setattr(eval_gate, "embedder_device", lambda url: "mps")
+    monkeypatch.setattr(eval_gate, "llm_info", lambda: {"model": None, "host": None, "ollama_version": None,
+                                                        "digest_short": None, "source": "env"})
+    monkeypatch.setattr(eval_gate.er, "run_retrieval_evaluation", lambda **k: _results()["retrieval"])
+    refusal_qs = {c["question"] for c in evaluate_answers.load_cases(os.path.join(eval_gate.EVALS_DIR, "refusal.jsonl"))}
+    monkeypatch.setattr(evaluate_answers, "make_http_ask", lambda url, t, max_citations=5, quick=False: lambda q: (
+        copy.deepcopy(A_REFUSAL if q in refusal_qs else ANSWERED), 10.0))
 
     def make(url, t):
         if search == "raises":
@@ -1786,9 +1792,29 @@ def test_search_errors_never_exit_2(monkeypatch, tmp_path, capsys, search):
     skipped = eval_gate.main(["--results-dir", str(tmp_path / "skip"), "--skip-search"])
     assert "/v1/search" not in capsys.readouterr().out
     code = eval_gate.main(["--results-dir", str(tmp_path / "with")])
-    assert code == skipped and code != 2
+    assert skipped == 0 and code == 0
     (f,) = list((tmp_path / "with").iterdir())
     block = json.loads(f.read_text())["search"]
     assert block["search_count"] == 78
     assert block["search_error_count"] == (78 if search == "raises" else 39)
     assert "/v1/search p50/p95 (ms): " in capsys.readouterr().out
+
+
+def test_http_search_counts_a_broken_response_as_one_error(monkeypatch):
+    """One IncompleteRead (http.client.HTTPException) is one error; the other timings are kept."""
+    replies = iter([b'{"hits": []}', http.client.IncompleteRead(b"{"), b'{"hits": []}'])
+
+    class R:
+        def __init__(self, item): self.item = item
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+        def read(self):
+            if isinstance(self.item, Exception):
+                raise self.item
+            return self.item
+    monkeypatch.setattr(evaluate_search.urllib.request, "urlopen", lambda req, timeout=None: R(next(replies)))
+    search = evaluate_search.make_http_search("http://api", 1.0)
+    m = evaluate_search.measure(["a", "b"], search)  # warm-up ok, then "a" broken, "b" ok
+    assert m["search_count"] == 2 and m["search_error_count"] == 1 and m["search_p95_ms"] is not None
+

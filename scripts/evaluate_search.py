@@ -8,6 +8,7 @@ gated: there is no threshold key and no check. Percentiles cover successful call
 Stdlib only.
 """
 
+import http.client
 import json
 import time
 import urllib.error
@@ -22,7 +23,7 @@ SearchFn = Callable[[str], Tuple[bool, float]]
 
 
 def make_http_search(api_url: str, timeout_s: float, limit: int = 5) -> SearchFn:
-    """search(query) -> (ok, ms). A transport error, non-2xx or bad JSON is not ok, at its elapsed time."""
+    """search(query) -> (ok, ms). A transport error, non-2xx, broken response or bad JSON is not ok, at its elapsed time."""
     url = api_url.rstrip("/") + "/v1/search"
 
     def search(query: str) -> Tuple[bool, float]:
@@ -32,7 +33,7 @@ def make_http_search(api_url: str, timeout_s: float, limit: int = 5) -> SearchFn
         try:
             with urllib.request.urlopen(req, timeout=timeout_s) as r:
                 json.loads(r.read().decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+        except (urllib.error.URLError, http.client.HTTPException, TimeoutError, ValueError, OSError):
             return False, (time.perf_counter() - t0) * 1000
         return True, (time.perf_counter() - t0) * 1000
 
