@@ -393,7 +393,7 @@ func withDLQManager(newReader func() (dlqReader, error), deps replayDeps, fn fun
 	}
 	defer r.Close()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel() // SIGINT/SIGTERM cancel ctx: Replay returns and its deferred unlock runs
+	defer cancel() // SIGINT/SIGTERM cancel ctx: Replay stops after the record in flight is marked resolved, then unlocks
 	var pub dlq.Publisher
 	var store dlq.Store
 	if deps != nil {
