@@ -258,10 +258,14 @@ type fakePublisher struct {
 	failOn int
 	sent   []string // "P/O=event_id" of each acked publish, from the envelope's payload marker
 	ids    map[string]string
+	acked  func() // called after each successful publish (the broker ack)
 }
 
 func (f *fakePublisher) Publish(_ context.Context, topic string, e events.EventEnvelope) error {
 	f.calls++
+	if f.acked != nil {
+		defer f.acked()
+	}
 	if f.calls == f.failOn {
 		return errors.New("broker down")
 	}
@@ -291,6 +295,7 @@ type fakeStore struct {
 	failMarkAt  string // "P/O": MarkResolved for that record fails (once)
 	cpErr       error
 	resolvedErr error
+	lockErr     error
 }
 
 func newFakeStore() *fakeStore {
@@ -299,6 +304,9 @@ func newFakeStore() *fakeStore {
 
 func (s *fakeStore) TryLock(context.Context, string) (func(), bool, string, error) {
 	s.lockCalls++
+	if s.lockErr != nil {
+		return nil, false, "", s.lockErr
+	}
 	if s.held {
 		return nil, false, "pid 42 on 10.0.0.9, since 2026-11-28T00:00:00Z", nil
 	}
@@ -327,8 +335,11 @@ func (s *fakeStore) Resolved(_ context.Context, _ string, p int32, from int64) (
 	return out, nil
 }
 
-func (s *fakeStore) MarkResolved(_ context.Context, r Resolution) error {
+func (s *fakeStore) MarkResolved(ctx context.Context, r Resolution) error {
 	s.marks++
+	if err := ctx.Err(); err != nil { // like pgx: a cancelled ctx fails the tx
+		return err
+	}
 	if k := fmt.Sprintf("%d/%d", r.Partition, r.Offset); r.Outcome != "" && k == s.failMarkAt {
 		s.failMarkAt = ""
 		return errors.New("connection reset")
@@ -575,5 +586,51 @@ func TestReplayTargetFallback(t *testing.T) {
 	res, err := runReplay(t, r, pub, st, ReplayOptions{})
 	if err != nil || len(res.Items) != 1 || res.Items[0].Target != "papers.downloaded" || pub.calls != 1 {
 		t.Errorf("err %v, items %+v; want one publish to papers.downloaded", err, res.Items)
+	}
+}
+
+// AC9 at the Manager level: each raw-payload record is published with replayID of its own (topic, partition, offset,
+// Kafka timestamp), so two raw records never share an event_id (which the processor's ledger would dedupe away).
+func TestReplayRawIDsPerRecord(t *testing.T) {
+	r, pub, st := dlqTopic(map[int32]string{0: "RR", 1: "R"}), &fakePublisher{}, newFakeStore()
+	r.log[1][0].Timestamp = r.log[1][0].Timestamp.Add(time.Hour) // partitions differ in time as well as coordinates
+	if _, err := runReplay(t, r, pub, st, ReplayOptions{}); err != nil || !reflect.DeepEqual(pub.sent, []string{"0/0", "0/1", "1/0"}) {
+		t.Fatalf("err %v, sent %v; want 0/0 0/1 1/0", err, pub.sent)
+	}
+	seen := map[string]bool{}
+	for i, po := range pub.sent {
+		var p int32
+		var o int64
+		fmt.Sscanf(po, "%d/%d", &p, &o)
+		got, want := pub.ids[fmt.Sprintf("%s#%d", po, i+1)], replayID(source{"papers.downloaded.dlq", p, o, r.log[p][o].Timestamp})
+		if got != want || seen[got] {
+			t.Errorf("%s published with %q (duplicate %v), want its own replayID %q", po, got, seen[got], want)
+		}
+		seen[got] = true
+	}
+}
+
+// AC8: a TryLock error (Postgres gone) stops the run before any read or publish.
+func TestReplayLockErrorStops(t *testing.T) {
+	r, pub, st := dlqTopic(map[int32]string{0: "AA"}), &fakePublisher{}, newFakeStore()
+	st.lockErr = errors.New("conn reset")
+	_, err := runReplay(t, r, pub, st, ReplayOptions{})
+	if err == nil || !strings.Contains(err.Error(), "conn reset") || errors.Is(err, ErrLocked) || pub.calls != 0 || len(r.reads) != 0 || r.wmCalls != 0 {
+		t.Errorf("err %v, %d publishes, %d reads, %d Watermarks; want the lock error and nothing read or published", err, pub.calls, len(r.reads), r.wmCalls)
+	}
+}
+
+// A SIGINT (ctx cancelled) right after a publish ack still commits that record and the tail checkpoint, so the next
+// run doesn't re-publish it: MarkResolved runs with context.WithoutCancel.
+func TestReplayCommitSurvivesCancel(t *testing.T) {
+	r, st := dlqTopic(map[int32]string{0: "AA"}), newFakeStore()
+	st.log["0/1"] = Resolution{Partition: 0, Offset: 1, Outcome: OutcomeReplayed}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pub := &fakePublisher{acked: cancel}
+	_, err := NewManager(r, pub, st).Replay(ctx, "papers.downloaded.dlq", ReplayOptions{})
+	if err != nil || st.log["0/0"].Outcome != OutcomeReplayed || st.cps[0] != 2 || st.held {
+		t.Errorf("err %v, 0/0 logged %q, checkpoint %d, lock held %v; want 0/0 committed, checkpoint 2 (tail), lock released",
+			err, st.log["0/0"].Outcome, st.cps[0], st.held)
 	}
 }

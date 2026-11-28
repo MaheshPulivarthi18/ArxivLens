@@ -104,6 +104,18 @@ func TestPGStore_Integration(t *testing.T) {
 func TestAdvisoryLock_Integration(t *testing.T) {
 	topic := fmt.Sprintf("it.dlq.lock.%d", time.Now().UnixNano())
 	a, b, ctx := NewPGStore(pgIT(t, topic)), NewPGStore(pgIT(t, topic)), context.Background()
+	for i := 0; i < 2; i++ { // unlock releases: the other session gets the lock at once (and the lock lives on A's own connection)
+		unlock, ok, _, err := a.TryLock(ctx, topic)
+		if err != nil || !ok {
+			t.Fatalf("round %d, A: ok %v, err %v; want the lock", i, ok, err)
+		}
+		unlock()
+		unlockB, ok, holder, err := b.TryLock(ctx, topic)
+		if err != nil || !ok {
+			t.Fatalf("round %d, B right after A unlocked: ok %v, holder %q, err %v; want the lock", i, ok, holder, err)
+		}
+		unlockB()
+	}
 	unlockA, ok, _, err := a.TryLock(ctx, topic)
 	if err != nil || !ok {
 		t.Fatalf("A: ok %v, err %v; want the lock", ok, err)
