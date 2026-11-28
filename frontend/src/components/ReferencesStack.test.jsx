@@ -1,8 +1,9 @@
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { afterEach, describe, it, expect, vi } from 'vitest';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import ReferencesStack from './ReferencesStack';
 import { citationState } from '../lib/citations';
+import { bibEntry } from '../lib/bibtex';
 import {
   supportedCitation,
   unsupportedCitation,
@@ -11,6 +12,8 @@ import {
   refusalB,
   refusalC,
   synthesizedSkips,
+  quotedClaims,
+  quotedAnswer,
 } from '../test/fixtures';
 
 const VERIFIED = /\bVerified\b/;
@@ -23,21 +26,25 @@ function renderStack(citations, onCopy = vi.fn(), refusalReason) {
 const card = (marker) => screen.getByRole('article', { name: new RegExp(`Citation \\[${marker}\\]`) });
 
 describe('ReferencesStack', () => {
-  it('shows title, section and a one-click link to pdf_url for each citation', () => {
+  it('shows title, the exact meta line and a one-click link to pdf_url (at the page when known)', () => {
     renderStack([supportedCitation, unsupportedCitation]);
-    for (const cit of [supportedCitation, unsupportedCitation]) {
+    for (const [cit, meta, href] of [
+      [supportedCitation, 'arXiv:2401.01234v2 · § Methods · p. 4', `${supportedCitation.pdf_url}#page=4`],
+      [unsupportedCitation, 'arXiv:2402.05678v1 · § Results', unsupportedCitation.pdf_url],
+    ]) {
       const c = within(card(cit.marker));
       expect(c.getByText(cit.title)).toBeInTheDocument();
-      expect(c.getByText(new RegExp(`Section: ${cit.section}`))).toBeInTheDocument();
-      expect(c.getByRole('link', { name: /open pdf/i })).toHaveAttribute('href', cit.pdf_url);
+      expect(c.getByText(meta).textContent).toBe(meta);
+      expect(c.getByRole('link', { name: /open pdf/i })).toHaveAttribute('href', href);
     }
+    expect(document.body.textContent).not.toMatch(/Chunk #|General|Section:/);
   });
 
   it('falls back to the arXiv PDF URL when pdf_url is empty', () => {
     renderStack([{ ...supportedCitation, pdf_url: '' }]);
     expect(screen.getByRole('link', { name: /open pdf/i })).toHaveAttribute(
       'href',
-      `https://arxiv.org/pdf/${supportedCitation.arxiv_id}.pdf`,
+      `https://arxiv.org/pdf/${supportedCitation.arxiv_id}.pdf#page=4`,
     );
   });
 
@@ -146,13 +153,15 @@ describe('ReferencesStack', () => {
     }
   });
 
-  it('Copy BibTeX passes an @article{arxiv_... entry to onCopy', async () => {
+  it('Copy BibTeX passes the shared bibEntry (@misc, no invented year or class) to onCopy', async () => {
     const user = userEvent.setup();
     const onCopy = renderStack([supportedCitation]);
     await user.click(screen.getByRole('button', { name: /copy bibtex for \[1\]/i }));
     expect(onCopy).toHaveBeenCalledTimes(1);
     const [bibtex] = onCopy.mock.calls[0];
-    expect(bibtex).toMatch(/^@article\{arxiv_240101234,/);
+    expect(bibtex).toBe(bibEntry(supportedCitation));
+    expect(bibtex).toMatch(/^@misc\{arxiv240101234,/);
+    expect(bibtex).not.toMatch(/2026|primaryClass/);
     expect(bibtex).toContain(`title = {${supportedCitation.title}}`);
     expect(bibtex).toContain(`eprint = {${supportedCitation.arxiv_id}}`);
   });
@@ -205,5 +214,142 @@ describe('ReferencesStack: grouping and active card (FE-4a)', () => {
   it('refusal mode ignores active', () => {
     renderWith(refusalA.citations, { active: { marker: 1, pos: 0 }, refusalReason: refusalA.refusal_reason });
     expect(document.querySelectorAll('[data-active]')).toHaveLength(0);
+  });
+});
+
+// B-UI (design FE-4 §3 + B-UI addendum): quote in passage, provenance, Cited-by rows, Export.
+describe('ReferencesStack: evidence and export (B-UI)', () => {
+  const renderWith = (citations, extra = {}) =>
+    render(<ReferencesStack citations={citations} onCopy={vi.fn()} traceId="t" {...extra} />);
+  const marks = () => [...document.querySelectorAll('mark')].map((m) => m.textContent);
+  const NOT_FOUND = /Quoted text \(not found in the passage shown above\)/;
+  const NO_QUOTE = 'No exact quote for this citation: the check compared the claim with the whole passage.';
+
+  it('AC1: highlights the raw span of a normalised quote, with an sr-only "Quote: "', () => {
+    const cit = quotedClaims.citations[0];
+    renderWith([cit]);
+    expect(marks()).toEqual([`Quote: ${cit.content}`]);
+    expect(document.querySelector('mark .sr-only')).toHaveTextContent('Quote:');
+    expect(screen.queryByText(NOT_FOUND)).toBeNull();
+    expect(screen.queryByText(NO_QUOTE)).toBeNull();
+  });
+
+  it('AC1: a quote that is not located gets the fallback block, no mark', () => {
+    renderWith([{ ...supportedCitation, quote: 'Not in this passage.' }]);
+    expect(marks()).toEqual([]);
+    expect(screen.getByText(NOT_FOUND)).toHaveTextContent('“Not in this passage.”');
+  });
+
+  it('AC1: a supported citation without a quote gets the no-quote note', () => {
+    renderWith([{ ...supportedCitation, quote: undefined }]);
+    expect(marks()).toEqual([]);
+    expect(screen.getByText(NO_QUOTE)).toBeInTheDocument();
+  });
+
+  it.each([
+    ['unsupported', { ...unsupportedCitation, quote: 'Entailment scores' }],
+    ['not checked', { ...unverifiedCitation, quote: 'An introductory passage.' }],
+  ])('AC1: %s with a quote: no highlight and no note', (_n, cit) => {
+    renderWith([cit]);
+    expect(marks()).toEqual([]);
+    expect(screen.queryByText(NOT_FOUND)).toBeNull();
+    expect(screen.queryByText(NO_QUOTE)).toBeNull();
+  });
+
+  it('AC1: a long passage shows an excerpt holding the mark; "Show full passage" toggles aria-expanded', async () => {
+    const user = userEvent.setup();
+    const content = `Opening sentence of the chunk. ${'Filler words for length. '.repeat(30)}We verify each claim at the end.`;
+    renderWith([{ ...supportedCitation, content }]);
+    const excerpt = document.querySelector('[data-excerpt]');
+    expect(excerpt.textContent.startsWith('…')).toBe(true);
+    expect(excerpt.querySelector('mark')).toHaveTextContent('verify each claim');
+    expect(card(1).textContent).not.toContain('Opening sentence');
+    const toggle = screen.getByRole('button', { name: 'Show full passage' });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await user.click(toggle);
+    expect(screen.getByRole('button', { name: 'Show less' })).toHaveAttribute('aria-expanded', 'true');
+    expect(card(1).textContent).toContain(content.slice(0, 60));
+    expect(marks()).toEqual(['Quote: verify each claim']);
+  });
+
+  it.each([
+    [4, '#page=4', 'Open PDF at p. 4 ↗'],
+    [0, '', 'Open PDF ↗'],
+    [null, '', 'Open PDF ↗'],
+    ['4', '', 'Open PDF ↗'],
+    [undefined, '', 'Open PDF ↗'],
+  ])('AC2: page %s → link suffix "%s", text "%s"', (page, suffix, text) => {
+    renderWith([{ ...supportedCitation, page }]);
+    const link = screen.getByRole('link', { name: /open pdf/i });
+    expect(link).toHaveAttribute('href', `${supportedCitation.pdf_url}${suffix}`);
+    expect(link).toHaveTextContent(text);
+    expect(card(1).textContent.includes('p. ')).toBe(suffix !== '');
+  });
+
+  it('AC2: paper_version 0 → "arXiv:<id>" with no "v0"', () => {
+    renderWith([{ ...supportedCitation, paper_version: 0, page: undefined }]);
+    expect(screen.getByText('arXiv:2401.01234 · § Methods')).toBeInTheDocument();
+  });
+
+  it('AC6: an older citation (no status, page, quote, paper_version) renders without new notes', () => {
+    const { marker, arxiv_id, title, chunk_id, section, content, pdf_url, score, supported } = supportedCitation;
+    const legacy = { marker, arxiv_id, title, chunk_id, section, content, pdf_url, score, supported };
+    renderWith([legacy]);
+    expect(screen.getByText('arXiv:2401.01234 · § Methods')).toBeInTheDocument();
+    expect(screen.getByText('Supported · 87.3%')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /open pdf/i })).toHaveAttribute('href', legacy.pdf_url);
+    expect(card(1).textContent).toContain(legacy.content);
+    expect(marks()).toEqual([]);
+    expect(screen.queryByText(NO_QUOTE)).toBeNull();
+  });
+
+  describe('Export', () => {
+    let clicks;
+    afterEach(() => vi.restoreAllMocks());
+    const exportVia = async (key, citations, answerKind) => {
+      URL.createObjectURL = vi.fn(() => 'blob:x');
+      URL.revokeObjectURL = vi.fn();
+      clicks = [];
+      vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function click() {
+        clicks.push(this.download);
+      });
+      const onNotify = vi.fn();
+      const user = userEvent.setup();
+      renderWith(citations, { answerKind, onNotify });
+      const trigger = screen.getByRole('button', { name: 'Export' });
+      for (let i = 0; i < 20 && document.activeElement !== trigger; i += 1) await user.tab();
+      expect(trigger).toHaveFocus();
+      await user.keyboard(key);
+      const item = await screen.findByRole('menuitem', { name: 'BibTeX (.bib)' });
+      await waitFor(() => expect(item).toHaveFocus());
+      await user.keyboard('{Enter}');
+      expect(clicks).toHaveLength(1);
+      expect(clicks[0]).toMatch(/^arxivlens-\d{8}-\d{6}\.bib$/);
+      const blob = URL.createObjectURL.mock.calls[0][0];
+      const text = await new Promise((done) => {
+        const reader = new FileReader();
+        reader.onload = () => done(reader.result);
+        reader.readAsText(blob);
+      });
+      return { text, onNotify };
+    };
+
+    it.each([['{Enter}'], [' ']])('AC5: keyboard %j opens Export, Enter downloads every shown reference', async (key) => {
+      const { text, onNotify } = await exportVia(key, quotedAnswer.citations, 'quoted');
+      expect(text).toContain('@misc{arxiv240101234,');
+      expect(text).toContain('@misc{arxiv240205678,');
+      expect(onNotify).toHaveBeenCalledWith('Exported 2 references (.bib)');
+    });
+
+    it('AC5: a written answer exports only supported citations', async () => {
+      const { text } = await exportVia('{Enter}', [...synthesizedSkips.citations, unsupportedCitation], 'synthesized');
+      expect(text.match(/@misc\{/g)).toHaveLength(2);
+      expect(text).not.toContain('arxiv240205678');
+    });
+
+    it('AC5: refusal mode has no Export trigger', () => {
+      renderWith(refusalA.citations, { refusalReason: refusalA.refusal_reason });
+      expect(screen.queryByRole('button', { name: /export/i })).toBeNull();
+    });
   });
 });

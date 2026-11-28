@@ -13,6 +13,12 @@ function setup(props = {}) {
 }
 
 describe('HeroSearch', () => {
+  it('tagline claims cited passages, not verification (B-UI label honesty)', () => {
+    setup();
+    expect(screen.getByText('Evidence-Grounded Answers with Cited Passages')).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/Sentence-Level Verification/);
+  });
+
   it('submits the trimmed question', async () => {
     const { onSearch, user, input, submit } = setup();
     await user.clear(input);

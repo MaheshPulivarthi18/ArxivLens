@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { citationState, markdownNote, claimState, hasClaims, claimCitations, claimRows, groupByMarker } from './citations';
+import {
+  citationState, markdownNote, claimState, hasClaims, claimCitations, claimRows, groupByMarker,
+  locateQuote, normQuote, pdfHref, arxivLabel, metaLine,
+} from './citations';
 import {
   supportedCitation,
   unsupportedCitation,
@@ -85,6 +88,14 @@ describe('markdownNote', () => {
       '- [2] **Entailment Checks for Citations** (§ Results) - [arXiv:2402.05678](https://arxiv.org/pdf/2402.05678v1) • Unsupported · 12.0%',
     );
     expect(lines[2]).toMatch(/• Not checked$/);
+  });
+
+  it('heading is "# ArxivLens Research Note"; "(§ …)" only for a non-empty section', () => {
+    expect(md.startsWith('# ArxivLens Research Note\n\n')).toBe(true);
+    expect(md).not.toMatch(/Clinical/);
+    const bare = markdownNote('A.', [{ ...supportedCitation, section: '' }]);
+    expect(bare).toContain(`**${supportedCitation.title}** - [arXiv:`);
+    expect(bare).not.toContain('§');
   });
 });
 
@@ -178,5 +189,63 @@ describe('groupByMarker', () => {
   it('no citations → no groups', () => {
     expect(groupByMarker(undefined)).toEqual([]);
     expect(groupByMarker([])).toEqual([]);
+  });
+});
+
+// B-UI AC1 (design FE-4 §1, PM condition 5): normQuote mirror, case-sensitive.
+describe('locateQuote', () => {
+  it.each([
+    ['exact', 'We verify each claim here.', 'verify each claim', 'verify each claim'],
+    ['\\n inside', 'hybrid\nsearch works', 'hybrid search works', 'hybrid\nsearch works'],
+    ['double spaces', 'a  b   c', 'a b c', 'a  b   c'],
+    ['inline [12]', 'shown [12] here.', 'shown here.', 'shown [12] here.'],
+    ['inline [3, 4]', 'shown [3, 4] here', 'shown here', 'shown [3, 4] here'],
+    ['inline [5–7]', 'shown [5–7] here', 'shown here', 'shown [5–7] here'],
+    ['space before .', 'the claim . Next', 'the claim.', 'the claim .'],
+    ['case mismatch', 'The Claim holds', 'the claim holds', null],
+    ['empty quote', 'abc', '', null],
+    ['whitespace quote', 'a \n b', ' \n ', null],
+    ['absent', 'abc', 'xyz', null],
+    // Something before the quote normalises away: the raw start is not the normalised index.
+    ['ref + spaces before', 'As shown [12]  earlier, hybrid\nsearch works well.', 'hybrid search works', 'hybrid\nsearch works'],
+    ['newlines + spaces before', 'Intro.\n\n\nWe  verify  each claim.', 'We verify each claim.', 'We  verify  each claim.'],
+    // strings.Fields collapses Unicode spaces (unicode.IsSpace), e.g. NBSP and U+2009 from PDF text.
+    ['NBSP between words', 'hybrid\u00a0search works', 'hybrid search works', 'hybrid\u00a0search works'],
+    ['U+2009 between words', 'a\u2009b c', 'a b c', 'a\u2009b c'],
+    // RE2 \s is ASCII: NBSP inside [3, 4] keeps the ref in the server's normalised text.
+    ['NBSP [3,\u00a04] keeps the ref', 'shown in [3,\u00a04] that', 'shown in that', null],
+  ])('%s', (_name, content, quote, raw) => {
+    const r = locateQuote(content, quote);
+    if (raw === null) return expect(r).toBeNull();
+    expect(content.slice(r.start, r.end)).toBe(raw);
+    expect(normQuote(raw)).toBe(normQuote(quote));
+  });
+});
+
+it('locateQuote returns exact raw offsets after a normalised prefix', () => {
+  expect(locateQuote('As shown [12]  earlier, hybrid\nsearch works well.', 'hybrid search works')).toEqual({ start: 24, end: 43 });
+  expect(locateQuote('Intro.\n\n\nWe  verify  each claim.', 'We verify each claim.')).toEqual({ start: 9, end: 32 });
+});
+
+// B-UI AC2: provenance line and PDF page.
+describe('pdfHref / arxivLabel / metaLine', () => {
+  const base = { ...supportedCitation, page: undefined };
+  it.each([
+    [4, 'https://arxiv.org/pdf/2401.01234v2#page=4', 'arXiv:2401.01234v2 · § Methods · p. 4'],
+    [0, 'https://arxiv.org/pdf/2401.01234v2', 'arXiv:2401.01234v2 · § Methods'],
+    [null, 'https://arxiv.org/pdf/2401.01234v2', 'arXiv:2401.01234v2 · § Methods'],
+    ['4', 'https://arxiv.org/pdf/2401.01234v2', 'arXiv:2401.01234v2 · § Methods'],
+    [undefined, 'https://arxiv.org/pdf/2401.01234v2', 'arXiv:2401.01234v2 · § Methods'],
+  ])('page %s', (page, href, meta) => {
+    expect(pdfHref({ ...base, page })).toBe(href);
+    expect(metaLine({ ...base, page })).toBe(meta);
+  });
+
+  it('replaces an existing fragment, falls back to the arXiv URL, and drops v0 and an empty section', () => {
+    expect(pdfHref({ ...base, pdf_url: 'https://x.org/a.pdf#view=fit', page: 2 })).toBe('https://x.org/a.pdf#page=2');
+    expect(pdfHref({ ...base, pdf_url: '', page: 3 })).toBe('https://arxiv.org/pdf/2401.01234.pdf#page=3');
+    expect(arxivLabel({ ...base, paper_version: 0 })).toBe('arXiv:2401.01234');
+    expect(arxivLabel({ ...base, paper_version: undefined })).toBe('arXiv:2401.01234');
+    expect(metaLine({ ...base, section: '', paper_version: 0, page: 7 })).toBe('arXiv:2401.01234 · p. 7');
   });
 });

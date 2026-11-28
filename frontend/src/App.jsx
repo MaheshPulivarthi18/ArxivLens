@@ -215,9 +215,12 @@ export default function App() {
                 <div className="lg:col-span-5">
                   <ReferencesStack
                     citations={searchResult.citations}
+                    claims={searchResult.claims}
+                    answerKind={searchResult.answer_kind}
                     active={active}
                     traceId={searchResult.trace_id}
                     onCopy={handleCopy}
+                    onNotify={showToast}
                     refusalReason={searchResult.refusal_reason}
                   />
                 </div>
