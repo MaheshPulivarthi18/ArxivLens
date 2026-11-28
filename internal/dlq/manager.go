@@ -258,7 +258,7 @@ func (m *Manager) replayPartition(ctx context.Context, topic string, p int32, op
 	}
 	if from >= wm.High {
 		if from > cp && !opt.DryRun { // every record left has expired: start the next run at Low
-			err = m.store.MarkResolved(ctx, Resolution{DLQTopic: topic, Partition: p, Next: from})
+			err = m.store.MarkResolved(context.WithoutCancel(ctx), Resolution{DLQTopic: topic, Partition: p, Next: from})
 		}
 		return false, err
 	}
@@ -274,7 +274,8 @@ func (m *Manager) replayPartition(ctx context.Context, topic string, p int32, op
 		if opt.DryRun {
 			return nil
 		}
-		if err := m.store.MarkResolved(ctx, r); err != nil {
+		// WithoutCancel: a Ctrl-C right after a publish ack still records it, so the next run doesn't re-publish it.
+		if err := m.store.MarkResolved(context.WithoutCancel(ctx), r); err != nil {
 			return fmt.Errorf("dlq: mark %d/%d resolved (a published record is re-published by the next run): %w",
 				r.Partition, r.Offset, storeError(err))
 		}
@@ -326,7 +327,7 @@ func (m *Manager) replayPartition(ctx context.Context, topic string, p int32, op
 	}
 	if err == nil && !done && !opt.DryRun && contiguous && next > written {
 		// The partition ended on already-resolved records: move the checkpoint over them.
-		err = m.store.MarkResolved(ctx, Resolution{DLQTopic: topic, Partition: p, Next: next})
+		err = m.store.MarkResolved(context.WithoutCancel(ctx), Resolution{DLQTopic: topic, Partition: p, Next: next})
 	}
 	return done, err
 }

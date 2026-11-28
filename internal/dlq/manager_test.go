@@ -279,11 +279,12 @@ func (f *fakePublisher) Publish(_ context.Context, topic string, e events.EventE
 
 // fakeStore is an in-memory Store: per-partition checkpoints and a log of resolved offsets.
 type fakeStore struct {
-	cps        map[int32]int64
-	log        map[string]Resolution // "P/O"
-	marks      int
-	failMarkAt string // "P/O": MarkResolved for that record fails (once)
-	cpErr      error
+	cps         map[int32]int64
+	log         map[string]Resolution // "P/O"
+	marks       int
+	failMarkAt  string // "P/O": MarkResolved for that record fails (once)
+	cpErr       error
+	resolvedErr error
 }
 
 func newFakeStore() *fakeStore {
@@ -299,6 +300,9 @@ func (s *fakeStore) Checkpoints(context.Context, string) (map[int32]int64, error
 }
 
 func (s *fakeStore) Resolved(_ context.Context, _ string, p int32, from int64) (map[int64]bool, error) {
+	if s.resolvedErr != nil {
+		return nil, s.resolvedErr
+	}
 	out := map[int64]bool{}
 	for _, r := range s.log {
 		if r.Partition == p && r.Offset >= from {
@@ -473,12 +477,69 @@ func TestReplayExpiredAndStall(t *testing.T) {
 	st.cps[0] = 1
 	res, err := runReplay(t, r, pub, st, ReplayOptions{})
 	if err != nil || !reflect.DeepEqual(res.Warnings, []string{"WARNING partition 0: offsets 1..2 expired before replay"}) ||
-		!reflect.DeepEqual(pub.sent, []string{"0/3", "0/4"}) || st.cps[0] != 5 {
-		t.Fatalf("err %v, warnings %v, sent %v, checkpoint %d", err, res.Warnings, pub.sent, st.cps[0])
+		!reflect.DeepEqual(pub.sent, []string{"0/3", "0/4"}) || st.cps[0] != 5 || !reflect.DeepEqual(r.reads, []string{"0:3-5"}) {
+		t.Fatalf("err %v, warnings %v, sent %v, checkpoint %d, reads %v; want the reader to start at Low (0:3-5)", err, res.Warnings, pub.sent, st.cps[0], r.reads)
+	}
+	// Every record expired (checkpoint 1 < Low = High = 3): a real run moves the checkpoint to Low, a dry run writes nothing.
+	for _, dry := range []bool{false, true} {
+		r, st := dlqTopic(map[int32]string{0: ""}), newFakeStore()
+		r.low[0], st.cps[0] = 3, 1
+		res, err := runReplay(t, r, &fakePublisher{}, st, ReplayOptions{DryRun: dry})
+		want, wantMarks := int64(3), 1
+		if dry {
+			want, wantMarks = 1, 0
+		}
+		if err != nil || st.cps[0] != want || st.marks != wantMarks || len(res.Warnings) != 1 || len(r.reads) != 0 {
+			t.Errorf("all expired, dry=%v: err %v, checkpoint %d, %d marks, warnings %v, reads %v; want checkpoint %d, %d marks, 1 warning, no read",
+				dry, err, st.cps[0], st.marks, res.Warnings, r.reads, want, wantMarks)
+		}
 	}
 	r, pub, st = dlqTopic(map[int32]string{0: "AAAA"}), &fakePublisher{}, newFakeStore()
 	r.readErr, r.failAt = fmt.Errorf("read: %w", ErrPartitionStalled), 2
 	if _, err := runReplay(t, r, pub, st, ReplayOptions{}); !errors.Is(err, ErrPartitionStalled) || st.cps[0] != 2 {
 		t.Errorf("stall: err %v, checkpoint %d; want ErrPartitionStalled and checkpoint 2 kept", err, st.cps[0])
+	}
+}
+
+// A Resolved error stops the run before anything is published (otherwise resolved records would be re-published).
+func TestReplayResolvedErrorStops(t *testing.T) {
+	r, pub, st := dlqTopic(map[int32]string{0: "AAA"}), &fakePublisher{}, newFakeStore()
+	st.log["0/1"] = Resolution{Partition: 0, Offset: 1, Outcome: OutcomeReplayed}
+	st.resolvedErr = errors.New("connection reset")
+	if _, err := runReplay(t, r, pub, st, ReplayOptions{}); err == nil || !strings.Contains(err.Error(), "connection reset") || pub.calls != 0 || st.marks != 0 {
+		t.Errorf("err %v, %d publishes, %d marks; want the Resolved error, 0 publishes, 0 marks", err, pub.calls, st.marks)
+	}
+}
+
+// AC6: a dry run whose partition ends on already-logged records moves no checkpoint (a real run does).
+func TestReplayDryRunTailNoWrite(t *testing.T) {
+	for _, dry := range []bool{true, false} {
+		r, st := dlqTopic(map[int32]string{0: "AAA"}), newFakeStore()
+		st.log["0/1"] = Resolution{Partition: 0, Offset: 1, Outcome: OutcomeReplayed}
+		st.log["0/2"] = Resolution{Partition: 0, Offset: 2, Outcome: OutcomeReplayed}
+		st.cps[0] = 1
+		_, err := runReplay(t, r, &fakePublisher{}, st, ReplayOptions{DryRun: dry})
+		if want := map[bool]int64{true: 1, false: 3}[dry]; err != nil || st.cps[0] != want || dry && st.marks != 0 {
+			t.Errorf("dry=%v: err %v, checkpoint %d, %d marks; want checkpoint %d (0 marks in a dry run)", dry, err, st.cps[0], st.marks, want)
+		}
+	}
+}
+
+// --limit counts published records only: unreplayable ones before them don't use it up.
+func TestReplayLimitCountsPublishedOnly(t *testing.T) {
+	r, pub, st := dlqTopic(map[int32]string{0: "UXAA"}), &fakePublisher{}, newFakeStore()
+	res, err := runReplay(t, r, pub, st, ReplayOptions{Limit: 1})
+	if err != nil || res.Published != 1 || !reflect.DeepEqual(pub.sent, []string{"0/2"}) || len(res.Items) != 3 {
+		t.Errorf("err %v, published %d, sent %v, %d items; want 0/2 published after 2 unreplayables", err, res.Published, pub.sent, len(res.Items))
+	}
+}
+
+// A payload without original_topic is replayed to the DLQ name minus ".dlq", never back into the DLQ.
+func TestReplayTargetFallback(t *testing.T) {
+	r, pub, st := dlqTopic(map[int32]string{0: "A"}), &fakePublisher{}, newFakeStore()
+	r.log[0][0].Payload.OriginalTopic = ""
+	res, err := runReplay(t, r, pub, st, ReplayOptions{})
+	if err != nil || len(res.Items) != 1 || res.Items[0].Target != "papers.downloaded" || pub.calls != 1 {
+		t.Errorf("err %v, items %+v; want one publish to papers.downloaded", err, res.Items)
 	}
 }

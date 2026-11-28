@@ -222,8 +222,11 @@ migration `000004`), so it needs `DATABASE_URL` and `arxivlens migrate`; without
   so a crash re-publishes at most that record, with the same `event_id` for a full envelope (the consumers' idempotency absorbs it).
 - **Filters:** with `--error-type X`, records of other types stay unresolved and the next run without the filter picks them up.
 - **Run `--dry-run` first after deploy:** the first run has no checkpoint and replays everything still in retention. A dry run
-  lists each would-be `P/O` and `event_id` under `DRY RUN`, writes nothing and publishes nothing.
-- **Don't run two replays of the same DLQ at once** (a lock that refuses the second run is coming in B-PIPE-2).
+  lists each would-be `P/O` and `event_id` under `DRY RUN`, writes nothing and publishes nothing. (Until B-PIPE-2, a raw payload's
+  would-be `event_id` is not the one a real run publishes: it gets a new random ID each run.)
+- **Don't run two replays of the same DLQ at once** (a lock that refuses the second run is coming in B-PIPE-2). Two overlapping
+  runs skip nothing, but both may publish the same unresolved records: full envelopes keep their `event_id`, so consumers dedupe them;
+  raw payloads (not a full envelope) get a new random `event_id` per run until B-PIPE-2, so only natural keys absorb those duplicates.
 - **Reset a DLQ** (replay everything again): `DELETE FROM dlq_replay_log WHERE dlq_topic = $1; DELETE FROM dlq_replay_checkpoints WHERE dlq_topic = $1;`
 
 ---

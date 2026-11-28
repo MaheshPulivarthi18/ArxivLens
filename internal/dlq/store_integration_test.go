@@ -57,12 +57,19 @@ func pgIT(t *testing.T, topic string) *pgxpool.Pool {
 
 func TestPGStore_Integration(t *testing.T) {
 	topic := fmt.Sprintf("it.dlq.store.%d", time.Now().UnixNano())
+	other := topic + ".other" // another DLQ: its rows must never leak into topic's queries
 	s, ctx := NewPGStore(pgIT(t, topic)), context.Background()
+	pgIT(t, other) // cleanup of other's rows
 	steps := []Resolution{
 		{DLQTopic: topic, Partition: 0, Offset: 0, Outcome: OutcomeReplayed, TargetTopic: "papers.downloaded", EventID: "e0", Next: 1},
 		{DLQTopic: topic, Partition: 0, Offset: 2, Outcome: OutcomeUnreplayable}, // after a filtered record: no checkpoint move
-		{DLQTopic: topic, Partition: 0, Next: 1},                                 // checkpoint-only, never backwards
+		{DLQTopic: topic, Partition: 0, Offset: 2, Outcome: OutcomeUnreplayable}, // the same record again: no error
+		{DLQTopic: topic, Partition: 0, Next: 1},                                 // checkpoint-only
+		{DLQTopic: topic, Partition: 1, Offset: 1, Outcome: OutcomeReplayed, EventID: "e1"},
 		{DLQTopic: topic, Partition: 1, Next: 5},
+		{DLQTopic: topic, Partition: 1, Next: 3}, // never backwards
+		{DLQTopic: other, Partition: 0, Offset: 1, Outcome: OutcomeReplayed, EventID: "x1", Next: 9},
+		{DLQTopic: other, Partition: 7, Offset: 3, Outcome: OutcomeUnreplayable, Next: 4},
 	}
 	for _, r := range steps {
 		if err := s.MarkResolved(ctx, r); err != nil {
@@ -76,9 +83,20 @@ func TestPGStore_Integration(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(cps, map[int32]int64{0: 1, 1: 5}) {
 		t.Fatalf("Checkpoints = %v, %v; want {0:1 1:5} (the failed tx moved nothing)", cps, err)
 	}
-	got, err := s.Resolved(ctx, topic, 0, 1)
-	if err != nil || !reflect.DeepEqual(got, map[int64]bool{2: true}) {
-		t.Errorf("Resolved(p0, from 1) = %v, %v; want {2}", got, err)
+	for _, c := range []struct {
+		p    int32
+		from int64
+		want map[int64]bool
+	}{
+		{0, 0, map[int64]bool{0: true, 2: true}}, // not the other topic's 0/1, not partition 1's offset 1
+		{0, 1, map[int64]bool{2: true}},
+		{0, 2, map[int64]bool{2: true}}, // from equal to a logged offset includes it
+		{0, 3, map[int64]bool{}},
+		{1, 0, map[int64]bool{1: true}},
+	} {
+		if got, err := s.Resolved(ctx, topic, c.p, c.from); err != nil || !reflect.DeepEqual(got, c.want) {
+			t.Errorf("Resolved(p%d, from %d) = %v, %v; want %v", c.p, c.from, got, err, c.want)
+		}
 	}
 }
 
