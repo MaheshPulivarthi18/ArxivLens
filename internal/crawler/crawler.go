@@ -13,7 +13,6 @@ import (
 
 	"arxivlens/internal/arxiv"
 	"arxivlens/internal/db"
-	"arxivlens/internal/kafka"
 	"arxivlens/shared/events"
 )
 
@@ -48,29 +47,27 @@ type Link struct {
 }
 
 type Crawler struct {
-	database  *db.DB
-	producer  *kafka.Producer
-	client    *http.Client
-	rateLimit time.Duration
-	retry     arxiv.Retry // per-page retry on 429/5xx/timeouts (arxiv.DefaultRetry)
+	database paperUpserter
+	producer eventPublisher
+	client   *http.Client
+	lim      *arxiv.Limiter // every request, retries included, waits on it (Technical PRD §9: <= 1 request / 3 s)
+	retry    arxiv.Retry    // per-page retry on 429/5xx/timeouts (arxiv.DefaultRetry)
 }
 
-func NewCrawler(database *db.DB, producer *kafka.Producer, rateLimit time.Duration) *Crawler {
-	if rateLimit == 0 {
-		rateLimit = 3 * time.Second
-	}
+// NewCrawler: a rateLimit below arxiv.DefaultInterval (3 s) is raised to it, so no caller can break arXiv's limit.
+func NewCrawler(database paperUpserter, producer eventPublisher, rateLimit time.Duration) *Crawler {
 	return &Crawler{
-		database:  database,
-		producer:  producer,
-		client:    &http.Client{Timeout: 30 * time.Second},
-		rateLimit: rateLimit,
-		retry:     arxiv.DefaultRetry,
+		database: database,
+		producer: producer,
+		client:   &http.Client{Timeout: 30 * time.Second},
+		lim:      arxiv.NewLimiter(max(rateLimit, arxiv.DefaultInterval)),
+		retry:    arxiv.DefaultRetry,
 	}
 }
 
 // CrawlQueries fetches recent papers matching query and publishes events
 func (c *Crawler) Crawl(ctx context.Context, searchQuery string, limit int) (int, error) {
-	log.Printf("[Crawler] Starting crawl query=%q limit=%d (rate-limit=%v)", searchQuery, limit, c.rateLimit)
+	log.Printf("[Crawler] Starting crawl query=%q limit=%d (rate-limit=%v)", searchQuery, limit, c.lim.Interval())
 
 	baseURL := arxiv.APIURL()
 	pageSize := 20
@@ -102,8 +99,8 @@ func (c *Crawler) Crawl(ctx context.Context, searchQuery string, limit int) (int
 		reqURL := fmt.Sprintf("%s?%s", baseURL, params.Encode())
 		log.Printf("[Crawler] Fetching page start=%d size=%d URL=%s", start, currLimit, reqURL)
 
-		// Retries 429/5xx/timeouts with backoff (honouring Retry-After); a non-200 is never parsed.
-		body, err := arxiv.GetAPI(ctx, c.client, nil, reqURL, arxiv.UserAgent("Research Pipeline"), c.retry)
+		// Retries 429/5xx/timeouts with backoff (honouring Retry-After); every attempt waits on c.lim; a non-200 is never parsed.
+		body, err := arxiv.GetAPI(ctx, c.client, c.lim, reqURL, arxiv.UserAgent("Research Pipeline"), c.retry)
 		if err != nil {
 			return totalDiscovered, fmt.Errorf("arxiv page start=%d: %w", start, err)
 		}
@@ -139,14 +136,6 @@ func (c *Crawler) Crawl(ctx context.Context, searchQuery string, limit int) (int
 
 			totalDiscovered++
 			log.Printf("[Crawler] Discovered & Published: %s (v%d) — %q", arxivID, version, title)
-		}
-
-		// arXiv rate limiting rule: ~1 request every 3 seconds
-		log.Printf("[Crawler] Rate limit sleep (%v)...", c.rateLimit)
-		select {
-		case <-ctx.Done():
-			return totalDiscovered, ctx.Err()
-		case <-time.After(c.rateLimit):
 		}
 	}
 

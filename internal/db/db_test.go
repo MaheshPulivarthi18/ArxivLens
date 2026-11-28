@@ -78,15 +78,16 @@ func TestMigrationFilesMissingDir(t *testing.T) {
 	}
 }
 
-// The repo's own migrations dir must apply 000001 before the HNSW index in 000002.
+// The repo's own migrations dir, in full and in order (000001 before the HNSW index in 000002).
 func TestRepoMigrationsOrder(t *testing.T) {
 	got, err := MigrationFiles(filepath.Join("..", "..", "migrations"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"000001_init_schema.up.sql", "000002_chunk_embeddings_hnsw.up.sql", "000003_paper_chunk_pages.up.sql"}
-	if len(got) < len(want) {
-		t.Fatalf("got %v, want prefix %v", got, want)
+	want := []string{"000001_init_schema.up.sql", "000002_chunk_embeddings_hnsw.up.sql", "000003_paper_chunk_pages.up.sql",
+		"000004_dlq_replay.up.sql", "000005_crawl_watermarks.up.sql"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
 	}
 	for i, n := range want {
 		if filepath.Base(got[i]) != n {

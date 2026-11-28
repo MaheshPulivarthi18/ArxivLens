@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"arxivlens/shared/events"
 	"github.com/twmb/franz-go/pkg/kerr"
@@ -22,6 +23,7 @@ type fakeReader struct {
 	readErr error // returned by Read once failAt records have been delivered (-1: never)
 	failAt  int
 	polls   int
+	wmCalls int
 	reads   []string // "p:from-until"
 }
 
@@ -43,6 +45,7 @@ func (f *fakeReader) add(p int32, n int) {
 }
 
 func (f *fakeReader) Watermarks(_ context.Context, _ string) (map[int32]Watermark, error) {
+	f.wmCalls++
 	if f.wmErr != nil {
 		return nil, f.wmErr
 	}
@@ -149,7 +152,7 @@ func TestListPagesToHighWatermark(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFakeReader(tc.parts)
 			f.late = tc.late
-			m := NewManager(nil, f)
+			m := NewManager(f, nil, nil)
 			opt := tc.opt
 			var pages [][]string
 			var warns []string
@@ -183,7 +186,7 @@ func TestListPagesToHighWatermark(t *testing.T) {
 func TestListPassesSnapshotHighAsUntil(t *testing.T) {
 	f := newFakeReader(map[int32][2]int64{0: {2, 3}, 1: {0, 0}})
 	f.late = map[int32]int{0: 5}
-	if _, err := NewManager(nil, f).List(context.Background(), "t.dlq", ListOptions{}); err != nil {
+	if _, err := NewManager(f, nil, nil).List(context.Background(), "t.dlq", ListOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if want := []string{"0:2-5", "1:0-0"}; !reflect.DeepEqual(f.reads, want) {
@@ -218,7 +221,7 @@ func TestListErrorsAreNotEnd(t *testing.T) {
 			if tc.mutate != nil {
 				tc.mutate(f)
 			}
-			page, err := NewManager(nil, f).List(context.Background(), "t.dlq", tc.opt)
+			page, err := NewManager(f, nil, nil).List(context.Background(), "t.dlq", tc.opt)
 			if err == nil {
 				t.Fatalf("err = nil, want an error (records %v, next %v)", po(page.Records), page.Next)
 			}
@@ -246,5 +249,297 @@ func TestParseCursor(t *testing.T) {
 		if c, err := ParseCursor(s); err == nil || c.IsSet() || !strings.Contains(err.Error(), "want P/O") {
 			t.Errorf("ParseCursor(%q) = %v, %v; want a P/O error", s, c, err)
 		}
+	}
+}
+
+// fakePublisher records every publish; failOn (1-based call number, 0 = never) returns an error instead.
+type fakePublisher struct {
+	calls  int
+	failOn int
+	sent   []string // "P/O=event_id" of each acked publish, from the envelope's payload marker
+	ids    map[string]string
+}
+
+func (f *fakePublisher) Publish(_ context.Context, topic string, e events.EventEnvelope) error {
+	f.calls++
+	if f.calls == f.failOn {
+		return errors.New("broker down")
+	}
+	po, _ := e.Payload["po"].(string)
+	f.sent = append(f.sent, po)
+	if f.ids == nil {
+		f.ids = map[string]string{}
+	}
+	f.ids[po+"#"+fmt.Sprint(len(f.sent))] = e.EventID
+	if topic != "papers.downloaded" || e.EventID == "" || e.Attempt != 0 {
+		return fmt.Errorf("bad publish to %s: %+v", topic, e)
+	}
+	return nil
+}
+
+// fakeStore is an in-memory Store: per-partition checkpoints and a log of resolved offsets.
+type fakeStore struct {
+	cps         map[int32]int64
+	log         map[string]Resolution // "P/O"
+	marks       int
+	failMarkAt  string // "P/O": MarkResolved for that record fails (once)
+	cpErr       error
+	resolvedErr error
+}
+
+func newFakeStore() *fakeStore {
+	return &fakeStore{cps: map[int32]int64{}, log: map[string]Resolution{}}
+}
+
+func (s *fakeStore) Checkpoints(context.Context, string) (map[int32]int64, error) {
+	out := map[int32]int64{}
+	for p, o := range s.cps {
+		out[p] = o
+	}
+	return out, s.cpErr
+}
+
+func (s *fakeStore) Resolved(_ context.Context, _ string, p int32, from int64) (map[int64]bool, error) {
+	if s.resolvedErr != nil {
+		return nil, s.resolvedErr
+	}
+	out := map[int64]bool{}
+	for _, r := range s.log {
+		if r.Partition == p && r.Offset >= from {
+			out[r.Offset] = true
+		}
+	}
+	return out, nil
+}
+
+func (s *fakeStore) MarkResolved(_ context.Context, r Resolution) error {
+	s.marks++
+	if k := fmt.Sprintf("%d/%d", r.Partition, r.Offset); r.Outcome != "" && k == s.failMarkAt {
+		s.failMarkAt = ""
+		return errors.New("connection reset")
+	}
+	if r.Outcome != "" {
+		s.log[fmt.Sprintf("%d/%d", r.Partition, r.Offset)] = r
+	}
+	if r.Next > s.cps[r.Partition] {
+		s.cps[r.Partition] = r.Next
+	}
+	return nil
+}
+
+// dlqTopic builds a fake DLQ: spec per partition, one letter per record. A/B: full envelopes with that error_type;
+// U: nil original_value (unreplayable); X: undecodable bytes.
+func dlqTopic(spec map[int32]string) *fakeReader {
+	f := &fakeReader{low: map[int32]int64{}, log: map[int32][]Record{}, failAt: -1}
+	for p, kinds := range spec {
+		f.log[p] = []Record{}
+		for o, k := range kinds {
+			po := fmt.Sprintf("%d/%d", p, o)
+			r := Record{Partition: p, Offset: int64(o), Timestamp: time.UnixMilli(1764000000000 + int64(o)), Value: []byte("{}")}
+			pl := &events.DLQPayload{OriginalTopic: "papers.downloaded", OriginalKey: "2401.0000" + fmt.Sprint(o), ErrorType: string(k)}
+			switch k {
+			case 'A', 'B':
+				pl.OriginalValue = map[string]interface{}{"event_id": "ev-" + po, "event_type": "papers.downloaded",
+					"paper_id": pl.OriginalKey, "attempt": float64(3), "payload": map[string]interface{}{"po": po}}
+			case 'X':
+				pl = nil
+			}
+			r.Payload = pl
+			f.log[p] = append(f.log[p], r)
+		}
+	}
+	return f
+}
+
+func runReplay(t *testing.T, r *fakeReader, pub *fakePublisher, st *fakeStore, opt ReplayOptions) (ReplayResult, error) {
+	t.Helper()
+	return NewManager(r, pub, st).Replay(context.Background(), "papers.downloaded.dlq", opt)
+}
+
+// AC3: two runs of --limit N over 2N records publish 1..N then N+1..2N in (partition, offset) order; a third publishes 0.
+func TestReplayResumes(t *testing.T) {
+	r, pub, st := dlqTopic(map[int32]string{0: "AAAA", 1: "AA"}), &fakePublisher{}, newFakeStore()
+	want := [][]string{{"0/0", "0/1", "0/2"}, {"0/3", "1/0", "1/1"}, nil}
+	for run, w := range want {
+		before := len(pub.sent)
+		res, err := runReplay(t, r, pub, st, ReplayOptions{Limit: 3})
+		if got := pub.sent[before:]; err != nil || !reflect.DeepEqual(got, w) && !(len(got) == 0 && len(w) == 0) || res.Published != len(w) {
+			t.Fatalf("run %d: err %v, published %v (count %d), want %v", run+1, err, got, res.Published, w)
+		}
+	}
+	if !reflect.DeepEqual(st.cps, map[int32]int64{0: 4, 1: 2}) || len(st.log) != 6 {
+		t.Errorf("checkpoints %v, %d log rows; want {0:4 1:2} = High, 6", st.cps, len(st.log))
+	}
+}
+
+// AC4: MarkResolved fails right after record k was acked. The checkpoint stays at k, and the next run publishes k
+// again with the identical event_id, then carries on.
+func TestReplayCrashAfterPublish(t *testing.T) {
+	for _, kind := range []string{"AAAAA"} { // B-PIPE-2 adds a raw-payload row (deterministic ULID)
+		t.Run(kind, func(t *testing.T) {
+			r, pub, st := dlqTopic(map[int32]string{0: kind}), &fakePublisher{}, newFakeStore()
+			st.failMarkAt = "0/2"
+			if _, err := runReplay(t, r, pub, st, ReplayOptions{}); err == nil || !strings.Contains(err.Error(), "mark 0/2 resolved") {
+				t.Fatalf("run 1 err = %v, want the MarkResolved error for 0/2", err)
+			}
+			if st.cps[0] != 2 || st.log["0/2"].Outcome != "" || !reflect.DeepEqual(pub.sent, []string{"0/0", "0/1", "0/2"}) {
+				t.Fatalf("after run 1: checkpoint %d (want 2), 0/2 logged %v, sent %v", st.cps[0], st.log["0/2"].Outcome != "", pub.sent)
+			}
+			first := pub.ids["0/2#3"]
+			if _, err := runReplay(t, r, pub, st, ReplayOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(pub.sent, []string{"0/0", "0/1", "0/2", "0/2", "0/3", "0/4"}) || pub.ids["0/2#4"] != first || first == "" {
+				t.Errorf("run 2 sent %v, 0/2 ids %q then %q; want 0/2 again with the same id, then 0/3, 0/4", pub.sent, first, pub.ids["0/2#4"])
+			}
+			if st.cps[0] != 5 || st.log["0/2"].EventID != first {
+				t.Errorf("checkpoint %d, logged id %q; want 5 and %q", st.cps[0], st.log["0/2"].EventID, first)
+			}
+		})
+	}
+	// A Publish error stops the run before any row: the checkpoint never passes an un-acked publish.
+	r, pub, st := dlqTopic(map[int32]string{0: "AAA"}), &fakePublisher{failOn: 2}, newFakeStore()
+	if _, err := runReplay(t, r, pub, st, ReplayOptions{}); err == nil || !strings.Contains(err.Error(), "nothing marked resolved") {
+		t.Fatalf("err = %v, want the publish error", err)
+	}
+	if _, ok := st.log["0/1"]; ok || st.cps[0] != 1 || st.marks != 1 {
+		t.Fatalf("after a failed publish of 0/1: log %v, checkpoint %d, %d marks; want no 0/1 row, checkpoint 1, 1 mark", st.log, st.cps[0], st.marks)
+	}
+}
+
+// AC5: --error-type A publishes only As and pins each checkpoint at its first B; a run without the filter publishes
+// only the Bs. Unreplayable records are resolved under any filter. Every record is published exactly once overall.
+func TestReplayFilterKeepsSkippedEligible(t *testing.T) {
+	r, pub, st := dlqTopic(map[int32]string{0: "ABAUBAX", 1: "BA"}), &fakePublisher{}, newFakeStore()
+	if _, err := runReplay(t, r, pub, st, ReplayOptions{ErrorType: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(pub.sent, []string{"0/0", "0/2", "0/5", "1/1"}) || !reflect.DeepEqual(st.cps, map[int32]int64{0: 1}) {
+		t.Fatalf("filtered run: sent %v, checkpoints %v; want the As, checkpoint 0=1 (first B) and none for 1", pub.sent, st.cps)
+	}
+	if st.log["0/3"].Outcome != OutcomeUnreplayable || st.log["0/6"].Outcome != OutcomeUnreplayable {
+		t.Fatalf("unreplayable 0/3 (nil value) and 0/6 (undecodable) not resolved under the filter: %v", st.log)
+	}
+	if _, err := runReplay(t, r, pub, st, ReplayOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(pub.sent[4:], []string{"0/1", "0/4", "1/0"}) || !reflect.DeepEqual(st.cps, map[int32]int64{0: 7, 1: 2}) {
+		t.Errorf("unfiltered run: sent %v, checkpoints %v; want only the Bs, then checkpoints at High {0:7 1:2}", pub.sent[4:], st.cps)
+	}
+	seen := map[string]int{}
+	for _, po := range pub.sent {
+		if seen[po]++; seen[po] > 1 {
+			t.Errorf("%s published twice", po)
+		}
+	}
+	if len(seen) != 7 {
+		t.Errorf("%d records published, want 7 (every A and B)", len(seen))
+	}
+}
+
+// AC6: a dry run publishes and writes nothing, and lists what a real run then publishes, same IDs.
+func TestReplayDryRun(t *testing.T) {
+	r, pub, st := dlqTopic(map[int32]string{0: "AUAAX", 1: "BX"}), &fakePublisher{}, newFakeStore()
+	st.cps[0] = 1
+	dry, err := runReplay(t, r, nil, st, ReplayOptions{DryRun: true})
+	if err != nil || pub.calls != 0 || st.marks != 0 || !reflect.DeepEqual(st.cps, map[int32]int64{0: 1}) {
+		t.Fatalf("dry run: err %v, %d publishes, %d marks, checkpoints %v; want 0, 0, unchanged", err, pub.calls, st.marks, st.cps)
+	}
+	real, err := runReplay(t, r, pub, st, ReplayOptions{})
+	if err != nil || dry.Published != pub.calls || dry.Published != 3 || !reflect.DeepEqual(dry.Items, real.Items) {
+		t.Errorf("dry %d items %+v\nreal %d publishes, items %+v", dry.Published, dry.Items, pub.calls, real.Items)
+	}
+	if it := dry.Items[0]; it.Partition != 0 || it.Offset != 1 || it.Outcome != OutcomeUnreplayable {
+		t.Errorf("first dry-run item %+v, want 0/1 unreplayable (0/0 is below the checkpoint)", it)
+	}
+	if it := dry.Items[1]; it.Offset != 2 || it.EventID != "ev-0/2" {
+		t.Errorf("dry-run item %+v, want 0/2 with event_id ev-0/2", it)
+	}
+}
+
+// AC7: Postgres down or not migrated stops Replay, real or dry, before any Kafka read or publish.
+func TestReplayNeedsMigratedStore(t *testing.T) {
+	pub := &fakePublisher{}
+	for _, dry := range []bool{false, true} {
+		r, st := dlqTopic(map[int32]string{0: "AA"}), newFakeStore()
+		st.cpErr = errors.New(`relation "dlq_replay_checkpoints" does not exist`)
+		_, err := NewManager(r, pub, st).Replay(context.Background(), "t.dlq", ReplayOptions{DryRun: dry})
+		if err == nil || !strings.Contains(err.Error(), "run 'arxivlens migrate'") || r.wmCalls != 0 || len(r.reads) != 0 || pub.calls != 0 {
+			t.Errorf("dry=%v not migrated: err %v, %d Watermarks, %d reads, %d publishes; want a migrate hint before any Kafka read", dry, err, r.wmCalls, len(r.reads), pub.calls)
+		}
+	}
+}
+
+// Expired offsets warn and move the checkpoint to Low; a stall keeps every checkpoint already written and is an error.
+func TestReplayExpiredAndStall(t *testing.T) {
+	r, pub, st := dlqTopic(map[int32]string{0: "AAAAA"}), &fakePublisher{}, newFakeStore()
+	r.low[0], r.log[0] = 3, r.log[0][3:]
+	st.cps[0] = 1
+	res, err := runReplay(t, r, pub, st, ReplayOptions{})
+	if err != nil || !reflect.DeepEqual(res.Warnings, []string{"WARNING partition 0: offsets 1..2 expired before replay"}) ||
+		!reflect.DeepEqual(pub.sent, []string{"0/3", "0/4"}) || st.cps[0] != 5 || !reflect.DeepEqual(r.reads, []string{"0:3-5"}) {
+		t.Fatalf("err %v, warnings %v, sent %v, checkpoint %d, reads %v; want the reader to start at Low (0:3-5)", err, res.Warnings, pub.sent, st.cps[0], r.reads)
+	}
+	// Every record expired (checkpoint 1 < Low = High = 3): a real run moves the checkpoint to Low, a dry run writes nothing.
+	for _, dry := range []bool{false, true} {
+		r, st := dlqTopic(map[int32]string{0: ""}), newFakeStore()
+		r.low[0], st.cps[0] = 3, 1
+		res, err := runReplay(t, r, &fakePublisher{}, st, ReplayOptions{DryRun: dry})
+		want, wantMarks := int64(3), 1
+		if dry {
+			want, wantMarks = 1, 0
+		}
+		if err != nil || st.cps[0] != want || st.marks != wantMarks || len(res.Warnings) != 1 || len(r.reads) != 0 {
+			t.Errorf("all expired, dry=%v: err %v, checkpoint %d, %d marks, warnings %v, reads %v; want checkpoint %d, %d marks, 1 warning, no read",
+				dry, err, st.cps[0], st.marks, res.Warnings, r.reads, want, wantMarks)
+		}
+	}
+	r, pub, st = dlqTopic(map[int32]string{0: "AAAA"}), &fakePublisher{}, newFakeStore()
+	r.readErr, r.failAt = fmt.Errorf("read: %w", ErrPartitionStalled), 2
+	if _, err := runReplay(t, r, pub, st, ReplayOptions{}); !errors.Is(err, ErrPartitionStalled) || st.cps[0] != 2 {
+		t.Errorf("stall: err %v, checkpoint %d; want ErrPartitionStalled and checkpoint 2 kept", err, st.cps[0])
+	}
+}
+
+// A Resolved error stops the run before anything is published (otherwise resolved records would be re-published).
+func TestReplayResolvedErrorStops(t *testing.T) {
+	r, pub, st := dlqTopic(map[int32]string{0: "AAA"}), &fakePublisher{}, newFakeStore()
+	st.log["0/1"] = Resolution{Partition: 0, Offset: 1, Outcome: OutcomeReplayed}
+	st.resolvedErr = errors.New("connection reset")
+	if _, err := runReplay(t, r, pub, st, ReplayOptions{}); err == nil || !strings.Contains(err.Error(), "connection reset") || pub.calls != 0 || st.marks != 0 {
+		t.Errorf("err %v, %d publishes, %d marks; want the Resolved error, 0 publishes, 0 marks", err, pub.calls, st.marks)
+	}
+}
+
+// AC6: a dry run whose partition ends on already-logged records moves no checkpoint (a real run does).
+func TestReplayDryRunTailNoWrite(t *testing.T) {
+	for _, dry := range []bool{true, false} {
+		r, st := dlqTopic(map[int32]string{0: "AAA"}), newFakeStore()
+		st.log["0/1"] = Resolution{Partition: 0, Offset: 1, Outcome: OutcomeReplayed}
+		st.log["0/2"] = Resolution{Partition: 0, Offset: 2, Outcome: OutcomeReplayed}
+		st.cps[0] = 1
+		_, err := runReplay(t, r, &fakePublisher{}, st, ReplayOptions{DryRun: dry})
+		if want := map[bool]int64{true: 1, false: 3}[dry]; err != nil || st.cps[0] != want || dry && st.marks != 0 {
+			t.Errorf("dry=%v: err %v, checkpoint %d, %d marks; want checkpoint %d (0 marks in a dry run)", dry, err, st.cps[0], st.marks, want)
+		}
+	}
+}
+
+// --limit counts published records only: unreplayable ones before them don't use it up.
+func TestReplayLimitCountsPublishedOnly(t *testing.T) {
+	r, pub, st := dlqTopic(map[int32]string{0: "UXAA"}), &fakePublisher{}, newFakeStore()
+	res, err := runReplay(t, r, pub, st, ReplayOptions{Limit: 1})
+	if err != nil || res.Published != 1 || !reflect.DeepEqual(pub.sent, []string{"0/2"}) || len(res.Items) != 3 {
+		t.Errorf("err %v, published %d, sent %v, %d items; want 0/2 published after 2 unreplayables", err, res.Published, pub.sent, len(res.Items))
+	}
+}
+
+// A payload without original_topic is replayed to the DLQ name minus ".dlq", never back into the DLQ.
+func TestReplayTargetFallback(t *testing.T) {
+	r, pub, st := dlqTopic(map[int32]string{0: "A"}), &fakePublisher{}, newFakeStore()
+	r.log[0][0].Payload.OriginalTopic = ""
+	res, err := runReplay(t, r, pub, st, ReplayOptions{})
+	if err != nil || len(res.Items) != 1 || res.Items[0].Target != "papers.downloaded" || pub.calls != 1 {
+		t.Errorf("err %v, items %+v; want one publish to papers.downloaded", err, res.Items)
 	}
 }

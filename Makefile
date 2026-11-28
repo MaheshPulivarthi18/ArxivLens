@@ -47,7 +47,9 @@ test-unit: test-go test-py ## Fast tests, no infra (Go + test-py). Frontend test
 test-go: ## Go unit tests
 	go test ./...
 
-PY_LIGHT_TESTS := tests/test_evals_data.py tests/test_worker_heartbeat.py tests/test_arxiv_replay.py tests/test_rerank_precision.py
+# $(wildcard): B-QUAL's scorer tests run here once that file exists, whichever bundle merges first.
+PY_LIGHT_TESTS := tests/test_evals_data.py tests/test_worker_heartbeat.py tests/test_arxiv_replay.py tests/test_rerank_precision.py \
+                  $(wildcard tests/test_evaluate_extraction.py)
 PY_ML_TESTS    := tests/test_m0.py tests/test_verify.py tests/test_processor_pages.py
 
 test-py: test-py-light test-py-ml ## Python unit tests: test-py-light + test-py-ml

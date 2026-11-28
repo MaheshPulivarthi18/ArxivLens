@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"arxivlens/internal/config"
 	"arxivlens/internal/crawler"
 )
 
@@ -55,5 +56,32 @@ func TestCrawlLoopFlags(t *testing.T) {
 		if f := cmd.Flags().Lookup(flag); f == nil || f.DefValue != want {
 			t.Errorf("--%s default: %+v, want %q", flag, f, want)
 		}
+	}
+}
+
+// AC12 (ING-9b): a --rate-limit below arXiv's 3 s fails before any connection (cfg is nil here: a connect would panic).
+func TestCrawlRateLimitFlag(t *testing.T) {
+	for _, rl := range []string{"1s", "2.999s", "0s"} {
+		cmd := newCrawlCmd()
+		cmd.SetArgs([]string{"--rate-limit", rl})
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "--rate-limit "+rl+": must be at least 3s") {
+			t.Errorf("--rate-limit %s: err %v, want the 3s minimum", rl, err)
+		}
+	}
+	if f := newCrawlCmd().Flags().Lookup("rate-limit"); f.DefValue != "3s" {
+		t.Errorf("--rate-limit default %s, want 3s", f.DefValue)
+	}
+	// Exactly 3s passes the check and fails only later, at the (unreachable) Postgres connection.
+	saved := cfg
+	t.Cleanup(func() { cfg = saved })
+	cfg = &config.Config{PostgresURL: "postgres://u:p@127.0.0.1:1/x?sslmode=disable&connect_timeout=2", KafkaBrokers: []string{"127.0.0.1:1"}}
+	cmd := newCrawlCmd()
+	cmd.SetArgs([]string{"--rate-limit", "3s"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := cmd.Execute(); err == nil || strings.Contains(err.Error(), "must be at least") {
+		t.Errorf("--rate-limit 3s: err %v, want it accepted (a connection error, not the minimum)", err)
 	}
 }
